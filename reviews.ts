@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { STATUS_CODES } from "node:http";
 import { createRequire } from "node:module";
 
 // agent-reviews has no public library entry point. Keep its pinned internal imports here.
@@ -53,6 +54,24 @@ export function parseReviewTarget(value: string): ReviewTarget {
   return { owner: match[1]!, repo: match[2]!, pr: Number(match[3]), url: `${url.origin}${url.pathname.replace(/\/$/, "")}` };
 }
 
+function failureDetails(error: unknown): string {
+  const details: string[] = [];
+  const pending = [error];
+  const seen = new Set<unknown>();
+  while (pending.length && seen.size < 10) {
+    const failure = pending.shift();
+    if (seen.has(failure)) continue;
+    seen.add(failure);
+    if (failure instanceof Error) {
+      const code = (failure as NodeJS.ErrnoException).code;
+      details.push(`${failure.message}${code ? ` (${code})` : ""}`);
+      if (failure.cause !== undefined) pending.push(failure.cause);
+      if (failure instanceof AggregateError) pending.push(...failure.errors);
+    } else details.push(String(failure));
+  }
+  return details.filter(Boolean).join(": ");
+}
+
 function github() {
   const token = getGitHubToken();
   if (!token) throw new Error("GitHub authentication required. Run gh auth login or set GITHUB_TOKEN/GH_TOKEN.");
@@ -60,21 +79,51 @@ function github() {
   const graphql = process.env.GITHUB_GRAPHQL_URL?.trim().replace(/\/+$/, "")
     || (base.endsWith("/api/v3") ? base.replace(/\/api\/v3$/, "/api/graphql") : `${base}/graphql`);
   const proxyFetch = getProxyFetch();
+  // Error bodies and transport messages are untrusted and may echo request credentials.
+  const diagnostic = (value: string) => value.replaceAll(token, "[REDACTED]")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 2_000);
+  const checkedFetch: typeof fetch = async (input, options = {}) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    url.username = "";
+    url.password = "";
+    const method = options.method ?? (input instanceof Request ? input.method : "GET");
+    const endpoint = `${method} ${diagnostic(url.href)}`;
+    let response: Response;
+    try {
+      response = await proxyFetch(input, { ...options, signal: AbortSignal.timeout(30_000) });
+    } catch (error) {
+      throw new Error(`GitHub request failed: ${endpoint}\n${diagnostic(failureDetails(error))}`, { cause: error });
+    }
+    if (!response.ok) {
+      const details = [`GitHub request failed (${response.status}): ${endpoint}`,
+        diagnostic(response.statusText || STATUS_CODES[response.status] || "")];
+      try {
+        const body = diagnostic(await response.text());
+        if (body) details.push(`Response: ${body}`);
+      } catch (error) {
+        details.push(`Response body unavailable: ${diagnostic(failureDetails(error))}`);
+      }
+      for (const name of ["x-github-request-id", "retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"]) {
+        const value = response.headers.get(name);
+        if (value !== null) details.push(`${name}: ${diagnostic(value)}`);
+      }
+      throw new Error(details.filter(Boolean).join("\n"));
+    }
+    return response;
+  };
   // Paginated REST links must not send the token to another origin.
   const fetcher: typeof fetch = (input, options = {}) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (new URL(url).origin !== new URL(base).origin) throw new Error("Unexpected GitHub REST origin");
-    return proxyFetch(input, { ...options, signal: AbortSignal.timeout(30_000) });
+    return checkedFetch(input, options);
   };
   async function request<T>(url: string, body?: object, method: "GET" | "POST" | "PATCH" = body ? "POST" : "GET"): Promise<T> {
-    const response = await proxyFetch(url, {
+    const response = await checkedFetch(url, {
       method,
       headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "pi-durable-auditor",
         ...(body ? { "Content-Type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(30_000),
     });
-    if (!response.ok) throw new Error(`GitHub request failed (${response.status}): ${new URL(url).pathname}`);
     return response.json() as Promise<T>;
   }
   async function pages<T>(path: string): Promise<T[]> {
@@ -87,7 +136,6 @@ function github() {
       const response: Response = await fetcher(url, { headers: {
         Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "pi-durable-auditor",
       } });
-      if (!response.ok) throw new Error(`GitHub pagination failed (${response.status})`);
       values.push(...await response.json() as T[]);
       url = response.headers.get("link")?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
     }

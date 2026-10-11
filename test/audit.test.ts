@@ -191,6 +191,65 @@ test("chat /audit uses isolated evidence and then continues the original coding 
   assert.equal(turn, 5);
 });
 
+for (const { name, path, method, status, body, headers, details, omitted } of [
+  {
+    name: "PR metadata", path: "/github/repos/acme/demo/pulls/7", method: "GET", status: 403,
+    body: JSON.stringify({ message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest" }),
+    headers: { "X-GitHub-Request-Id": "ABCD:1234", "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1790000000" },
+    details: ["Forbidden", "Resource not accessible by integration", "https://docs.github.com/rest",
+      "x-github-request-id: ABCD:1234", "x-ratelimit-remaining: 0", "x-ratelimit-reset: 1790000000"],
+    omitted: [],
+  },
+  {
+    name: "changed-file pagination", path: "/github/repos/acme/demo/pulls/7/files?page=2", method: "GET", status: 429,
+    body: JSON.stringify({ message: "API rate limit exceeded" }), headers: { "Retry-After": "60" },
+    details: ["API rate limit exceeded", "retry-after: 60"], omitted: [],
+  },
+  {
+    name: "review-comment pagination", path: "/github/repos/acme/demo/pulls/7/comments?page=2", method: "GET", status: 404,
+    body: JSON.stringify({ message: "Not Found" }), headers: {}, details: ["Not Found"], omitted: [],
+  },
+  {
+    name: "GraphQL with a non-JSON response", path: "/github/graphql", method: "POST", status: 502,
+    body: `Bad gateway\nAuthorization: Bearer github-key\u001b\n${"x".repeat(3000)} END-OF-BODY`, headers: {},
+    details: ["Bad gateway", "Authorization: Bearer [REDACTED]"], omitted: ["END-OF-BODY"],
+  },
+  {
+    name: "an empty error response", path: "/github/repos/acme/demo/pulls/7", method: "GET", status: 503,
+    body: "", headers: {}, details: ["Service Unavailable"], omitted: [],
+  },
+  {
+    name: "a disconnected GitHub endpoint", path: "/github/repos/acme/demo/pulls/7", method: "GET", status: undefined,
+    body: "", headers: {}, details: ["fetch failed", "UND_ERR_SOCKET"], omitted: [],
+  },
+]) {
+  test(`audit explains fetch failures for ${name} without contacting the model`, { timeout: 20000 }, async (t) => {
+    const github = githubEvidence();
+    let failures = 0;
+    const f = await fixture(t, () => assert.fail("Failed evidence fetching must not contact the model"), {
+      entrypoint: resolve("audit.ts"),
+      github: (request, response) => {
+        if (request.url !== path) return github.handle(request, response);
+        failures++;
+        if (status === undefined) request.socket.destroy();
+        else response.writeHead(status, headers).end(body);
+      },
+    });
+    const { child, done } = f.start([prUrl]);
+    child.stdin.end();
+    const result = await done;
+    assert.equal(result.code, 1);
+    assert.equal(failures, 1, "failed fetches must not be retried");
+    if (status !== undefined) assert.ok(result.stderr.includes(`GitHub request failed (${status})`), result.stderr);
+    assert.match(result.stderr, new RegExp(`${method} http://127\\.0\\.0\\.1:\\d+/github/`));
+    assert.ok(result.stderr.includes(path), result.stderr);
+    for (const detail of details) assert.ok(result.stderr.includes(detail), result.stderr);
+    for (const detail of omitted) assert.ok(!result.stderr.includes(detail), "response diagnostics must be bounded");
+    assert.doesNotMatch(result.stderr, /github-key|\u001b/, "diagnostics must not expose credentials or terminal escapes");
+    assert.doesNotMatch(result.stdout, /PR title:|Verdict:/);
+  });
+}
+
 for (const failure of ["moved", "incompleteFiles"] as const) {
   test(`audit refuses ${failure} evidence before contacting the model`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence({ [failure]: true });
