@@ -47,13 +47,13 @@ A single positional argument is always a PR target, so branch names such as `fea
 
 The controller fetches evidence before asking the model to assess it:
 
-- all inline comments and replies, general PR comments, and non-empty human and bot review summaries
+- PR title and description, all inline comments and replies, general PR comments, and non-empty human and bot review summaries
 - actual inline-thread resolution and outdated state through paginated GitHub GraphQL queries
 - changed files and available patches, plus the head and base commit SHAs
 
 Answered and resolved findings remain in scope. Boilerplate is included for the agent to classify rather than discarded by a filter. The audit stops if the changed-file list is incomplete or the head or base SHA changes during fetching. Comments can still change during the fetch window; the report records that window and is not a live-state guarantee.
 
-The model can read remote text files at those pinned commits, including the fork head. It cannot execute shell commands, access local files, edit code, post comments, or resolve threads. Unsupported or inaccessible evidence should produce an `uncertain` assessment, not a guessed fix.
+The model can read remote text files at those pinned commits, including the fork head. It cannot execute shell commands, access local files, edit code, post comments, or resolve threads. It does not fetch check results, workflow runs or logs. Inaccessible code needed to verify a fix leads to `uncertain`, not a guessed fix. Specific reports of external testing can count as reported evidence under the policy below.
 
 The terminal report lists each comment and its findings as `addressed`, `outstanding`, `uncertain`, or `not-actionable`, with explanations and evidence links. GitHub thread resolution is reported separately. A resolved thread or a reply claiming a fix is not proof that the code addresses the finding. The host checks comment coverage and evidence references before printing a verdict. Assessment of the findings remains the model's judgement.
 
@@ -61,13 +61,25 @@ The audit checks whether existing review findings have been addressed. It is not
 
 ### What addressed means
 
-`addressed` can mean a code fix or an adequate, evidence-supported explanation. A reasonable scope or trade-off decision can address a finding without implementing the requested change.
+`addressed` can mean a code fix, an adequate explanation or specific reported testing. A reasonable scope or trade-off decision can address a finding without implementing the requested change.
 
 A supported scope decision explains the PR's current purpose or audience, its remaining behaviour and relevant mitigations, and why the trade-off is reasonable. The auditor checks factual claims against the pinned code and discussion. Follow-up work can be explicitly deferred, but the current rationale must stand on its own. A future fix is not a current fix.
 
 For example, a setup PR for first-time users can explain that re-runs overwrite active configuration, preserve backups, and leave smart merging to follow-up work. If the code supports those claims and the scope rationale adequately addresses the concern, the finding can be `addressed` through explanation. This does not mean configuration now merges. The finding's reason must identify the explanation and describe the remaining limitation and deferred work.
 
-Bare acknowledgements, unsupported excuses and unexplained promises to fix later do not qualify. An unresolved substantive contradiction or concern outside the rationale remains `outstanding`. Evidence that cannot be verified leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
+Bare acknowledgements, unsupported excuses and unexplained promises to fix later do not qualify. An unresolved substantive contradiction or concern outside the rationale remains `outstanding`. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
+
+### Reported testing and deployment evidence
+
+The auditor accepts specific reports of external testing, deployment or operator verification in the PR description or human discussion. Reports must identify what was exercised, the relevant environment and implementation, and observed outcomes that address the finding. Run or log links strengthen a report but are not mandatory.
+
+For example, a report can describe held-lock failure with rollout skipped, recovery and a successful deployment of the final implementation. Operator confirmation that diagnostics are visible and a region warning is gone can address those verification concerns.
+
+The auditor checks consistency with available code and discussion. It does not mark a finding `uncertain` solely because it cannot open external results. When reported testing addresses a finding, the reason identifies that basis and states that the results were not independently inspected. The evidence cites the PR URL or the human comment or reply containing the report.
+
+Claims such as “fixed”, “tests passed” or “everything passed” are not enough. Contradictions remain `outstanding`; reports that do not establish the relevant outcome can remain `uncertain`. This policy does not replace code inspection for claimed fixes to accessible code.
+
+Reported testing counts as `addressed` for approval eligibility. This relies on the author's or human commenter's account; it does not establish that Pronto checked CI.
 
 ## Optional GitHub comments and approvals
 
@@ -165,7 +177,7 @@ Add `--apply --approve` to post the verdict comment and submit a GitHub approval
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. Approval requires at least one `addressed` finding and no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, skip approval. Supported explanations and scope decisions count as `addressed` for this rule; approval does not imply every requested code change was implemented. A skipped approval is not an operational failure.
+`--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. Approval requires at least one `addressed` finding and no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, skip approval. Supported explanations, scope decisions and specific reported testing count as `addressed` for this rule; approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA and includes the same summary as a verdict comment. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 

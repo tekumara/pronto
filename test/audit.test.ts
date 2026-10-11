@@ -98,11 +98,13 @@ function assessments() {
 test("CLI audit assesses all discussion using remote pinned code, rejects unsafe calls and incomplete or uncited reports", { timeout: 20000 }, async (t) => {
   const github = githubEvidence();
   let turn = 0;
+  let policy = "";
   const f = await fixture(t, (body, response) => {
     const latest = body.messages.at(-1)?.content ?? "";
     switch (turn++) {
       case 0: {
         const snapshot = evidenceInput(body);
+        policy = body.messages.filter((message) => message.role === "system").map((message) => message.content ?? "").join("\n");
         assert.equal(snapshot.headSha, headSha);
         assert.equal(snapshot.baseSha, baseSha);
         assert.equal(snapshot.headRepository, "contributor/fork");
@@ -139,6 +141,12 @@ test("CLI audit assesses all discussion using remote pinned code, rejects unsafe
     }
   }, { entrypoint: resolve("audit.ts"), github: github.handle });
   const output = await f.run("", [prUrl]);
+  // Guard the policy delivered to the model, not a simulated model's judgement of claims.
+  assert.match(policy, /Accept specific reports of external testing, deployment or operator verification/);
+  assert.match(policy, /Do not mark a finding uncertain\s+solely because these external results cannot be independently inspected\./);
+  assert.match(policy, /For reported testing, state that the results were not independently inspected\./);
+  assert.match(policy, /Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient\./);
+  assert.match(policy, /If available evidence contradicts the claimed outcome, keep the unresolved concern outstanding\./);
   assert.match(output, /\[audit\] PR title: Access checks/);
   assert.match(output, /Verdict: Not all actionable findings are addressed/);
   assert.match(output, /1 addressed · 1 outstanding · 1 uncertain · 3 not-actionable/);
