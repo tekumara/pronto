@@ -67,12 +67,29 @@ Separate multiple findings in one comment. For each finding choose:
 - uncertain: evidence is insufficient or unreadable to assess the code or explanation
 - not-actionable: praise, boilerplate, summaries without requests, or a duplicate linked to another finding
 Evaluate explanations on their merits, not solely on whether the requested code change is present.
-A supported scope decision identifies the PR's current purpose or audience, accurately describes
-remaining behaviour and relevant mitigations, and gives a reasonable rationale for accepting the
-trade-off or leaving the requested change outside this PR. Check factual claims against available
-pinned code and discussion. Apply the reported-evidence policy below to external results that tools
-cannot inspect. Explicitly scoped follow-up work can be part of an adequate explanation, but the
-current rationale must stand on its own without treating the future fix as already implemented.
+An explanation can address a finding by correcting its premise, explaining the design, or making
+a reasonable scope or trade-off decision.
+For discretionary suggestions, accept a reasoned author decision not to
+make the requested change. Reasons can include maintenance cost, added complexity, low expected
+likelihood, or limited scope. Read the reply in the context of the original finding; it need not
+restate every consequence.
+Risk acceptance is not risk elimination. Do not require a new safeguard, a quantified probability,
+or a code change merely because residual risk remains. Check factual claims against available
+pinned code and discussion. Distinguish an author's risk judgment from a claim that the risk
+cannot occur. Apply the reported-evidence policy below to external results that tools cannot inspect.
+Use review discussion to establish whether a suggestion is discretionary,
+including later messages that soften an earlier blocking label or leave
+the decision to the author. Approval alone is not proof of a fix or agreement with a particular reply.
+A bare dismissal or unexplained promise to fix later is insufficient.
+A trade-off decision does not override an explicit mandatory requirement
+or resolve a factual contradiction.
+Explicitly scoped follow-up work can be part of an adequate explanation, but the current rationale
+must stand on its own without treating the future fix as already implemented.
+For example, a reviewer suggests a database-configuration drift test. The author explains that
+separate configuration is intentional and judges the unlikely cutover risk not worth the added
+test maintenance. If the suggestion is discretionary and available evidence does not contradict
+the explanation, mark it addressed by a trade-off decision. State that no drift guard was added
+and the future cutover risk remains. Do not require the author to eliminate that risk.
 For example, shipping first-time-user setup while acknowledging that re-runs overwrite active
 configuration, verifying backups of existing configuration, and explicitly deferring smart merging
 can adequately address a re-run/merge concern through scope and mitigation. Do not automatically

@@ -147,6 +147,10 @@ test("CLI audit assesses all discussion using remote pinned code, rejects unsafe
   assert.match(policy, /For reported testing, state that the results were not independently inspected\./);
   assert.match(policy, /Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient\./);
   assert.match(policy, /If available evidence contradicts the claimed outcome, keep the unresolved concern outstanding\./);
+  assert.match(policy, /For discretionary suggestions, accept a reasoned author decision not to\s+make the requested change\./);
+  assert.match(policy, /Risk acceptance is not risk elimination\./);
+  assert.match(policy, /including later messages that soften an earlier blocking label or leave\s+the decision to the author\./);
+  assert.match(policy, /A trade-off decision does not override an explicit mandatory requirement\s+or resolve a factual contradiction\./);
   assert.match(output, /\[audit\] PR title: Access checks/);
   assert.match(output, /Verdict: Not all actionable findings are addressed/);
   assert.match(output, /1 addressed · 1 outstanding · 1 uncertain · 3 not-actionable/);
