@@ -318,7 +318,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[]): str
 }
 
 async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[], options: {
-  sticky?: boolean; approve?: boolean; apply?: boolean;
+  sticky?: boolean; approve?: boolean; allowUncertain?: boolean; apply?: boolean;
 }): Promise<void> {
   console.log(`\n${formatReport(snapshot, assessments)}\n`);
   const body = formatComment(snapshot, assessments);
@@ -329,7 +329,9 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
   console.log(dryRun ? `[audit:dry-run] Comment would be ${action}.`
     : `[audit] Verdict comment ${action} ${action === "updated" ? "on" : "to"} the PR`);
   if (options.approve) {
-    if (!summarizeFindings(assessments).approvable) {
+    const { counts, approvable } = summarizeFindings(assessments);
+    const canApprove = approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding);
+    if (!canApprove) {
       console.log(dryRun ? "[audit:dry-run] Approval would be skipped: not all actionable findings appear addressed."
         : "[audit] Approval skipped: not all actionable findings appear addressed.");
       return;
@@ -341,7 +343,7 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
 }
 
 export async function runAudit(url: string, options: {
-  models: ModelRuntime; model: ModelRef; force?: boolean; sticky?: boolean; approve?: boolean; apply?: boolean;
+  models: ModelRuntime; model: ModelRef; force?: boolean; sticky?: boolean; approve?: boolean; allowUncertain?: boolean; apply?: boolean;
 }): Promise<void> {
   const context = BACKGROUND_CONTEXT;
   const target = parseReviewTarget(url);

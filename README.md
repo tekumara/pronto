@@ -171,17 +171,25 @@ GitHub writes are not replayed by Durable, and the flags do not persist across i
 
 ### Approve when findings are addressed
 
-Add `--apply --approve` to post the verdict comment and submit a GitHub approval review only when the verdict is "All actionable findings appear addressed":
+Add `--apply --approve` to post the verdict comment and submit a GitHub approval review. By default, approval requires the verdict "All actionable findings appear addressed":
 
 ```sh
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. Approval requires at least one `addressed` finding and no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, skip approval. Supported explanations, scope decisions and specific reported testing count as `addressed` for this rule; approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
+`--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. By default, approval requires at least one `addressed` finding and no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, skip approval. Supported explanations, scope decisions and specific reported testing count as `addressed` for this rule; approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
+
+Add `--allow-uncertain` to permit approval with uncertain findings, provided there are no outstanding findings:
+
+```sh
+pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
+```
+
+`--allow-uncertain` defaults to false and does not persist across invocations. It still requires `--approve`, and `--apply` to submit a review. Audits with only uncertain findings can qualify. Audits with no actionable findings still skip approval. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA and includes the same summary as a verdict comment. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
-With `--apply --approve`, the host posts the comment first, then submits the approval if the verdict allows it. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
+With `--apply --approve`, the host posts the comment first, then submits the approval if eligible. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
 
 Approvals are not replayed by Durable, and the flag does not persist across invocations. Approval errors exit 1 but retain the completed assessment. A comment already posted by `--apply` remains if approval fails. Check the PR before retrying after an interruption or ambiguous network failure.
 
@@ -200,7 +208,7 @@ The normal report is followed by a labelled comment preview and the planned acti
 [audit:dry-run] PR would be approved at 0123456789abcdef0123456789abcdef01234567
 ```
 
-For an outstanding, uncertain or no-actionable-findings verdict, the approval preview says it would be skipped. An eligible approval still checks the current head and base SHAs; changed commits stop the preview with an error.
+Outstanding findings and audits with no actionable findings always skip approval. Uncertain findings also skip approval unless you add `--allow-uncertain`. An eligible approval still checks the current head and base SHAs; changed commits stop the preview with an error.
 
 To perform the selected actions, add `--apply`:
 
@@ -208,7 +216,7 @@ To perform the selected actions, add `--apply`:
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--apply` defaults to false. When supplied, it posts or updates the verdict comment; with `--approve`, it also submits an approval if the verdict permits one. Without `--apply`, no comments or reviews are created or updated. The flag does not persist across invocations; every invocation that writes must include it.
+`--apply` defaults to false. When supplied, it posts or updates the verdict comment; with `--approve`, it also submits an approval if eligible. Without `--apply`, no comments or reviews are created or updated. The flag does not persist across invocations; every invocation that writes must include it.
 
 With no action flags, the default preview shows the comment body and says it would be posted if you add `--apply`. A preview does not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed; omit `--apply` to preview.
 
@@ -336,7 +344,7 @@ You can invoke the same PR auditor from chat:
 /audit https://github.com/owner/repo/pull/42
 ```
 
-The command supports the same `--force`, `--sticky`, `--approve`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
+The command supports the same `--force`, `--sticky`, `--approve`, `--allow-uncertain`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
 
 To use the coding chat in another project, run the script from that directory:
 

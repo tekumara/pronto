@@ -320,14 +320,20 @@ for (const action of ["comment", "update", "approve"] as const) {
   });
 }
 
-for (const { statuses, approve, chat } of [
-  { statuses: ["addressed", "not-actionable"], approve: true, chat: true },
-  { statuses: ["addressed", "outstanding"], approve: false, chat: false },
-  { statuses: ["addressed", "uncertain"], approve: false, chat: false },
-  { statuses: ["not-actionable"], approve: false, chat: false },
-  { statuses: [], approve: false, chat: false },
-] satisfies { statuses: Status[]; approve: boolean; chat: boolean }[]) {
-  test(`--approve --apply ${approve ? "approves" : "skips"} ${statuses.join(" + ") || "an empty audit"} and posts a verdict comment`, { timeout: 20000 }, async (t) => {
+for (const { statuses, approve, chat, allowUncertain } of [
+  { statuses: ["addressed", "not-actionable"], approve: true, chat: true, allowUncertain: false },
+  { statuses: ["addressed", "outstanding"], approve: false, chat: false, allowUncertain: false },
+  { statuses: ["addressed", "uncertain"], approve: false, chat: false, allowUncertain: false },
+  { statuses: ["not-actionable"], approve: false, chat: false, allowUncertain: false },
+  { statuses: [], approve: false, chat: false, allowUncertain: false },
+  { statuses: ["uncertain"], approve: true, chat: false, allowUncertain: true },
+  { statuses: ["addressed", "uncertain"], approve: true, chat: true, allowUncertain: true },
+  { statuses: ["addressed", "outstanding", "uncertain"], approve: false, chat: false, allowUncertain: true },
+  { statuses: ["not-actionable"], approve: false, chat: false, allowUncertain: true },
+  { statuses: [], approve: false, chat: false, allowUncertain: true },
+] satisfies { statuses: Status[]; approve: boolean; chat: boolean; allowUncertain: boolean }[]) {
+  const flags = ["--approve", "--apply", ...(allowUncertain ? ["--allow-uncertain"] : [])];
+  test(`${flags.join(" ")} ${approve ? "approves" : "skips"} ${statuses.join(" + ") || "an empty audit"} and posts a verdict comment`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence({ empty: !statuses.length });
     const f = await fixture(t, (body, response) => assess(body, response, statuses), { entrypoint: resolve("audit.ts"), github: github.handler });
     if (statuses.every((status) => status === "not-actionable")) {
@@ -336,8 +342,8 @@ for (const { statuses, approve, chat } of [
       assert.doesNotMatch(preview, /Reasoning and evidence/);
     }
     const output = chat
-      ? await f.run(`/audit --approve --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") })
-      : await f.run("", ["--approve", "--apply", url]);
+      ? await f.run(`/audit ${flags.join(" ")} ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") })
+      : await f.run("", [...flags, url]);
     assert.equal(github.comments.length, 1, "--apply posts the verdict comment by default");
     assert.match(github.comments[0], /## Review audit ·/);
     assert.equal(github.approvals.length, approve ? 1 : 0);
@@ -345,7 +351,13 @@ for (const { statuses, approve, chat } of [
     if (approve) {
       assert.equal(github.approvals[0].event, "APPROVE");
       assert.equal(github.approvals[0].commit_id, sha);
-      assert.match(github.approvals[0].body, /## Review audit · All actionable findings addressed/);
+      const hasUncertain = statuses.some((status) => status === "uncertain");
+      assert.match(github.approvals[0].body, hasUncertain
+        ? /## Review audit · Verification needed/ : /## Review audit · All actionable findings addressed/);
+      if (hasUncertain) {
+        assert.match(output, /Verdict: Not all actionable findings are addressed/);
+        assert.match(github.approvals[0].body, /### Needs verification: Requested explanation/);
+      }
     }
   });
 }
@@ -354,6 +366,8 @@ for (const { flags, status, approve, chat } of [
   { flags: [] as string[], status: "addressed", approve: false, chat: false },
   { flags: ["--approve"], status: "addressed", approve: true, chat: true },
   { flags: ["--approve"], status: "uncertain", approve: false, chat: false },
+  { flags: ["--allow-uncertain"], status: "uncertain", approve: false, chat: false },
+  { flags: ["--approve", "--allow-uncertain"], status: "uncertain", approve: true, chat: true },
 ] satisfies { flags: string[]; status: Status; approve: boolean; chat: boolean }[]) {
   test(`default dry-run previews ${flags.join(" ") || "no mutation flags"} (${status}) and requires --apply on every invocation`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence();
@@ -381,6 +395,12 @@ for (const { flags, status, approve, chat } of [
     const cached = await run();
     assert.match(cached, /Reusing saved assessment/);
     assert.equal(calls, 1, "dry-run must use and publish the normal assessment cache");
+    if (flags.includes("--approve") && flags.includes("--allow-uncertain")) {
+      const strict = await f.run("", ["--approve", url]);
+      assert.match(strict, /Reusing saved assessment/);
+      assert.match(strict, /Approval would be skipped/);
+      assert.equal(calls, 1, "uncertainty policy must not persist or invalidate the assessment cache");
+    }
     assert.equal(github.comments.length, 0);
     assert.equal(github.approvals.length, 0, "cached dry-runs must not submit reviews either");
 
