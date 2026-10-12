@@ -325,15 +325,17 @@ function humanLogins(snapshot: ReviewSnapshot): string[] {
   return [...new Set([snapshot.author, ...snapshot.comments.flatMap((c) => [c.author, ...c.replies.map((r) => r.author)])]
     .filter((login) => login !== "unknown" && !isBot(login)))];
 }
-function ownership(comment: { author: string }, finding: { awaiting?: string }, mentions?: string[]): string {
-  const name = (login: string) => {
-    const known = mentions?.find((candidate) => candidate.toLowerCase() === login.toLowerCase());
-    return known ? `@${known}` : login;
-  };
-  const awaiting = finding.awaiting && finding.awaiting !== "unknown" ? finding.awaiting : "unknown";
-  return `Raised by: ${name(comment.author)} · Awaiting: ${name(awaiting)}`;
+// Only the person who must act next is mentioned. Whoever raised the finding stays plain text.
+function awaitingMention(finding: { awaiting?: string }, humans: string[]): string[] {
+  const known = humans.find((login) => login.toLowerCase() === finding.awaiting?.toLowerCase());
+  return known ? [known] : [];
 }
-// Turn known human logins in the agent's next step into mentions, leaving other text untouched.
+function ownership(comment: { author: string }, finding: { awaiting?: string }, humans: string[] = []): string {
+  const [mention] = awaitingMention(finding, humans);
+  const awaiting = mention ? `@${mention}` : finding.awaiting ?? "unknown";
+  return `Raised by: ${comment.author} · Awaiting: ${awaiting}`;
+}
+// Turn the awaiting person's login in the agent's next step into a mention, leaving other text untouched.
 function mentionLogins(text: string, logins: string[]): string {
   let result = text;
   for (const login of logins) {
@@ -379,7 +381,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[]): str
     const label = finding.status === "outstanding" ? "Changes needed" : "Needs verification";
     // Saved assessments may predate nextStep. Keep them readable without inventing a specific remedy.
     sections.push(`### ${label}: ${finding.summary}`, ownership(comment, finding, humans),
-      `Next step: ${mentionLogins(finding.nextStep ?? genericNextStep(finding.status), humans)}`,
+      `Next step: ${mentionLogins(finding.nextStep ?? genericNextStep(finding.status), awaitingMention(finding, humans))}`,
       `[Original review finding](${comment.url})`);
     details.push([
       `### ${label}: ${finding.summary}`, finding.reason,

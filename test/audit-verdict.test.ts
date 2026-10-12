@@ -259,11 +259,12 @@ test("verdict comments keep open findings and next steps visible and collapse re
   assert.match(visible, /1 addressed · 2 outstanding · 1 uncertain/);
   assert.match(visible, /### Changes needed: Missing access check/);
   assert.match(visible, /Next step: @author should check the user's role before granting access\./);
-  assert.match(visible, /Raised by: @human · Awaiting: @author/, "humans are @-mentioned in the posted comment");
+  assert.match(visible, /Raised by: human · Awaiting: @author/, "only the person who acts next is @-mentioned");
+  assert.doesNotMatch(visible, /@human · /, "the person who raised the finding is not tagged");
   assert.ok(visible.includes(`[Original review finding](${evidenceUrl})`));
   assert.match(visible, /### Needs verification: Undefined access policy/);
   assert.match(visible, /Next step: Confirm which roles should have access\./);
-  assert.match(visible, /Awaiting: @human/, "the thread opener can be the one who acts next");
+  assert.match(visible, /Raised by: human · Awaiting: @human/, "the thread opener is tagged when they act next");
   assert.ok(visible.includes(`[Original review finding](${issueUrl})`));
   assert.match(visible, /### Changes needed: Missing policy documentation/);
   assert.match(visible, /Next step: Address the finding with a code fix or an evidence-supported explanation\./,
@@ -297,7 +298,7 @@ test("an unstructured final answer cannot bypass complete report validation, pos
   assert.equal(github.approvals.length, 0);
 });
 
-test("posted comments @-mention humans but never bots, and the terminal report stays plain", { timeout: 20000 }, async (t) => {
+test("posted comments @-mention only the person who acts next and never bots, and the terminal report stays plain", { timeout: 20000 }, async (t) => {
   const github = githubEvidence({ issueComments: [issueComment(3, "Automated finding.", "Copilot"), issueComment(4, "Another.", "scanner[bot]")] });
   const f = await fixture(t, (_body, response) => {
     tool(response, "report_review_assessment", { assessments: [
