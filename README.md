@@ -53,7 +53,7 @@ The controller fetches evidence before asking the model to assess it:
 
 Answered and resolved findings remain in scope. Boilerplate is included for the agent to classify rather than discarded by a filter. The audit stops if the changed-file list is incomplete or the head or base SHA changes during fetching. Comments can still change during the fetch window; the report records that window and is not a live-state guarantee.
 
-Pronto omits its own marked output from any account before saving evidence. This includes PR comments, inline comments and replies, and submitted review bodies such as approval reports. A standalone `<!-- pronto:review-audit -->` marker at the end identifies this output. Excluded comments are not archived separately, sent to the model or included in the evidence fingerprint. Ordinary discussion from the same accounts, quoted or embedded markers, and unmarked older reports remain in scope.
+Pronto omits its own marked output from any account before saving evidence. This includes PR comments, inline comments and replies, and marked submitted review bodies. A standalone `<!-- pronto:review-audit -->` marker at the end identifies this output. Excluded comments are not archived separately, sent to the model or included in the evidence fingerprint. Ordinary discussion from the same accounts, quoted or embedded markers, and unmarked older reports remain in scope.
 
 The model can read remote text files at those pinned commits, including the fork head. It cannot execute shell commands, access local files, edit code, post comments, or resolve threads. It does not fetch check results, workflow runs or logs. Inaccessible code needed to verify a fix leads to `uncertain`, not a guessed fix. Specific reports of external testing can count as reported evidence under the policy below.
 
@@ -167,7 +167,7 @@ pronto --apply --sticky=false https://github.com/owner/repo/pull/42
 
 You can also write `--sticky false`. A bare `--sticky`, `--sticky true` or `--sticky=true` enables sticky updates. The flag only controls whether the verdict comment is updated or newly created; it does not change approval behaviour. If several audit comments already exist, only the latest created one is updated; older comments remain.
 
-With `--apply`, the host posts or updates only after a complete, validated assessment, including a cache hit. It looks up live comments even when the assessment uses a saved snapshot. The model remains read-only. Posting or updating marked Pronto comments and approval reports does not invalidate the evidence cache. Changes to other PR discussion still do.
+With `--apply`, the host posts or updates only after a complete, validated assessment, including a cache hit. It looks up live comments even when the assessment uses a saved snapshot. The model remains read-only. Marked Pronto comments and approval reviews without a body do not invalidate the evidence cache. Changes to other PR discussion still do.
 
 GitHub writes are not replayed by Durable, and the flags do not persist across invocations. If a write fails, the CLI exits 1 but retains the completed assessment. A failed update does not fall back to creating a new comment. After an interruption or ambiguous network failure, check the PR before retrying. Concurrent first-time posts can still create duplicates.
 
@@ -189,7 +189,7 @@ pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
 
 `--allow-uncertain` defaults to false and does not persist across invocations. It still requires `--approve`, and `--apply` to submit a review. Audits with only uncertain findings can qualify. Audits with no actionable findings still skip approval. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
 
-With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA and includes the same summary as a verdict comment. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
+With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA and has no body. The full audit report remains in the PR comment, so approval does not duplicate it. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
 With `--apply --approve`, the host posts the comment first, then submits the approval if eligible. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
 

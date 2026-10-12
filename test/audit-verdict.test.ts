@@ -42,7 +42,7 @@ function githubEvidence(options: {
   const comments: string[] = [];
   const updates: number[] = [];
   const issueComments = options.issueComments ?? (options.issueComment ? [issueComment(3, "Which roles should have access?", "human")] : []);
-  const approvals: { body: string; event: string; commit_id: string }[] = [];
+  const approvals: { body?: string; event: string; commit_id: string }[] = [];
   const reviews: (IssueComment & { state: string })[] = [];
   const state = { headSha: sha, baseSha: sha };
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
@@ -78,7 +78,7 @@ function githubEvidence(options: {
       const body = JSON.parse(Buffer.concat(chunks).toString());
       approvals.push(body);
       response.statusCode = options.approvalStatus ?? 200;
-      if (response.statusCode < 300) reviews.push({ ...issueComment(100 + reviews.length, body.body), state: "APPROVED" });
+      if (response.statusCode < 300) reviews.push({ ...issueComment(100 + reviews.length, body.body ?? ""), state: "APPROVED" });
       json({ state: "APPROVED", commit_id: body.commit_id });
       return;
     }
@@ -159,12 +159,11 @@ for (const status of ["addressed", "uncertain"] as const) {
       assert.equal(github.approvals.length, 1);
       assert.equal(github.approvals[0].event, "APPROVE");
       assert.equal(github.approvals[0].commit_id, sha);
-      assert.match(github.approvals[0].body, commentHeadline);
       assert.doesNotMatch(github.comments[0], /Reasoning and evidence|The reply explains the intentional behaviour/);
       assert.match(posted, /PR approved/);
       const rechecked = await f.run("", [url]);
       assert.match(rechecked, /Reusing saved assessment/);
-      assert.equal(calls, 1, "a marked approval review must not invalidate the cache either");
+      assert.equal(calls, 1, "an empty approval review must not invalidate the cache either");
     } else {
       assert.doesNotMatch(posted, /Reusing saved assessment/);
       assert.equal(calls, 2, "--approve and --force can be combined in chat");
@@ -357,12 +356,13 @@ for (const { statuses, approve, chat, allowUncertain } of [
     if (approve) {
       assert.equal(github.approvals[0].event, "APPROVE");
       assert.equal(github.approvals[0].commit_id, sha);
+      assert.equal(Object.hasOwn(github.approvals[0], "body"), false, "approval must not duplicate the audit report");
       const hasUncertain = statuses.some((status) => status === "uncertain");
-      assert.match(github.approvals[0].body, hasUncertain
+      assert.match(github.comments[0], hasUncertain
         ? /## Review audit · Verification needed/ : /## Review audit · All actionable findings addressed/);
       if (hasUncertain) {
         assert.match(output, /Verdict: Not all actionable findings are addressed/);
-        assert.match(github.approvals[0].body, /### Needs verification: Requested explanation/);
+        assert.match(github.comments[0], /### Needs verification: Requested explanation/);
       }
     }
   });
@@ -417,7 +417,6 @@ for (const { flags, status, approve, chat } of [
     assert.equal(github.comments.length, 1);
     assert.equal(github.approvals.length, approve ? 1 : 0);
     assert.equal(github.comments[0], preview[1]);
-    if (approve) assert.equal(github.approvals[0].body, preview[1]);
     assert.equal(calls, 1);
 
     await run();

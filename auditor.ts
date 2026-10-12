@@ -336,7 +336,7 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
         : "[audit] Approval skipped: not all actionable findings appear addressed.");
       return;
     }
-    await approveReview(snapshot, body, options.apply);
+    await approveReview(snapshot, options.apply);
     console.log(dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}`
       : `[audit] PR approved at ${snapshot.headSha}`);
   }
