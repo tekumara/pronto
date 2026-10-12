@@ -223,7 +223,7 @@ export function isAuditComment(body: string | null | undefined): boolean {
   return body?.trimEnd().split("\n").at(-1) === AUDIT_COMMENT_MARKER;
 }
 
-export async function postReviewComment(target: ReviewTarget, body: string, sticky = true, apply = false): Promise<{
+export async function postAuditComment(target: ReviewTarget, body: string, sticky = true, apply = false): Promise<{
   action: "posted" | "updated"; url: string | null;
 }> {
   const client = github();

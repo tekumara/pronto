@@ -7,7 +7,7 @@ import {
   type Conversation, type ConversationId, type ModelRef,
 } from "@earendil-works/pi-durable";
 import { openStateHarness } from "./state.ts";
-import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postReviewComment, readGithubFile, type ReviewSnapshot } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ReviewSnapshot } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -404,7 +404,7 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
   const dryRun = !options.apply;
   if (dryRun) console.log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
   // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const { action, url } = await postReviewComment(snapshot.target, body, options.sticky, options.apply);
+  const { action, url } = await postAuditComment(snapshot.target, body, options.sticky, options.apply);
   console.log(dryRun ? `[audit:dry-run] Comment would be ${action}.`
     : stripControlCharacters(`[audit] Verdict comment ${action} ${action === "updated" ? "on" : "to"} the PR: ${url}`));
   if (options.approve) {
