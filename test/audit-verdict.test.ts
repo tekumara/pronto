@@ -258,7 +258,7 @@ test("verdict comments keep open findings and next steps visible and collapse re
   assert.match(visible, /## Review audit · Changes needed/);
   assert.match(visible, /1 addressed · 2 outstanding · 1 uncertain/);
   assert.match(visible, /### Changes needed: Missing access check/);
-  assert.match(visible, /Next step: @author should check the user's role before granting access\./);
+  assert.match(visible, /Next step: author should check the user's role before granting access\./);
   assert.match(visible, /Raised by: human · Awaiting: @author/, "only the person who acts next is @-mentioned");
   assert.doesNotMatch(visible, /@human · /, "the person who raised the finding is not tagged");
   assert.ok(visible.includes(`[Original review finding](${evidenceUrl})`));
@@ -313,8 +313,9 @@ test("posted comments @-mention only the person who acts next and never bots, an
   const body = github.comments[0];
   assert.match(body, /Raised by: Copilot · Awaiting: @author/);
   assert.match(body, /Raised by: scanner\[bot\] · Awaiting: @human/);
-  assert.match(body, /Next step: Ask Copilot and @author to confirm\./);
+  assert.match(body, /Next step: Ask Copilot and author to confirm\./);
   assert.doesNotMatch(body, /@Copilot|@scanner/);
+  assert.doesNotMatch(body.replace(/Awaiting: @\w+/g, ""), /@author|@human/, "only the Awaiting line mentions anyone");
   const report = terminal.split("[audit:dry-run]")[0];
   assert.match(report, /Raised by: Copilot · Awaiting: author/);
   assert.doesNotMatch(report, /@author|@human/);
