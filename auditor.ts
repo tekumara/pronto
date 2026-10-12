@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  createRegistry, defineDoc, defineExtension, defineTool, watchEvents,
+  AssistantEntry, createRegistry, defineDoc, defineExtension, defineTool, watchEvents,
   type Conversation, type ConversationId, type ModelRef,
 } from "@earendil-works/pi-durable";
 import { openStateHarness } from "./state.ts";
@@ -556,7 +556,19 @@ export async function runAudit(url: string, options: {
       } : null;
     }, context);
     if (settled.status === "unanswered") throw new Error(`Audit failed: ${settled.reason}`);
-    if (!saved?.report) throw new Error("Agent finished without a complete assessment. No verdict was produced; run the audit again.");
+    if (!saved?.report) {
+      const answer = settled.type === "input"
+        ? await conversation.commit(async (tx) => (await tx.entry(AssistantEntry, settled.answer))?.model?.[0], context)
+        : undefined;
+      let reason = "";
+      if (answer?.role === "assistant") {
+        const stopReason = answer.rawStopReason ? `${answer.stopReason} (${answer.rawStopReason})` : answer.stopReason;
+        reason = answer.stopReason === "length"
+          ? ` The model hit its token limit: ${stopReason}; ${answer.usage.output} output tokens.`
+          : ` Model stop reason: ${stopReason}.`;
+      }
+      throw new Error(stripControlCharacters(`Agent finished without a complete assessment.${reason} No verdict was produced.`));
+    }
     await outputReport(snapshot, saved.report, options);
   } catch (error) {
     if (!closing) throw error;
