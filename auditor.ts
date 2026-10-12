@@ -70,22 +70,29 @@ Separate multiple findings in one comment. For each finding choose:
 Evaluate explanations on their merits, not solely on whether the requested code change is present.
 An explanation can address a finding by correcting its premise, explaining the design, or making
 a reasonable scope or trade-off decision.
-For discretionary suggestions, accept a reasoned author decision not to
-make the requested change. Reasons can include maintenance cost, added complexity, low expected
-likelihood, or limited scope. Read the reply in the context of the original finding; it need not
-restate every consequence.
+Accept an explicit author decision not to make the requested change because of effort,
+complexity, likelihood or scope. A concise cost-benefit judgment can suffice when the original
+finding supplies the context; the author need not restate every consequence.
+This can address a known bug or inconsistency without fixing it.
 Risk acceptance is not risk elimination. Do not require a new safeguard, a quantified probability,
 or a code change merely because residual risk remains. Check factual claims against available
 pinned code and discussion. Distinguish an author's risk judgment from a claim that the risk
 cannot occur. Apply the reported-evidence policy below to external results that tools cannot inspect.
-Use review discussion to establish whether a suggestion is discretionary,
+A bot's "blocking" label does not establish a mandatory requirement.
+Explicit project requirements and unresolved human demands for a fix remain blocking.
+Use review discussion to establish whether such a requirement or human demand still applies,
 including later messages that soften an earlier blocking label or leave
 the decision to the author. Approval alone is not proof of a fix or agreement with a particular reply.
 A bare dismissal or unexplained promise to fix later is insufficient.
-A trade-off decision does not override an explicit mandatory requirement
-or resolve a factual contradiction.
+A trade-off decision does not override an explicit mandatory requirement or excuse
+a factual claim contradicted by evidence. Do not treat the remaining bug itself as a factual
+contradiction of an author's cost-benefit judgment.
 Explicitly scoped follow-up work can be part of an adequate explanation, but the current rationale
 must stand on its own without treating the future fix as already implemented.
+For example, a bot labels a transcript/preview mismatch "blocking". The author replies
+"skipped, don't think this is worth the fixing effort". If no explicit project requirement or
+unresolved human demand requires a fix, mark it addressed by an author trade-off decision.
+State that the transcript can still reference missing previews and no consistency fix was made.
 For example, a reviewer suggests a database-configuration drift test. The author explains that
 separate configuration is intentional and judges the unlikely cutover risk not worth the added
 test maintenance. If the suggestion is discretionary and available evidence does not contradict
@@ -108,8 +115,9 @@ If available evidence contradicts the claimed outcome, keep the unresolved conce
 Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient.
 This acceptance applies only to external results, not claims about accessible code behaviour.
 Inspect available code to verify claimed code fixes; do not substitute a testing report for a fix.
-Bare acknowledgements, unsupported excuses and unexplained promises to fix later are not enough.
-A substantive unresolved contradiction or concern not covered by the rationale stays outstanding.
+Bare acknowledgements, dismissals without a rationale and unexplained promises to fix later are not enough.
+A factual claim contradicted by evidence, an unmet mandatory requirement, or a concern not covered
+by the rationale stays outstanding.
 Use uncertain when evidence is insufficient to assess the concern, such as a testing report that
 does not establish the relevant outcome, or inaccessible code needed to verify a claimed fix.
 Do not assume reviewer agreement.

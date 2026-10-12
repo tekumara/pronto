@@ -67,11 +67,17 @@ The audit checks whether existing review findings have been addressed. It is not
 
 `addressed` can mean a code fix, an adequate explanation or specific reported testing. A reasonable scope or trade-off decision can address a finding without implementing the requested change.
 
+An explicit author decision not to fix a finding because of effort, complexity, likelihood or scope can qualify. A concise reply can be enough when the original finding supplies the context. Risk acceptance is not risk elimination: the auditor does not require a new safeguard, quantified probability or code change merely because a known bug remains possible.
+
+A bot's “blocking” label does not establish a mandatory requirement. Explicit project requirements and unresolved human demands for a fix remain blocking. The auditor reads the full discussion, including later replies that soften a demand or leave the decision to the author.
+
+For example, a bot reports that a transcript can list previews that fail to seed. The author replies, “skipped, don't think this is worth the fixing effort”. If no explicit project requirement or unresolved human demand requires a fix, this counts as `addressed` by an author trade-off decision. The report must still state that the transcript can reference missing previews and no consistency fix was made.
+
 A supported scope decision explains the PR's current purpose or audience, its remaining behaviour and relevant mitigations, and why the trade-off is reasonable. The auditor checks factual claims against the pinned code and discussion. Follow-up work can be explicitly deferred, but the current rationale must stand on its own. A future fix is not a current fix.
 
 For example, a setup PR for first-time users can explain that re-runs overwrite active configuration, preserve backups, and leave smart merging to follow-up work. If the code supports those claims and the scope rationale adequately addresses the concern, the finding can be `addressed` through explanation. This does not mean configuration now merges. The finding's reason must identify the explanation and describe the remaining limitation and deferred work.
 
-Bare acknowledgements, unsupported excuses and unexplained promises to fix later do not qualify. An unresolved substantive contradiction or concern outside the rationale remains `outstanding`. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
+Bare acknowledgements, dismissals without a rationale and unexplained promises to fix later do not qualify. A factual claim contradicted by evidence, an unmet mandatory requirement or a concern outside the rationale remains `outstanding`. For example, code showing that a failure can occur contradicts “this cannot happen”, but not “this is not worth fixing”. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
 
 ### Reported testing and deployment evidence
 
