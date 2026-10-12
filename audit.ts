@@ -10,7 +10,7 @@ async function main() {
     console.log("Without a target, selects the current branch's PR using gh pr view. Branch and number selection require gh; explicit URLs need no checkout.");
     console.log("--force bypasses the assessment cache and restarts any unfinished audit.");
     console.log("--sticky updates your latest verdict comment after a fresh assessment; reused assessments leave it unchanged (default: true; --sticky=false creates a new comment).");
-    console.log("--approve selects approval if all actionable findings appear addressed, or uncertainty is allowed; requires --apply to submit (default: false).");
+    console.log("--approve selects approval when no outstanding or uncertain findings remain; requires --apply to submit (default: false).");
     console.log("--allow-uncertain allows --approve with uncertain findings and no outstanding findings (default: false).");
     console.log("--apply publishes the verdict comment and any selected approval to GitHub (default: false; otherwise previews only).");
     return;

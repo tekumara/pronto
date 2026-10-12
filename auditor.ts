@@ -290,9 +290,9 @@ const snapshotDisclaimer = "This is the agent's assessment of a saved snapshot, 
 function summarizeFindings(assessments: Assessment[]) {
   const findings = assessments.flatMap((a) => a.findings);
   const counts = Object.fromEntries(["addressed", "outstanding", "uncertain", "not-actionable"].map((status) => [status, findings.filter((f) => f.status === status).length]));
-  const approvable = counts.addressed > 0 && !counts.outstanding && !counts.uncertain;
+  const approvable = !counts.outstanding && !counts.uncertain;
   const verdict = counts.outstanding || counts.uncertain ? "Not all actionable findings are addressed."
-    : approvable ? "All actionable findings appear addressed." : "No actionable findings identified.";
+    : counts.addressed ? "All actionable findings appear addressed." : "No actionable findings identified.";
   return { counts, verdict, approvable };
 }
 
@@ -353,9 +353,9 @@ function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[]): stri
 }
 
 function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[]): string {
-  const { counts, approvable } = summarizeFindings(assessments);
+  const { counts } = summarizeFindings(assessments);
   const headline = counts.outstanding ? "Changes needed" : counts.uncertain ? "Verification needed"
-    : approvable ? "All actionable findings addressed" : "No actionable findings identified";
+    : counts.addressed ? "All actionable findings addressed" : "No actionable findings identified";
   const sections = [
     `## Review audit · ${headline}`,
     `${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain`,
@@ -411,8 +411,8 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
     const { counts, approvable } = summarizeFindings(assessments);
     const canApprove = approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding);
     if (!canApprove) {
-      console.log(dryRun ? "[audit:dry-run] Approval would be skipped: not all actionable findings appear addressed."
-        : "[audit] Approval skipped: not all actionable findings appear addressed.");
+      console.log(dryRun ? "[audit:dry-run] Approval would be skipped: outstanding or uncertain findings remain."
+        : "[audit] Approval skipped: outstanding or uncertain findings remain.");
       return;
     }
     await approveReview(snapshot, options.apply);
