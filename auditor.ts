@@ -137,7 +137,8 @@ must act next. Decide by reading the whole thread in order, not just its first c
   reviewer who raised the thread acts next.
 - If a bot raised the finding, the PR author acts next. Never name a bot unless no human is involved.
 - Use the exact login as it appears in the evidence. Use "unknown" only if it cannot be determined.
-Make nextStep say what that person must do, addressed to them, not a generic remedy.
+Make nextStep a short imperative saying what must be done, for example "Add a boundary test that
+retries the persisted refused pair."
 Do not claim "all addressed" when any actionable finding is outstanding or uncertain.
 You have no filesystem, shell, GitHub mutation, or arbitrary-network tools.`;
 
