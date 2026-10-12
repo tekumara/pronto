@@ -14,7 +14,7 @@ const commentUrl = (id: number) => `${prUrl}#discussion_r${id}`;
 
 // GitHub and the model are external HTTP fixtures. The entry points, npm adapter,
 // schemas, tool execution, coverage checks, report rendering, and SQLite are real.
-function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; state?: "open" | "closed" } = {}) {
+function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; state?: "open" | "closed"; labels?: string[] } = {}) {
   let prRequests = 0;
   const requests: string[] = [];
   const handle = async (request: IncomingMessage, response: ServerResponse) => {
@@ -49,6 +49,7 @@ function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; m
       json({ login: "auditor" });
     } else if (url.pathname === "/github/repos/acme/demo/pulls/7") {
       json({ title: "Access checks", body: "Review this change", merged: options.merged ?? false,
+        labels: (options.labels ?? []).map((name) => ({ name })),
         state: options.state ?? (options.merged ? "closed" : "open"), changed_files: options.incompleteFiles ? 3 : 2,
         head: { sha: options.moved && ++prRequests > 1 ? "c".repeat(40) : headSha, repo: { full_name: "contributor/fork" } },
         base: { sha: baseSha, repo: { full_name: "acme/demo" } },
@@ -116,6 +117,35 @@ for (const { name, entrypoint, input, args } of [
     });
     const output = await f.run(input, args);
     assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR has already been merged.`));
+    assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
+    assert.equal(reads, 1);
+  });
+}
+
+for (const { name, entrypoint, input, args, label } of [
+  { name: "CLI single label", entrypoint: resolve("audit.ts"), input: "", label: "do not audit",
+    args: ["--skip", "do not audit", prUrl, "local/test", "--force", "--apply", "--approve"] },
+  { name: "CLI multiple labels", entrypoint: resolve("audit.ts"), input: "", label: "Skip-Audit",
+    args: ["--skip", "unmatched", prUrl, "--skip=skip-audit", "--skip", "skip-audit", "--force", "--apply", "--approve"] },
+  { name: "chat multiple labels", entrypoint: resolve("agent.ts"), label: "Skip-Audit", args: [],
+    input: `/audit --skip unmatched ${prUrl} --skip=skip-audit --force --apply --approve\n/quit\n` },
+]) {
+  test(`${name} skips a matching PR without fetching evidence or writing to GitHub`, { timeout: 20000 }, async (t) => {
+    let reads = 0;
+    const f = await fixture(t, () => assert.fail("Skipped PRs must not reach the model"), {
+      entrypoint,
+      github: (request, response) => {
+        reads++;
+        assert.equal(request.method, "GET", "Skipped PRs must not mutate GitHub");
+        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Skipped PRs need no review or code evidence");
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+          merged: false, labels: [{ name: "unrelated" }, { name: label }],
+          head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: null },
+        }));
+      },
+    });
+    const output = await f.run(input, args);
+    assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR has matching skip label: "${label}".`));
     assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
     assert.equal(reads, 1);
   });
@@ -311,8 +341,8 @@ for (const failure of ["moved", "incompleteFiles"] as const) {
   });
 }
 
-test("restart checks merge status but resumes saved evidence without refetching or resubmitting it", { timeout: 20000 }, async (t) => {
-  const prState = { merged: false };
+test("restart checks live merge status and skip labels but preserves saved evidence and cache", { timeout: 20000 }, async (t) => {
+  const prState = { merged: false, labels: [] as string[] };
   const github = githubEvidence(prState);
   const started = Promise.withResolvers<void>();
   let turn = 0;
@@ -332,9 +362,10 @@ test("restart checks merge status but resumes saved evidence without refetching 
         break;
       case 1:
         assert.deepEqual(github.requests.slice(snapshotRequests.length), [
+          "/github/repos/acme/demo/pulls/7", // Label skip.
           "/github/repos/acme/demo/pulls/7", // Merged skip.
           "/github/repos/acme/demo/pulls/7", // Resume status check.
-        ], "only live merge status must be fetched before resuming saved evidence");
+        ], "only live PR metadata must be fetched before resuming saved evidence");
         tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
         break;
       case 2:
@@ -356,6 +387,12 @@ test("restart checks merge status but resumes saved evidence without refetching 
   assert.deepEqual(github.requests, snapshotRequests!, "a competing audit must fail before refetching evidence");
   first.child.kill("SIGKILL");
   await first.done;
+  prState.labels = ["skip-audit"];
+  const skippedLabel = await f.run("", [prUrl, "--skip", "skip-audit", "--force", "--apply", "--approve"]);
+  assert.match(skippedLabel, /Skipping .*matching skip label: "skip-audit"/);
+  assert.doesNotMatch(skippedLabel, /Resuming saved snapshot|Restarting unfinished audit|Verdict:/);
+  assert.equal(turn, 1, "a matching label must not resume or restart unfinished model work");
+  prState.labels = [];
   prState.merged = true;
   const skipped = await f.run("", [prUrl, "--force", "--apply", "--approve"]);
   assert.match(skipped, /Skipping .*already been merged/);
@@ -369,6 +406,15 @@ test("restart checks merge status but resumes saved evidence without refetching 
   const cached = await f.run("", [prUrl]);
   assert.match(cached, /Reusing saved assessment/);
   assert.equal(turn, 3, "a recovered successful assessment must be published to the cache");
+  prState.labels = ["skip-audit"];
+  const labelReads = github.requests.length;
+  const skippedLabelCached = await f.run("", [prUrl, "--skip=skip-audit", "--apply", "--approve"]);
+  assert.match(skippedLabelCached, /Skipping .*matching skip label/);
+  assert.doesNotMatch(skippedLabelCached, /Reusing saved assessment|Verdict:/);
+  assert.deepEqual(github.requests.slice(labelReads), ["/github/repos/acme/demo/pulls/7"]);
+  const withoutSkip = await f.run("", [prUrl]);
+  assert.match(withoutSkip, /Reusing saved assessment/);
+  assert.equal(turn, 3, "skipping must preserve the cache, and skip flags must not persist");
   prState.merged = true;
   const reads = github.requests.length;
   const skippedCached = await f.run("", [prUrl, "--apply", "--approve"]);

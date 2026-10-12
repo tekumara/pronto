@@ -4,17 +4,26 @@ import { parseReviewTarget } from "./reviews.ts";
 
 const exec = promisify(execFile);
 
-export const AUDIT_CLI_USAGE = "Usage: pronto [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--apply] [<number> | <branch> | <GitHub PR URL>] [provider/model-id]";
+export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--apply] [<number> | <branch> | <GitHub PR URL>] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "chat") {
-  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--apply] <GitHub PR URL>";
+  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--apply] <GitHub PR URL>";
   const flags = ["--force", "--sticky", "--approve", "--allow-uncertain", "--apply"];
   const supplied = new Set<string>();
   const positional: string[] = [];
+  const skipLabels: string[] = [];
   let sticky = true;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg.startsWith("-")) { positional.push(arg); continue; }
+    if (arg === "--skip" || arg.startsWith("--skip=")) {
+      const label = arg === "--skip" ? args[++i] : arg.slice("--skip=".length);
+      if (!label?.trim() || (arg === "--skip" && label.startsWith("-"))) {
+        throw new Error(`--skip requires a non-empty label\n${usage}`);
+      }
+      skipLabels.push(label);
+      continue;
+    }
     const flag = arg.startsWith("--sticky=") ? "--sticky" : arg;
     if (!flags.includes(flag)) throw new Error(`Unknown audit option: ${arg}\n${usage}`);
     if (supplied.has(flag)) throw new Error(`${flag} can be supplied only once\n${usage}`);
@@ -30,7 +39,7 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat") {
   const [selector = "", requested] = positional;
   // Chat still requires a URL. Reject malformed URLs before credentials, storage or network access.
   if (source === "chat" || selector.includes("://")) parseReviewTarget(selector);
-  return { selector, requested, force: supplied.has("--force"), sticky,
+  return { selector, requested, skipLabels, force: supplied.has("--force"), sticky,
     approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"), apply: supplied.has("--apply") };
 }
 

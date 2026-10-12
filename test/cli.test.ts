@@ -22,11 +22,12 @@ test("npm link exposes pronto from source outside the checkout", { timeout: 2000
     "global installation must link to this checkout, not a copied package");
   const { stdout } = await exec(join(prefix, "bin", "pronto"), ["--help"], { cwd: directory });
   assert.match(stdout, /^Usage: pronto /m);
+  assert.match(stdout, /--skip <label>/);
 });
 
 const prUrl = "https://github.com/acme/demo/pull/7";
 
-async function selectionFixture(t: TestContext) {
+async function selectionFixture(t: TestContext, labels: string[] = []) {
   return fixture(t, (_body, response) => {
     tool(response, "report_review_assessment", { assessments: [] });
   }, {
@@ -38,7 +39,7 @@ async function selectionFixture(t: TestContext) {
       if (path === "/github/user") {
         data = { login: "auditor" };
       } else if (path === "/github/repos/acme/demo/pulls/7") {
-        data = { title: "Selected PR", body: "", changed_files: 0,
+        data = { title: "Selected PR", body: "", merged: false, labels: labels.map((name) => ({ name })), changed_files: 0,
           head: { sha: "a".repeat(40), repo: { full_name: "acme/demo" } },
           base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } };
       } else if (path === "/github/graphql") {
@@ -83,12 +84,23 @@ for (const { name, args, selector } of [
   });
 }
 
-test("an explicit PR URL works without gh or a Git checkout", { timeout: 20_000 }, async (t) => {
-  const f = await selectionFixture(t);
-  const output = await f.run("", [prUrl, "local/test"], { env: { PATH: f.cwd } });
-  assert.match(output, /PR title: Selected PR/);
-  assert.ok(output.includes(prUrl));
-});
+for (const { name, labels, args } of [
+  { name: "an explicit PR URL works without gh or a Git checkout", labels: [], args: [prUrl, "local/test"] },
+  { name: "CLI audits when no skip label matches exactly", labels: ["skip-audit"],
+    args: ["--skip", "skip", prUrl, "local/test", "--skip=other"] },
+  { name: "CLI audits an unlabelled PR when skip labels are provided", labels: [],
+    args: [prUrl, "--skip", "skip-audit", "--skip=other"] },
+  { name: "CLI audits a labelled PR when --skip is omitted", labels: ["skip-audit"], args: [prUrl] },
+]) {
+  test(name, { timeout: 20_000 }, async (t) => {
+    const f = await selectionFixture(t, labels);
+    const output = await f.run("", args, { env: { PATH: f.cwd } });
+    assert.match(output, /PR title: Selected PR/);
+    assert.match(output, /Verdict:/);
+    assert.doesNotMatch(output, /Skipping/);
+    assert.ok(output.includes(prUrl));
+  });
+}
 
 for (const { name, args, gh, message } of [
   { name: "no matching PR", args: [], gh: 'process.stderr.write("no pull requests found for branch \\"feature\\"\\n"); process.exit(1);', message: /no pull requests found for branch "feature"/ },
@@ -96,6 +108,10 @@ for (const { name, args, gh, message } of [
   { name: "missing gh", args: [], gh: undefined, message: /gh.*required.*GitHub PR URL/ },
   { name: "invalid gh result", args: [], gh: 'process.stdout.write("https://github.com/acme/demo/issues/7\\n");', message: /Expected a GitHub PR URL/ },
   { name: "malformed explicit URL", args: ["https://github.com/acme/demo/issues/7"], gh: 'process.stderr.write("unexpected gh invocation"); process.exit(1);', message: /Expected a GitHub PR URL/ },
+  { name: "missing skip label", args: [prUrl, "--skip"], gh: undefined, message: /--skip requires a non-empty label/ },
+  { name: "empty skip label", args: [prUrl, "--skip", ""], gh: undefined, message: /--skip requires a non-empty label/ },
+  { name: "blank inline skip label", args: [prUrl, "--skip=  "], gh: undefined, message: /--skip requires a non-empty label/ },
+  { name: "an option instead of a skip label", args: [prUrl, "--skip", "--force"], gh: undefined, message: /--skip requires a non-empty label/ },
 ]) {
   test(`CLI stops before model or audit storage for ${name}`, { timeout: 20_000 }, async (t) => {
     const f = await fixture(t, () => assert.fail("Selection failures must not reach the model"), {

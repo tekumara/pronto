@@ -348,7 +348,7 @@ test("invalid audit flags are rejected before audit storage or network access in
     assert.match(result.stderr, /Usage:/);
   }
   const { child, done } = f.start([], { entrypoint: chat });
-  child.stdin.end(`/audit ${url} --force --force\n/audit ${url} --comment\n/audit ${url} --approve --approve\n/audit ${url} --apply --apply\n/audit ${url} --dry-run\n/audit ${url} --sticky --sticky=false\n/audit ${url} --sticky=maybe\n/quit\n`);
+  child.stdin.end(`/audit ${url} --force --force\n/audit ${url} --comment\n/audit ${url} --approve --approve\n/audit ${url} --apply --apply\n/audit ${url} --dry-run\n/audit ${url} --sticky --sticky=false\n/audit ${url} --sticky=maybe\n/audit ${url} --skip\n/audit ${url} --skip=\n/audit ${url} --skip --apply\n/quit\n`);
   const result = await done;
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stderr, /--force can be supplied only once/);
@@ -358,6 +358,7 @@ test("invalid audit flags are rejected before audit storage or network access in
   assert.match(result.stderr, /Unknown audit option: --dry-run/);
   assert.match(result.stderr, /--sticky can be supplied only once/);
   assert.match(result.stderr, /--sticky must be true or false/);
+  assert.match(result.stderr, /--skip requires a non-empty label/);
   assert.equal(github.reads(), 0);
   await assert.rejects(readdir(join(f.stateDir, "audits")), { code: "ENOENT" });
 });

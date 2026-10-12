@@ -35,6 +35,16 @@ These forms require the GitHub CLI (`gh`). Pronto runs `gh pr view` in your curr
 
 Already merged PRs are skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto checks live merge status before starting, resuming or reusing an audit. It does not call the model or write to GitHub for merged PRs.
 
+Use `--skip <label>` to skip PRs with a matching label. Repeat the flag to provide multiple labels:
+
+```sh
+pronto --skip skip-audit --skip "do not review" https://github.com/owner/repo/pull/42
+```
+
+You can also write `--skip=skip-audit`. Labels match by full name, ignoring case. Any match skips the audit with a message and exit code 0. Without a match, the audit runs normally. The flag does not persist across invocations.
+
+Pronto checks live labels before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence, call the model or write to GitHub when a label matches. Skipping preserves unfinished work and cached assessments.
+
 You can also run the CLI without a global link using `npm run audit -- [<number> | <branch> | <GitHub PR URL>]` from this repository.
 
 The auditor uses your saved Pi default model, or the first available model if there is no usable default. Choose a specific model by adding `provider/model-id` after an explicit target:
@@ -371,7 +381,7 @@ You can invoke the same PR auditor from chat:
 /audit https://github.com/owner/repo/pull/42
 ```
 
-The command supports the same `--force`, `--sticky`, `--approve`, `--allow-uncertain`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
+The command supports the same `--skip`, `--force`, `--sticky`, `--approve`, `--allow-uncertain`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
 
 To use the coding chat in another project, run the script from that directory:
 

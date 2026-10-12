@@ -443,7 +443,7 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
 }
 
 export async function runAudit(url: string, options: {
-  models: ModelRuntime; model: ModelRef; force?: boolean; sticky?: boolean; approve?: boolean; allowUncertain?: boolean; apply?: boolean;
+  models: ModelRuntime; model: ModelRef; skipLabels?: string[]; force?: boolean; sticky?: boolean; approve?: boolean; allowUncertain?: boolean; apply?: boolean;
 }): Promise<void> {
   const context = BACKGROUND_CONTEXT;
   const target = parseReviewTarget(url);
@@ -464,6 +464,12 @@ export async function runAudit(url: string, options: {
     const pr = await fetchPullRequest(target);
     if (pr.merged) {
       console.log(`[audit] Skipping ${target.url}: PR has already been merged.`);
+      return;
+    }
+    const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));
+    const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
+    if (skippedLabel) {
+      console.log(`[audit] Skipping ${target.url}: PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
       return;
     }
     // Persist force intent before cancellation/evidence fetching. A crash must not turn --force into a cache hit,

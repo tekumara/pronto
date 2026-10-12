@@ -33,6 +33,7 @@ export type ReviewSnapshot = {
   files: { path: string; previousPath: string | null; status: string; patch: string | null }[];
 };
 type PullRequest = {
+  labels?: { name: string }[];
   merged: boolean; title: string; body: string | null; user?: { login: string } | null; changed_files: number;
   head: { sha: string; repo: { full_name: string } | null };
   base: { sha: string; repo: { full_name: string } | null };
