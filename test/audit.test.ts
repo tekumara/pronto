@@ -86,9 +86,9 @@ function evidenceInput(body: Request) {
 }
 function assessments() {
   return { assessments: [
-    { commentKey: `inline:${accessId}`, findings: [{ summary: "Access check", status: "outstanding", reason: "The code returns true without checking access.", evidence: [codeUrl] }] },
+    { commentKey: `inline:${accessId}`, findings: [{ summary: "Access check", status: "outstanding", awaiting: "human", reason: "The code returns true without checking access.", evidence: [codeUrl] }] },
     { commentKey: "inline:102", findings: [{ summary: "Null check", status: "addressed", reason: "The guard handles a missing user.", evidence: [codeUrl, commentUrl(103)] }] },
-    { commentKey: "comment:201", findings: [{ summary: "Policy", status: "uncertain", reason: "The policy is not specified.", evidence: [commentUrl(201)] }] },
+    { commentKey: "comment:201", findings: [{ summary: "Policy", status: "uncertain", awaiting: "human", reason: "The policy is not specified.", evidence: [commentUrl(201)] }] },
     { commentKey: "comment:202", findings: [{ summary: "Deployment", status: "not-actionable", reason: "Status update only.", evidence: [commentUrl(202)] }] },
     { commentKey: "review:301", findings: [{ summary: "Approval", status: "not-actionable", reason: "Praise with no requested change.", evidence: [commentUrl(301)] }] },
     { commentKey: "review:302", findings: [{ summary: "Summary", status: "not-actionable", reason: `Duplicates inline:${accessId}.`, evidence: [commentUrl(accessId)] }] },

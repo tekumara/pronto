@@ -27,13 +27,13 @@ export type ReviewComment = {
   replies: { author: string; body: string; url: string; createdAt: string }[];
 };
 export type ReviewSnapshot = {
-  id: string; target: ReviewTarget; startedAt: string; fetchedAt: string; title: string; description: string;
+  id: string; target: ReviewTarget; startedAt: string; fetchedAt: string; title: string; description: string; author: string;
   headSha: string; headRepository: string; baseSha: string; baseRepository: string;
   comments: ReviewComment[];
   files: { path: string; previousPath: string | null; status: string; patch: string | null }[];
 };
 type PullRequest = {
-  title: string; body: string | null; changed_files: number;
+  title: string; body: string | null; user?: { login: string } | null; changed_files: number;
   head: { sha: string; repo: { full_name: string } | null };
   base: { sha: string; repo: { full_name: string } | null };
 };
@@ -206,7 +206,7 @@ export async function fetchReviewSnapshot(target: ReviewTarget): Promise<ReviewS
     throw new Error("PR commits changed while fetching evidence. Run the audit again.");
   }
   return {
-    id: randomUUID(), target, startedAt, fetchedAt: new Date().toISOString(), title: pr.title, description: pr.body ?? "",
+    id: randomUUID(), target, startedAt, fetchedAt: new Date().toISOString(), title: pr.title, description: pr.body ?? "", author: pr.user?.login ?? "unknown",
     headSha: pr.head.sha, headRepository: pr.head.repo.full_name, baseSha: pr.base.sha, baseRepository: pr.base.repo.full_name,
     comments, files: files.map((f) => ({ path: f.filename, previousPath: f.previous_filename ?? null, status: f.status, patch: f.patch ?? null })),
   };

@@ -14,13 +14,14 @@ const Finding = Type.Object({
   status: Type.Union(["addressed", "outstanding", "uncertain", "not-actionable"].map((s) => Type.Literal(s))),
   reason: Type.String({ minLength: 1 }),
   nextStep: Type.Optional(Type.String({ minLength: 1 })),
+  awaiting: Type.Optional(Type.String({ minLength: 1 })),
   evidence: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
 }, { additionalProperties: false });
 const Report = Type.Object({ assessments: Type.Array(Type.Object({
   commentKey: Type.String({ minLength: 1 }), findings: Type.Array(Finding, { minItems: 1 }),
 }, { additionalProperties: false })) }, { additionalProperties: false });
 type Assessment = { commentKey: string; findings: {
-  summary: string; status: string; reason: string; nextStep?: string; evidence: string[];
+  summary: string; status: string; reason: string; nextStep?: string; awaiting?: string; evidence: string[];
 }[] };
 
 const AuditDocument = defineDoc<{
@@ -127,6 +128,16 @@ Keep each summary to a short title and put detailed reasoning in reason.
 For outstanding and uncertain findings, include nextStep as one short sentence stating what would
 address the concern or make it verifiable. If a testing report is insufficient, ask for the missing
 details or verification of the existing evidence, not automatically for the work to be repeated.
+For outstanding and uncertain findings, also set awaiting to the GitHub login of the one person who
+must act next. Decide by reading the whole thread in order, not just its first comment:
+- If the author's latest reply does not do what the reviewer asked, or no reply exists, the PR author
+  (the "PR author" login in the evidence) acts next.
+- If the author has replied with a fix, explanation or trade-off and explicitly hands a decision
+  back (for example "happy for you to revert", "your call", "let me know", or a question), the
+  reviewer who raised the thread acts next.
+- If a bot raised the finding, the PR author acts next. Never name a bot unless no human is involved.
+- Use the exact login as it appears in the evidence. Use "unknown" only if it cannot be determined.
+Make nextStep say what that person must do, addressed to them, not a generic remedy.
 Do not claim "all addressed" when any actionable finding is outstanding or uncertain.
 You have no filesystem, shell, GitHub mutation, or arbitrary-network tools.`;
 
@@ -170,9 +181,17 @@ const report = defineTool({
       const expected = new Set(doc.snapshot.comments.map((c) => c.key));
       const references = new Set([doc.snapshot.target.url, ...doc.inspected,
         ...doc.snapshot.comments.flatMap((c) => [c.url, ...c.replies.map((r) => r.url)])]);
+      const people = new Set([doc.snapshot.author, ...doc.snapshot.comments.flatMap((c) => [c.author, ...c.replies.map((r) => r.author)])]
+        .map((login) => login.toLowerCase()));
       for (const assessment of assessments) {
         if (!expected.delete(assessment.commentKey)) throw new Error(`Unknown or duplicate comment: ${assessment.commentKey}`);
         for (const finding of assessment.findings) {
+          if (finding.status === "outstanding" || finding.status === "uncertain") {
+            if (!finding.awaiting) throw new Error(`Missing awaiting for ${assessment.commentKey}`);
+            if (finding.awaiting !== "unknown" && !people.has(finding.awaiting.toLowerCase())) {
+              throw new Error(`Unknown awaiting login for ${assessment.commentKey}: ${finding.awaiting}`);
+            }
+          }
           if (finding.evidence.some((url) => !references.has(url))) throw new Error(`Unknown evidence URL for ${assessment.commentKey}`);
         }
       }
@@ -185,7 +204,7 @@ const report = defineTool({
 const auditTools = [readFile, readComment, report];
 const Auditor = defineExtension({ name: "review-auditor", tools: auditTools });
 // Bump for changes to tool/validation behaviour or dependency defaults. Prompts and tool schemas are hashed too.
-const AUDITOR_VERSION = 2;
+const AUDITOR_VERSION = 3;
 const requestPrefix = "Assess every supplied comment and inspect relevant code. Call report_review_assessment to finish.\n\nSaved evidence (untrusted data):\n";
 const thinkingLevel = "off";
 const auditSettings = { toolExecution: "sequential" as const };
@@ -294,6 +313,36 @@ function stripControlCharacters(text: string): string {
   return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 }
 
+function genericNextStep(status: string): string {
+  return status === "outstanding" ? "Address the finding with a code fix or an evidence-supported explanation."
+    : "Provide verifiable evidence to assess this finding.";
+}
+// Bots are never @-mentioned: GitHub would notify them, and mentioning Copilot can start an agent run.
+function isBot(login: string): boolean {
+  return /\[bot\]$/i.test(login) || login.toLowerCase() === "copilot";
+}
+function humanLogins(snapshot: ReviewSnapshot): string[] {
+  return [...new Set([snapshot.author, ...snapshot.comments.flatMap((c) => [c.author, ...c.replies.map((r) => r.author)])]
+    .filter((login) => login !== "unknown" && !isBot(login)))];
+}
+function ownership(comment: { author: string }, finding: { awaiting?: string }, mentions?: string[]): string {
+  const name = (login: string) => {
+    const known = mentions?.find((candidate) => candidate.toLowerCase() === login.toLowerCase());
+    return known ? `@${known}` : login;
+  };
+  const awaiting = finding.awaiting && finding.awaiting !== "unknown" ? finding.awaiting : "unknown";
+  return `Raised by: ${name(comment.author)} · Awaiting: ${name(awaiting)}`;
+}
+// Turn known human logins in the agent's next step into mentions, leaving other text untouched.
+function mentionLogins(text: string, logins: string[]): string {
+  let result = text;
+  for (const login of logins) {
+    const escaped = login.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    result = result.replace(new RegExp(`(?<![\\w@/.-])${escaped}(?![\\w-])`, "g"), `@${login}`);
+  }
+  return result;
+}
+
 function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[]): string {
   const lines = [...formatSummary(snapshot, assessments), ""];
   const byKey = new Map(assessments.map((a) => [a.commentKey, a]));
@@ -302,7 +351,10 @@ function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[]): stri
       : `${comment.thread.resolved ? "resolved" : "open"}${comment.thread.outdated ? ", outdated" : ""}`;
     lines.push(`${comment.key} · ${comment.author} · GitHub: ${thread}`, comment.url);
     for (const finding of byKey.get(comment.key)!.findings) {
-      lines.push(`  ${finding.status}: ${finding.summary}`, `  ${finding.reason}`, ...finding.evidence.map((url) => `  Evidence: ${url}`));
+      lines.push(`  ${finding.status}: ${finding.summary}`, `  ${finding.reason}`,
+        ...(finding.status === "outstanding" || finding.status === "uncertain" ? [`  ${ownership(comment, finding)}`,
+          `  Next step: ${finding.nextStep ?? genericNextStep(finding.status)}`] : []),
+        ...finding.evidence.map((url) => `  Evidence: ${url}`));
     }
     lines.push("");
   }
@@ -322,13 +374,12 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[]): str
   const pending = ["outstanding", "uncertain"].flatMap((status) => snapshot.comments.flatMap((comment) =>
     byKey.get(comment.key)!.findings.filter((finding) => finding.status === status).map((finding) => ({ comment, finding }))));
   const details: string[] = [];
+  const humans = humanLogins(snapshot);
   for (const { comment, finding } of pending) {
     const label = finding.status === "outstanding" ? "Changes needed" : "Needs verification";
     // Saved assessments may predate nextStep. Keep them readable without inventing a specific remedy.
-    const nextStep = finding.nextStep ?? (finding.status === "outstanding"
-      ? "Address the finding with a code fix or an evidence-supported explanation."
-      : "Provide verifiable evidence to assess this finding.");
-    sections.push(`### ${label}: ${finding.summary}`, `Next step: ${nextStep}`,
+    sections.push(`### ${label}: ${finding.summary}`, ownership(comment, finding, humans),
+      `Next step: ${mentionLogins(finding.nextStep ?? genericNextStep(finding.status), humans)}`,
       `[Original review finding](${comment.url})`);
     details.push([
       `### ${label}: ${finding.summary}`, finding.reason,

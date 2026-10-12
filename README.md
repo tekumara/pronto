@@ -87,7 +87,7 @@ Reported testing counts as `addressed` for approval eligibility. This relies on 
 
 ### Post a verdict comment
 
-Add `--apply` to post a compact audit comment. It shows the verdict, finding counts, and each outstanding or uncertain finding with its next step and original review link. Reasoning, evidence links and audit metadata sit in collapsed GitHub Markdown sections:
+Add `--apply` to post a compact audit comment. It shows the verdict, finding counts, and each outstanding or uncertain finding with who raised it, who acts next, what they need to do, and the original review link. Reasoning, evidence links and audit metadata sit in collapsed GitHub Markdown sections:
 
 ```sh
 pronto --apply https://github.com/owner/repo/pull/42
@@ -153,7 +153,7 @@ This audit checks review findings, not overall PR correctness.
 
 The headline is “Changes needed” when findings remain outstanding, or “Verification needed” when only uncertainty remains. With neither, it says “All actionable findings addressed” if there is at least one addressed finding, or “No actionable findings identified” otherwise.
 
-Outstanding findings appear before uncertain findings. Only their reasoning and evidence appear in the first collapsed section. If there are none, that section is omitted. Audit context remains available, including the audited head, fetch window, thread-resolution counts, non-actionable count and meaning of `addressed`. Saved assessments without a specific next step use a generic action for their status. The terminal report retains explanations and evidence for all findings.
+Outstanding findings appear before uncertain findings. Only their reasoning and evidence appear in the first collapsed section. If there are none, that section is omitted. Audit context remains available, including the audited head, fetch window, thread-resolution counts, non-actionable count and meaning of `addressed`. In the posted comment, human logins in these lines and in the next step are written as `@login` so GitHub notifies them; bots (`[bot]` accounts and Copilot) are never mentioned, and the terminal report stays plain. Each shows `Raised by` (the comment author, taken from the evidence) and `Awaiting` (the person who must act next). The auditor chooses `Awaiting` from the thread order: the PR author when a reply is missing or does not do what was asked, or when a bot raised the finding; the reviewer who opened the thread when the author's reply hands a decision back. The login must appear in the PR evidence or be `unknown`, and a report without it is rejected. Saved assessments without a specific next step or `Awaiting` use a generic action and `unknown`. The terminal report retains explanations and evidence for all findings.
 
 The verdict comment is previewed by default. With `--apply`, Pronto posts it. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to create and edit PR comments.
 

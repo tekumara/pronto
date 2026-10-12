@@ -87,7 +87,7 @@ function snapshotFrom(body: Request): ReviewSnapshot {
 function assess(body: Request, response: ServerResponse, number: number) {
   const snapshot = snapshotFrom(body);
   tool(response, "report_review_assessment", { assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
-    commentKey: comment.key, findings: [{ summary: `Assessment ${number}`, status: "uncertain",
+    commentKey: comment.key, findings: [{ summary: `Assessment ${number}`, status: "uncertain", awaiting: "reviewer",
       reason: "The available evidence is insufficient.", evidence: [comment.url] }],
   })) });
   return snapshot;

@@ -20,7 +20,7 @@ function assess(body: Request, response: ServerResponse, statuses: Status[] = ["
   const snapshot = JSON.parse(input.slice(input.indexOf(marker) + marker.length));
   tool(response, "report_review_assessment", { assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
     commentKey: comment.key, findings: comment.key === "inline:1" ? statuses.map((status) => ({
-      summary: "Requested explanation", status,
+      summary: "Requested explanation", status, ...(status === "addressed" || status === "not-actionable" ? {} : { awaiting: "author" }),
       reason: status === "addressed" ? "The reply explains the intentional behaviour." : "The explanation needs more evidence.",
       evidence: [evidenceUrl],
     })) : [{ summary: "PR discussion", status: "not-actionable", reason: "No additional request.", evidence: [comment.url] }],
@@ -235,17 +235,17 @@ test("verdict comments keep open findings and next steps visible and collapse re
     tool(response, "report_review_assessment", { assessments: [
       { commentKey: "inline:1", findings: [
         { summary: "Missing access check", status: "outstanding",
-          reason: "The current code still grants access without checking roles.\u001b",
-          nextStep: "Check the user's role before granting access.", evidence: [evidenceUrl, `${url}#discussion_r2`] },
+          reason: "The current code still grants access without checking roles.\u001b", awaiting: "author",
+          nextStep: "author should check the user's role before granting access.", evidence: [evidenceUrl, `${url}#discussion_r2`] },
         { summary: "Null guard", status: "addressed", reason: "The null guard is already fixed.", evidence: [evidenceUrl] },
         { summary: "Duplicate request", status: "not-actionable", reason: "This repeats the access check finding.", evidence: [evidenceUrl] },
       ] },
       { commentKey: "comment:3", findings: [
         { summary: "Undefined access policy", status: "uncertain",
           reason: "The discussion does not specify which roles should have access.",
-          nextStep: "Confirm which roles should have access.", evidence: [issueUrl] },
+          awaiting: "human", nextStep: "Confirm which roles should have access.", evidence: [issueUrl] },
         { summary: "Missing policy documentation", status: "outstanding",
-          reason: "The requested policy documentation is still absent.", evidence: [issueUrl] },
+          reason: "The requested policy documentation is still absent.", awaiting: "author", evidence: [issueUrl] },
       ] },
     ] });
   }, { entrypoint: resolve("audit.ts"), github: github.handler });
@@ -258,10 +258,12 @@ test("verdict comments keep open findings and next steps visible and collapse re
   assert.match(visible, /## Review audit · Changes needed/);
   assert.match(visible, /1 addressed · 2 outstanding · 1 uncertain/);
   assert.match(visible, /### Changes needed: Missing access check/);
-  assert.match(visible, /Next step: Check the user's role before granting access\./);
+  assert.match(visible, /Next step: @author should check the user's role before granting access\./);
+  assert.match(visible, /Raised by: @human · Awaiting: @author/, "humans are @-mentioned in the posted comment");
   assert.ok(visible.includes(`[Original review finding](${evidenceUrl})`));
   assert.match(visible, /### Needs verification: Undefined access policy/);
   assert.match(visible, /Next step: Confirm which roles should have access\./);
+  assert.match(visible, /Awaiting: @human/, "the thread opener can be the one who acts next");
   assert.ok(visible.includes(`[Original review finding](${issueUrl})`));
   assert.match(visible, /### Changes needed: Missing policy documentation/);
   assert.match(visible, /Next step: Address the finding with a code fix or an evidence-supported explanation\./,
@@ -294,6 +296,51 @@ test("an unstructured final answer cannot bypass complete report validation, pos
   assert.equal(github.comments.length, 0);
   assert.equal(github.approvals.length, 0);
 });
+
+test("posted comments @-mention humans but never bots, and the terminal report stays plain", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence({ issueComments: [issueComment(3, "Automated finding.", "Copilot"), issueComment(4, "Another.", "scanner[bot]")] });
+  const f = await fixture(t, (_body, response) => {
+    tool(response, "report_review_assessment", { assessments: [
+      { commentKey: "inline:1", findings: [{ summary: "Explain", status: "addressed", reason: "Explained.", evidence: [evidenceUrl] }] },
+      { commentKey: "comment:3", findings: [{ summary: "Bot one", status: "outstanding", reason: "Open.", awaiting: "author",
+        nextStep: "Ask Copilot and author to confirm.", evidence: [`${url}#issuecomment-3`] }] },
+      { commentKey: "comment:4", findings: [{ summary: "Bot two", status: "outstanding", reason: "Open.", awaiting: "human",
+        evidence: [`${url}#issuecomment-4`] }] },
+    ] });
+  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  const terminal = await f.run("", ["--apply", url]);
+  const body = github.comments[0];
+  assert.match(body, /Raised by: Copilot · Awaiting: @author/);
+  assert.match(body, /Raised by: scanner\[bot\] · Awaiting: @human/);
+  assert.match(body, /Next step: Ask Copilot and @author to confirm\./);
+  assert.doesNotMatch(body, /@Copilot|@scanner/);
+  const report = terminal.split("[audit:dry-run]")[0];
+  assert.match(report, /Raised by: Copilot · Awaiting: author/);
+  assert.doesNotMatch(report, /@author|@human/);
+});
+
+for (const awaiting of [undefined, "invented-person"]) {
+  test(`an outstanding finding ${awaiting ? "awaiting someone outside the PR" : "without an awaiting person"} is rejected`, { timeout: 20000 }, async (t) => {
+    const github = githubEvidence();
+    const requests: string[] = [];
+    const f = await fixture(t, (body, response) => {
+      requests.push(JSON.stringify(body));
+      if (requests.length > 1) return reply(response, [{ role: "assistant", content: "Done." }]);
+      const snapshot = JSON.parse(body.messages.findLast((m) => m.role === "user")!.content!.split("Saved evidence (untrusted data):\n")[1]);
+      tool(response, "report_review_assessment", { assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
+        commentKey: comment.key, findings: [{ summary: "Open", status: "outstanding", reason: "Still open.", evidence: [comment.url],
+          ...(awaiting ? { awaiting } : {}) }],
+      })) });
+    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    const { child, done } = f.start(["--apply", url]);
+    child.stdin.end();
+    const result = await done;
+    assert.equal(result.code, 1);
+    assert.match(requests[1], awaiting ? /Unknown awaiting login/ : /Missing awaiting/);
+    assert.doesNotMatch(result.stdout, /Verdict:/);
+    assert.equal(github.comments.length, 0);
+  });
+}
 
 for (const action of ["comment", "update", "approve"] as const) {
   test(`a failed ${action} request exits nonzero without retrying or losing the completed assessment`, { timeout: 20000 }, async (t) => {
