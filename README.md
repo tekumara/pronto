@@ -33,6 +33,8 @@ pronto 42
 
 These forms require the GitHub CLI (`gh`). Pronto runs `gh pr view` in your current directory, using the same repository, PR tracking ref, push configuration and fork selection rules as [gh's PR finder](https://github.com/cli/cli/blob/v2.100.0/pkg/cmd/pr/shared/finder.go). If selection fails, the command exits before starting an audit. An explicit PR URL does not require `gh` when you provide a token.
 
+Already merged PRs are skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto checks live merge status before starting, resuming or reusing an audit. It does not call the model or write to GitHub for merged PRs.
+
 You can also run the CLI without a global link using `npm run audit -- [<number> | <branch> | <GitHub PR URL>]` from this repository.
 
 The auditor uses your saved Pi default model, or the first available model if there is no usable default. Choose a specific model by adding `provider/model-id` after an explicit target:

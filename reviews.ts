@@ -33,7 +33,7 @@ export type ReviewSnapshot = {
   files: { path: string; previousPath: string | null; status: string; patch: string | null }[];
 };
 type PullRequest = {
-  title: string; body: string | null; user?: { login: string } | null; changed_files: number;
+  merged: boolean; title: string; body: string | null; user?: { login: string } | null; changed_files: number;
   head: { sha: string; repo: { full_name: string } | null };
   base: { sha: string; repo: { full_name: string } | null };
 };
@@ -144,11 +144,14 @@ function github() {
   return { token, base, graphql, fetcher, request, pages };
 }
 
-export async function fetchReviewSnapshot(target: ReviewTarget): Promise<ReviewSnapshot> {
+export async function fetchPullRequest(target: ReviewTarget): Promise<PullRequest> {
+  const client = github();
+  return client.request<PullRequest>(`${client.base}/repos/${target.owner}/${target.repo}/pulls/${target.pr}`);
+}
+
+export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest, startedAt: string): Promise<ReviewSnapshot> {
   const client = github();
   const path = `/repos/${target.owner}/${target.repo}/pulls/${target.pr}`;
-  const startedAt = new Date().toISOString();
-  const pr = await client.request<PullRequest>(`${client.base}${path}`);
   if (!pr.head.repo || !pr.base.repo || !/^[a-f\d]{40}$/i.test(pr.head.sha) || !/^[a-f\d]{40}$/i.test(pr.base.sha)) {
     throw new Error("PR repositories or immutable commit SHAs are unavailable");
   }

@@ -14,7 +14,7 @@ const commentUrl = (id: number) => `${prUrl}#discussion_r${id}`;
 
 // GitHub and the model are external HTTP fixtures. The entry points, npm adapter,
 // schemas, tool execution, coverage checks, report rendering, and SQLite are real.
-function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean } = {}) {
+function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; state?: "open" | "closed" } = {}) {
   let prRequests = 0;
   const requests: string[] = [];
   const handle = async (request: IncomingMessage, response: ServerResponse) => {
@@ -48,7 +48,8 @@ function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean } 
     if (url.pathname === "/github/user") {
       json({ login: "auditor" });
     } else if (url.pathname === "/github/repos/acme/demo/pulls/7") {
-      json({ title: "Access checks", body: "Review this change", changed_files: options.incompleteFiles ? 3 : 2,
+      json({ title: "Access checks", body: "Review this change", merged: options.merged ?? false,
+        state: options.state ?? (options.merged ? "closed" : "open"), changed_files: options.incompleteFiles ? 3 : 2,
         head: { sha: options.moved && ++prRequests > 1 ? "c".repeat(40) : headSha, repo: { full_name: "contributor/fork" } },
         base: { sha: baseSha, repo: { full_name: "acme/demo" } },
       });
@@ -95,8 +96,33 @@ function assessments() {
   ] };
 }
 
-test("CLI audit assesses all discussion using remote pinned code, rejects unsafe calls and incomplete or uncited reports", { timeout: 20000 }, async (t) => {
-  const github = githubEvidence();
+for (const { name, entrypoint, input, args } of [
+  { name: "CLI", entrypoint: resolve("audit.ts"), input: "", args: [prUrl, "--force", "--apply", "--approve"] },
+  { name: "chat", entrypoint: resolve("agent.ts"), input: `/audit --force --apply --approve ${prUrl}\n/quit\n`, args: [] },
+]) {
+  test(`${name} skips an already merged PR successfully, even with --force --apply --approve`, { timeout: 20000 }, async (t) => {
+    let reads = 0;
+    const f = await fixture(t, () => assert.fail("Merged PRs must not reach the model"), {
+      entrypoint,
+      github: (request, response) => {
+        reads++;
+        assert.equal(request.method, "GET", "Merged PRs must not mutate GitHub");
+        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Merged PRs need no review or code evidence");
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+          merged: true, state: "closed", title: "Merged PR", body: "", changed_files: 0,
+          head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: { full_name: "acme/demo" } },
+        }));
+      },
+    });
+    const output = await f.run(input, args);
+    assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR has already been merged.`));
+    assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
+    assert.equal(reads, 1);
+  });
+}
+
+test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects unsafe calls and incomplete or uncited reports", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence({ state: "closed" });
   let turn = 0;
   let policy = "";
   const f = await fixture(t, (body, response) => {
@@ -277,8 +303,9 @@ for (const failure of ["moved", "incompleteFiles"] as const) {
   });
 }
 
-test("restart resumes the saved audit snapshot without refetching or resubmitting it", { timeout: 20000 }, async (t) => {
-  const github = githubEvidence();
+test("restart checks merge status but resumes saved evidence without refetching or resubmitting it", { timeout: 20000 }, async (t) => {
+  const prState = { merged: false };
+  const github = githubEvidence(prState);
   const started = Promise.withResolvers<void>();
   let turn = 0;
   let snapshotId: string;
@@ -296,7 +323,10 @@ test("restart resumes the saved audit snapshot without refetching or resubmittin
         started.resolve();
         break;
       case 1:
-        assert.deepEqual(github.requests, snapshotRequests, "snapshot endpoints must not be refetched on resume");
+        assert.deepEqual(github.requests.slice(snapshotRequests.length), [
+          "/github/repos/acme/demo/pulls/7", // Merged skip.
+          "/github/repos/acme/demo/pulls/7", // Resume status check.
+        ], "only live merge status must be fetched before resuming saved evidence");
         tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
         break;
       case 2:
@@ -318,6 +348,12 @@ test("restart resumes the saved audit snapshot without refetching or resubmittin
   assert.deepEqual(github.requests, snapshotRequests!, "a competing audit must fail before refetching evidence");
   first.child.kill("SIGKILL");
   await first.done;
+  prState.merged = true;
+  const skipped = await f.run("", [prUrl, "--force", "--apply", "--approve"]);
+  assert.match(skipped, /Skipping .*already been merged/);
+  assert.doesNotMatch(skipped, /Resuming saved snapshot|Restarting unfinished audit|Verdict:/);
+  assert.equal(turn, 1, "a merged PR must not resume or restart unfinished model work");
+  prState.merged = false;
   const output = await f.run("", [prUrl]);
   assert.match(output, /Resuming saved snapshot/);
   assert.match(output, /Verdict: Not all actionable findings are addressed/);
@@ -325,4 +361,11 @@ test("restart resumes the saved audit snapshot without refetching or resubmittin
   const cached = await f.run("", [prUrl]);
   assert.match(cached, /Reusing saved assessment/);
   assert.equal(turn, 3, "a recovered successful assessment must be published to the cache");
+  prState.merged = true;
+  const reads = github.requests.length;
+  const skippedCached = await f.run("", [prUrl, "--apply", "--approve"]);
+  assert.match(skippedCached, /Skipping .*already been merged/);
+  assert.doesNotMatch(skippedCached, /Reusing saved assessment|Verdict:/);
+  assert.equal(turn, 3, "a merged PR must not reassess a cached audit");
+  assert.deepEqual(github.requests.slice(reads), ["/github/repos/acme/demo/pulls/7"]);
 });

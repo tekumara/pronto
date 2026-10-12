@@ -472,7 +472,7 @@ test("force-restart intent and model survive a crash during fresh evidence fetch
       started();
     } else assess(body, response, calls);
   }, { entrypoint: audit, github: (request, response) => {
-    if (stalled && request.url === "/github/repos/acme/project/pulls/9") { fetching(); return; }
+    if (stalled && request.url === "/github/repos/acme/project/pulls/9/files?per_page=100") { fetching(); return; }
     github.handler(request, response);
   } });
   await addModel(f.agentDir);

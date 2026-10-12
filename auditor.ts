@@ -7,7 +7,7 @@ import {
   type Conversation, type ConversationId, type ModelRef,
 } from "@earendil-works/pi-durable";
 import { openStateHarness } from "./state.ts";
-import { AUDIT_COMMENT_MARKER, approveReview, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postReviewComment, readGithubFile, type ReviewSnapshot } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postReviewComment, readGithubFile, type ReviewSnapshot } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -439,7 +439,13 @@ export async function runAudit(url: string, options: {
   process.on("SIGTERM", quit);
   let stream: Awaited<ReturnType<typeof watchEvents>> | undefined;
   try {
-    // Persist force intent before cancellation/fetching. A crash must not turn --force into a cache hit,
+    const startedAt = new Date().toISOString();
+    const pr = await fetchPullRequest(target);
+    if (pr.merged) {
+      console.log(`[audit] Skipping ${target.url}: PR has already been merged.`);
+      return;
+    }
+    // Persist force intent before cancellation/evidence fetching. A crash must not turn --force into a cache hit,
     // or silently switch its selected model. Clear the intent only when the new snapshot is admitted.
     if (options.force) await harness.commit(async (tx) => {
       (await tx.doc(AuditRuns)).restartModel = options.model;
@@ -474,7 +480,7 @@ export async function runAudit(url: string, options: {
       const model = state?.restartModel ?? options.model;
       const policy = policyFingerprint(options.models, model);
       console.log(`[audit] Fetching ${target.url}`);
-      snapshot = await fetchReviewSnapshot(target);
+      snapshot = await fetchReviewSnapshot(target, pr, startedAt);
       console.log(`[audit] PR title: ${stripControlCharacters(snapshot.title)}`);
       const fingerprint = evidenceFingerprint(snapshot, policy);
       const cached = !state?.restartModel && state?.latestSuccess;
