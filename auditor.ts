@@ -397,16 +397,16 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[]): str
 }
 
 async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[], options: {
-  sticky?: boolean; approve?: boolean; allowUncertain?: boolean; apply?: boolean;
+  sticky?: boolean; approve?: boolean; allowUncertain?: boolean; apply?: boolean; reused?: boolean;
 }): Promise<void> {
   console.log(`\n${formatReport(snapshot, assessments)}\n`);
   const body = formatComment(snapshot, assessments);
   const dryRun = !options.apply;
   if (dryRun) console.log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
   // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const { action, url } = await postAuditComment(snapshot.target, body, options.sticky, options.apply);
-  console.log(dryRun ? `[audit:dry-run] Comment would be ${action}.`
-    : stripControlCharacters(`[audit] Verdict comment ${action} ${action === "updated" ? "on" : "to"} the PR: ${url}`));
+  const { action, url } = await postAuditComment(snapshot.target, body, options);
+  console.log(dryRun ? `[audit:dry-run] Comment would be ${action === "unchanged" ? "left unchanged (reused assessment)" : action}.`
+    : stripControlCharacters(`[audit] Verdict comment ${action} ${action === "posted" ? "to" : "on"} the PR: ${url}`));
   if (options.approve) {
     const { counts, approvable } = summarizeFindings(assessments);
     const canApprove = approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding);
@@ -498,7 +498,7 @@ export async function runAudit(url: string, options: {
             } });
           }, context);
           console.log(`[audit] Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`);
-          await outputReport(saved.snapshot, saved.report, options);
+          await outputReport(saved.snapshot, saved.report, { ...options, reused: true });
           return;
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");

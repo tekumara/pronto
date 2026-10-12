@@ -159,7 +159,7 @@ Outstanding findings appear before uncertain findings. Only their reasoning and 
 
 The verdict comment is previewed by default. With `--apply`, Pronto posts it. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to create and edit PR comments.
 
-Comments are sticky by default (`--sticky=true`). Each invocation with `--apply` updates the latest audit comment posted by your authenticated GitHub account, or creates one if none exists. Other accounts' comments and your unrelated comments are left unchanged. Audit comments include a hidden marker on their final line. Sticky updates recognise this marker, not the heading; unmarked older reports are left unchanged.
+Comments are sticky by default (`--sticky=true`). A fresh assessment with `--apply` updates the latest audit comment posted by your authenticated GitHub account. A reused assessment leaves an existing comment unchanged, including its body and edit timestamp. Both create a comment if none exists. Other accounts' comments and your unrelated comments are left unchanged. Audit comments include a hidden marker on their final line. Sticky updates recognise this marker, not the heading; unmarked older reports are left unchanged.
 
 To create a new comment every time, set `--sticky=false`:
 
@@ -169,7 +169,7 @@ pronto --apply --sticky=false https://github.com/owner/repo/pull/42
 
 You can also write `--sticky false`. A bare `--sticky`, `--sticky true` or `--sticky=true` enables sticky updates. The flag only controls whether the verdict comment is updated or newly created; it does not change approval behaviour. If several audit comments already exist, only the latest created one is updated; older comments remain.
 
-With `--apply`, the host posts or updates only after a complete, validated assessment, including a cache hit. It looks up live comments even when the assessment uses a saved snapshot. The model remains read-only. Marked Pronto comments and approval reviews without a body do not invalidate the evidence cache. Changes to other PR discussion still do.
+With `--apply`, the host publishes comments only after a complete, validated assessment. It looks up live comments even when the assessment uses a saved snapshot. A cache hit can publish a missing comment, such as an assessment first run as a preview. It does not overwrite an existing sticky comment, even if someone edited its body. The terminal reports `Verdict comment unchanged`. Use `--force --apply` to replace an existing comment with a fresh assessment. The model remains read-only. Marked Pronto comments and approval reviews without a body do not invalidate the evidence cache. Changes to other PR discussion still do.
 
 GitHub writes are not replayed by Durable, and the flags do not persist across invocations. If a write fails, the CLI exits 1 but retains the completed assessment. A failed update does not fall back to creating a new comment. After an interruption or ambiguous network failure, check the PR before retrying. Concurrent first-time posts can still create duplicates.
 
@@ -193,7 +193,7 @@ pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA and has no body. The full audit report remains in the PR comment, so approval does not duplicate it. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
-With `--apply --approve`, the host posts the comment first, then submits the approval if eligible. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
+With `--apply --approve`, the host handles the comment first, then submits the approval if eligible. Leaving an existing comment unchanged on a cache hit does not skip approval. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
 
 Approvals are not replayed by Durable, and the flag does not persist across invocations. Approval errors exit 1 but retain the completed assessment. A comment already posted by `--apply` remains if approval fails. Check the PR before retrying after an interruption or ambiguous network failure.
 
@@ -205,7 +205,7 @@ Audits run in dry-run mode by default. They show the exact comment body without 
 pronto --approve https://github.com/owner/repo/pull/42
 ```
 
-The normal report is followed by a labelled comment preview and the planned actions. With sticky comments enabled, the preview looks up the latest matching audit comment and reports whether it would be updated or created. For an addressed verdict with no existing audit comment, the action preview looks like this:
+The normal report is followed by a labelled comment preview and the planned actions. With sticky comments enabled, the preview looks up the latest matching audit comment. It reports whether the comment would be updated, created or left unchanged because the assessment was reused. The displayed body is the rendered assessment, not any manual edits to an existing comment. For an addressed verdict with no existing audit comment, the action preview looks like this:
 
 ```text
 [audit:dry-run] Comment would be posted.
@@ -220,9 +220,9 @@ To perform the selected actions, add `--apply`:
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--apply` defaults to false. When supplied, it posts or updates the verdict comment; with `--approve`, it also submits an approval if eligible. Without `--apply`, no comments or reviews are created or updated. The flag does not persist across invocations; every invocation that writes must include it.
+`--apply` defaults to false. When supplied, it performs the selected comment action; with `--approve`, it also submits an approval if eligible. Existing sticky comments remain unchanged when the assessment is reused. Without `--apply`, no comments or reviews are created or updated. The flag does not persist across invocations; every invocation that writes must include it.
 
-With no action flags, the default preview shows the comment body and says it would be posted if you add `--apply`. A preview does not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed; omit `--apply` to preview.
+With no action flags, the default preview shows the rendered comment body and the planned comment action. A preview does not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed; omit `--apply` to preview.
 
 The audit otherwise runs normally: it fetches evidence, may call the model, saves its assessment and uses the cache. Dry-run mode prevents GitHub writes, not local storage writes or model requests. You can combine previews with `--force` to reassess fresh evidence.
 
@@ -252,7 +252,7 @@ Unfinished audit?
 
 After interruption, run the same PR audit from the same directory to resume its saved snapshot and model. If an older unfinished snapshot contains marked Pronto output, resuming stops before model execution. Use `--force` to start with fresh, filtered evidence. Historical snapshots and transcripts remain unchanged.
 
-After completion, the auditor fetches current evidence and compares it with the latest successful assessment. It reuses that assessment when the evidence and assessment policy match. A cache hit makes no model requests. The terminal shows when the assessment was saved and when the evidence was rechecked.
+After completion, the auditor fetches current evidence and compares it with the latest successful assessment. It reuses that assessment when the evidence and assessment policy match. A cache hit makes no model requests and leaves any existing sticky verdict comment unchanged. The terminal shows when the assessment was saved and when the evidence was rechecked.
 
 Before refreshing an existing audit, Pronto prints the reasons in the terminal. These identify changed PR fields, added or removed comment keys, changed comment fields, and changed file paths. Comment changes include metadata such as timestamps, replies and thread state, even when the body is unchanged. For example:
 

@@ -141,21 +141,22 @@ for (const status of ["addressed", "uncertain"] as const) {
       assert.equal(github.comments.length, 1);
       assert.equal(github.approvals.length, 0, "posting a comment must not imply approval");
     }
+    const published = structuredClone(github.issueComments);
     const posted = status === "addressed"
       ? await f.run("", [url, "local/test", "--approve", "--apply"])
       : await f.run(`/audit --approve --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
     assert.match(posted, verdict);
-    assert.match(posted, status === "addressed" ? /Verdict comment updated/ : /Verdict comment posted/);
-    assert.equal(github.comments.length, status === "addressed" ? 2 : 1);
+    assert.match(posted, status === "addressed" ? /Verdict comment unchanged/ : /Verdict comment posted/);
+    assert.equal(github.comments.length, 1);
     assert.match(github.comments[0], commentHeadline);
     assert.ok(github.comments[0].includes(`audited head: \`${sha}\``));
     assert.match(github.comments[0], status === "addressed" ? /1 addressed · 0 outstanding · 0 uncertain/ : /0 addressed · 0 outstanding · 1 uncertain/);
     assert.match(github.comments[0], /Addressed includes code fixes and supported explanations or scope decisions, not necessarily the requested code change\./);
     if (status === "addressed") {
-      assert.equal(github.issueComments.length, 1, "repeated posting must update rather than append");
-      assert.deepEqual(github.updates, [github.issueComments[0].id]);
+      assert.deepEqual(github.issueComments, published, "reuse must preserve the published body and update timestamp");
+      assert.deepEqual(github.updates, [], "reusing an assessment must not PATCH an existing verdict comment");
       assert.match(posted, /Reusing saved assessment/);
-      assert.equal(calls, 1, "posting or updating an audit comment must not invalidate the cache");
+      assert.equal(calls, 1, "publishing an audit comment must not invalidate the cache");
       assert.equal(github.approvals.length, 1);
       assert.equal(github.approvals[0].event, "APPROVE");
       assert.equal(github.approvals[0].commit_id, sha);
@@ -173,7 +174,7 @@ for (const status of ["addressed", "uncertain"] as const) {
   });
 }
 
-test("sticky comments replace the latest own audit across pages, preview updates and allow opting out in CLI and chat", { timeout: 20000 }, async (t) => {
+test("sticky comments preserve reused assessments, replace fresh ones across pages and allow opting out in CLI and chat", { timeout: 20000 }, async (t) => {
   const marker = auditMarker;
   const seeds = [
     { ...issueComment(10, auditBody), updated_at: "2026-06-01T00:00:00Z" },
@@ -185,22 +186,32 @@ test("sticky comments replace the latest own audit across pages, preview updates
   const original = structuredClone(seeds);
   const github = githubEvidence({ issueComments: seeds, pageSize: 2 });
   let status: Status = "uncertain";
-  const f = await fixture(t, (body, response) => assess(body, response, [status]), {
-    entrypoint: resolve("audit.ts"), github: github.handler,
-  });
+  let calls = 0;
+  const f = await fixture(t, (body, response) => {
+    calls++;
+    assess(body, response, [status]);
+  }, { entrypoint: resolve("audit.ts"), github: github.handler });
 
   const preview = await f.run("", [url]);
   assert.match(preview, /Comment would be updated/);
   assert.equal(github.comments.length, 0);
   assert.deepEqual(github.issueComments, original, "dry-run must not change existing comments");
 
-  const updated = await f.run("", ["--apply", url]);
+  const cachedPreview = await f.run("", [url]);
+  assert.match(cachedPreview, /Reusing saved assessment/);
+  assert.match(cachedPreview, /Comment would be left unchanged/);
+  const cached = await f.run("", ["--apply", url]);
+  assert.ok(cached.includes(`[audit] Verdict comment unchanged on the PR: ${url}#issuecomment-11`));
+  assert.deepEqual(github.updates, []);
+  assert.deepEqual(github.issueComments, original, "reuse must leave an existing comment alone even when its body differs");
+  assert.equal(calls, 1);
+
+  const updated = await f.run("", ["--force", "--apply", url]);
   assert.ok(updated.includes(`[audit] Verdict comment updated on the PR: ${url}#issuecomment-11`));
   assert.deepEqual(github.updates, [11], "choose the latest created audit, not the latest edited or unrelated comment");
   assert.equal(github.issueComments.length, 5);
   assert.match(github.issueComments[1].body, /## Review audit · Verification needed/);
   assert.ok(github.issueComments[1].body.endsWith(marker));
-  assert.ok(preview.includes(github.issueComments[1].body), "preview must match the replacement body");
   assert.deepEqual(github.issueComments.filter((comment) => comment.id !== 11), original.filter((comment) => comment.id !== 11));
 
   const cliPosted = await f.run("", ["--sticky=false", "--apply", url, "local/test"]);
@@ -213,6 +224,13 @@ test("sticky comments replace the latest own audit across pages, preview updates
   const latest = github.issueComments.at(-1)!;
   latest.body = `An edited audit heading\n\n${marker}`;
   const previousBody = latest.body;
+  const edited = structuredClone(github.issueComments);
+  const reused = await f.run("", ["--sticky", "--apply", url]);
+  assert.match(reused, /Reusing saved assessment/);
+  assert.ok(reused.includes(`[audit] Verdict comment unchanged on the PR: ${latest.html_url}`));
+  assert.deepEqual(github.updates, [11]);
+  assert.deepEqual(github.issueComments, edited, "reuse must preserve manual edits to the latest own audit");
+  assert.equal(calls, 2, "only the forced refresh should make another model request");
 
   status = "addressed";
   const replaced = await f.run(`/audit --sticky=true --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
@@ -223,8 +241,9 @@ test("sticky comments replace the latest own audit across pages, preview updates
   assert.match(latest.body, /## Review audit · All actionable findings addressed/);
   assert.doesNotMatch(latest.body, /Reasoning and evidence/);
 
-  await f.run("", ["--sticky", "--apply", url]);
-  assert.deepEqual(github.updates, [11, latest.id, latest.id]);
+  const final = await f.run("", ["--sticky", "--apply", url]);
+  assert.match(final, /Verdict comment unchanged/);
+  assert.deepEqual(github.updates, [11, latest.id]);
   assert.equal(github.issueComments.length, 7);
 });
 

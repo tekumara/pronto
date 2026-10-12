@@ -223,8 +223,10 @@ export function isAuditComment(body: string | null | undefined): boolean {
   return body?.trimEnd().split("\n").at(-1) === AUDIT_COMMENT_MARKER;
 }
 
-export async function postAuditComment(target: ReviewTarget, body: string, sticky = true, apply = false): Promise<{
-  action: "posted" | "updated"; url: string | null;
+export async function postAuditComment(target: ReviewTarget, body: string, {
+  sticky = true, apply = false, reused = false,
+}: { sticky?: boolean; apply?: boolean; reused?: boolean } = {}): Promise<{
+  action: "posted" | "updated" | "unchanged"; url: string | null;
 }> {
   const client = github();
   const path = `/repos/${target.owner}/${target.repo}/issues`;
@@ -239,6 +241,8 @@ export async function postAuditComment(target: ReviewTarget, body: string, stick
       && isAuditComment(comment.body))
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || b.id - a.id)[0];
   }
+  // A recheck is not a new assessment. Preserve existing comments, including manual edits.
+  if (existing && reused) return { action: "unchanged", url: existing.html_url };
   const action = existing ? "updated" : "posted";
   if (!apply) return { action, url: null };
   const comment = existing
