@@ -26,6 +26,7 @@ function evidence(extra: { inline?: object[]; comments?: object[]; reviews?: obj
     headSha: "a".repeat(40), baseSha: "b".repeat(40), title: "Example PR", description: "The intended change.",
     commentBody: "Please explain this behaviour.", replyBody: "An explanation.", reviewBody: "Please document the trade-off.",
     reviewState: "COMMENTED", resolved: false, outdated: false, reverse: false,
+    files: [] as { filename: string; status: string; patch?: string }[],
   };
   let reads = 0;
   const handler = (request: IncomingMessage, response: ServerResponse) => {
@@ -39,7 +40,7 @@ function evidence(extra: { inline?: object[]; comments?: object[]; reviews?: obj
     switch (path) {
       case "/github/user": data = { login: "auditor" }; break;
       case "/github/repos/acme/project/pulls/9":
-        data = { title: state.title, body: state.description, html_url: url, changed_files: 0,
+        data = { title: state.title, body: state.description, html_url: url, changed_files: state.files.length,
           head: { sha: state.headSha, repo: { full_name: "acme/project" } },
           base: { sha: state.baseSha, repo: { full_name: "acme/project" } } };
         break;
@@ -61,7 +62,7 @@ function evidence(extra: { inline?: object[]; comments?: object[]; reviews?: obj
       case "/github/repos/acme/project/pulls/9/reviews":
         data = [{ ...comment(30, state.reviewBody), state: state.reviewState, submitted_at: "2026-01-01T00:00:00Z" }, ...(extra.reviews ?? [])];
         break;
-      case "/github/repos/acme/project/pulls/9/files": data = []; break;
+      case "/github/repos/acme/project/pulls/9/files": data = state.files; break;
       case "/github/graphql":
         data = { data: { repository: { pullRequest: { reviewThreads: {
           nodes: [{ id: "thread-1", isResolved: state.resolved, isOutdated: state.outdated,
@@ -119,6 +120,7 @@ test("unchanged evidence reuses a saved assessment across directories, CLI and c
   const f = await fixture(t, (body, response) => assess(body, response, ++calls), { entrypoint: audit, github: github.handler });
   const first = await f.run("", [url]);
   assert.match(first, /Assessment 1/);
+  assert.doesNotMatch(first, /Refreshing audit/);
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
   const runs = defineDoc<{ latestSuccess: { conversationId: number } | null }>({
     kind: "app.review-audit-runs", version: 2, scope: "session", initial: () => ({ latestSuccess: null }),
@@ -138,6 +140,7 @@ test("unchanged evidence reuses a saved assessment across directories, CLI and c
   assert.equal(calls, 1, "a different working directory, snapshot ID, fetch time or ordering must not trigger reassessment");
   assert.ok(github.reads() > reads, "cache hits must still check GitHub");
   assert.match(second, reuseMessage);
+  assert.doesNotMatch(second, /Refreshing audit/);
   assert.match(second, /Assessment 1/);
   assert.match(second, /Not all actionable findings are addressed/);
   const output = await f.run(`/audit ${url}\n/quit\n`, [], { entrypoint: chat });
@@ -193,11 +196,14 @@ test("marked audit output from any account is omitted from saved and model evide
   assert.equal(calls, 1);
 });
 
-for (const [field, value] of [
-  ["headSha", "c".repeat(40)], ["baseSha", "d".repeat(40)], ["title", "Different intent"],
-  ["description", "A different intended change."], ["commentBody", "An edited concern."],
-  ["replyBody", "A new explanation."], ["reviewBody", "A revised review summary."],
-  ["reviewState", "CHANGES_REQUESTED"], ["resolved", true], ["outdated", true],
+for (const [field, value, reason] of [
+  ["headSha", "c".repeat(40), /headSha changed/], ["baseSha", "d".repeat(40), /baseSha changed/],
+  ["title", "Different intent", /title changed/], ["description", "A different intended change.", /description changed/],
+  ["commentBody", "An edited concern.", /inline:1 changed \(body\)/],
+  ["replyBody", "A new explanation.", /inline:1 changed \(replies\)/],
+  ["reviewBody", "A revised review summary.", /review:30 changed \(body\)/],
+  ["reviewState", "CHANGES_REQUESTED", /review:30 changed \(reviewState\)/],
+  ["resolved", true, /inline:1 changed \(thread\)/], ["outdated", true, /inline:1 changed \(thread\)/],
 ] as const) {
   test(`changed ${field} invalidates the assessment cache`, { timeout: 20_000 }, async (t) => {
     const github = evidence();
@@ -209,8 +215,44 @@ for (const [field, value] of [
     assert.equal(calls, 2);
     assert.match(output, /Assessment 2/);
     assert.doesNotMatch(output, /Reusing.*assessment/);
+    const diagnostics = output.slice(output.indexOf("[audit] Refreshing audit"), output.indexOf("[audit:report_review_assessment]"));
+    assert.match(diagnostics, reason, "explain the cache miss before model execution");
+    assert.doesNotMatch(diagnostics, /audit policy changed/);
   });
 }
+
+test("refresh diagnostics identify metadata-only bot changes and added, removed or changed files", { timeout: 20_000 }, async (t) => {
+  const botComment = (id: number) => ({
+    id, body: "An unchanged status report.", user: { login: "status[bot]" }, html_url: `${url}#issuecomment-${id}`,
+    created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+  });
+  const comments = [botComment(40), botComment(41)];
+  const github = evidence({ comments });
+  github.state.files = [{ filename: "example.ts", status: "modified", patch: "Original patch" },
+    { filename: "removed.ts", status: "added" }];
+  let calls = 0;
+  const f = await fixture(t, (body, response) => assess(body, response, ++calls), { entrypoint: audit, github: github.handler });
+  await f.run("", [url]);
+
+  comments[0]!.updated_at = "2026-01-02T00:00:00Z";
+  comments[1] = botComment(42);
+  const metadata = await f.run("", [url]);
+  const commentReasons = metadata.split("\n").filter((line) => line.startsWith("[audit]   - ")).join("\n");
+  assert.match(commentReasons, /comment:40 changed \(updatedAt\)/);
+  assert.match(commentReasons, /comment:41 removed/);
+  assert.match(commentReasons, /comment:42 added/);
+  assert.doesNotMatch(commentReasons, /body|headSha|baseSha|file |audit policy/);
+
+  github.state.files = [{ filename: "example.ts", status: "modified", patch: "Updated patch" },
+    { filename: "added\u001b\n.ts", status: "added" }];
+  const files = await f.run("", [url]);
+  const fileReasons = files.split("\n").filter((line) => line.startsWith("[audit]   - ")).join("\n");
+  assert.match(fileReasons, /file "example.ts" changed \(patch\)/);
+  assert.match(fileReasons, /file "removed.ts" removed/);
+  assert.ok(fileReasons.includes('file "added\\u001b\\n.ts" added'), "quote untrusted paths without terminal control characters or newlines");
+  assert.doesNotMatch(fileReasons, /Original patch|Updated patch|comment:|audit policy/);
+  assert.equal(calls, 3);
+});
 
 test("cache lookup considers only the latest success and includes the selected model", { timeout: 20_000 }, async (t) => {
   const github = evidence();
@@ -221,7 +263,8 @@ test("cache lookup considers only the latest success and includes the selected m
   }, { entrypoint: audit, github: github.handler });
   await addModel(f.agentDir);
   await f.run("", [url]);
-  await f.run("", [url, "local/other"]);
+  const changedModel = await f.run("", [url, "local/other"]);
+  assert.match(changedModel, /audit policy changed/);
   await f.run("", [url]);
   const cached = await f.run("", [url]);
   assert.deepEqual(models, ["test", "other", "test"]);
@@ -238,6 +281,7 @@ test("changing inference configuration invalidates the cache without changing th
   const output = await f.run("", [url]);
   assert.equal(calls, 2);
   assert.doesNotMatch(output, /Reusing.*assessment/);
+  assert.match(output, /audit policy changed/);
 });
 
 test("a successful mixed-policy audit cannot publish a cache entry or reuse an older success", { timeout: 20_000 }, async (t) => {
@@ -271,6 +315,7 @@ test("a successful mixed-policy audit cannot publish a cache entry or reuse an o
   const fresh = await f.run("", [url]);
   assert.equal(calls, 4, "latest-success-only lookup must not fall back after a newer uncacheable success");
   assert.doesNotMatch(fresh, /Reusing.*assessment/);
+  assert.match(fresh, /no reusable successful assessment is available/);
   const cached = await f.run("", [url]);
   assert.match(cached, /Reusing.*assessment/);
   assert.equal(calls, 4);
@@ -285,6 +330,7 @@ test("chat --force bypasses a completed cache entry", { timeout: 20_000 }, async
   assert.equal(calls, 2);
   assert.match(output, /Assessment 2/);
   assert.doesNotMatch(output, /Reusing.*assessment/);
+  assert.match(output, /--force requested/);
 });
 
 test("invalid audit flags are rejected before audit storage or network access in CLI and chat", { timeout: 20_000 }, async (t) => {
@@ -401,6 +447,7 @@ test("unfinished snapshots containing marked audit output require --force to res
   assert.equal(calls, 2, "the cancelled request must not be resumed before the new one");
   assert.notEqual(ids[0], ids[1]);
   assert.match(restarted, /Restarting unfinished audit/);
+  assert.match(restarted, /--force requested/);
   assert.doesNotMatch(restarted, /Resuming saved snapshot/);
   const cached = await f.run("", [url]);
   assert.match(cached, /Reusing.*assessment/);
@@ -445,6 +492,7 @@ test("force-restart intent and model survive a crash during fresh evidence fetch
   const recovered = await f.run("", [url]);
   assert.deepEqual(models, ["test", "test", "other"]);
   assert.doesNotMatch(recovered, /Reusing.*assessment/);
+  assert.match(recovered, /saved --force restart intent/);
   const cached = await f.run("", [url, "local/other"]);
   assert.match(cached, /Reusing.*assessment/);
   assert.equal(calls, 3);

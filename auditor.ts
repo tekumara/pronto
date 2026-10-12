@@ -217,14 +217,52 @@ function policyFingerprint(models: ModelRuntime, ref: ModelRef): string {
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
-function evidenceFingerprint(snapshot: ReviewSnapshot, policy: string): string {
+function normalizedEvidence(snapshot: ReviewSnapshot) {
   const { id: _id, startedAt: _startedAt, fetchedAt: _fetchedAt, ...evidence } = snapshot;
-  return digest({ policy, evidence: { ...evidence,
+  return { ...evidence,
     comments: evidence.comments.map((comment) => ({ ...comment,
       replies: [...comment.replies].sort((a, b) => compare(a.url, b.url)),
     })).sort((a, b) => compare(a.key, b.key)),
     files: [...evidence.files].sort((a, b) => compare(a.path, b.path)),
-  } });
+  };
+}
+function evidenceFingerprint(snapshot: ReviewSnapshot, policy: string): string {
+  return digest({ policy, evidence: normalizedEvidence(snapshot) });
+}
+
+// Compare the same normalized input we hash, without printing comment bodies or patches.
+function changedFields(previous: object, current: object): string[] {
+  const before = previous as Record<string, unknown>;
+  const after = current as Record<string, unknown>;
+  return Object.keys({ ...before, ...after }).sort(compare)
+    .filter((key) => !(key in before) || !(key in after) || canonical(before[key]) !== canonical(after[key]));
+}
+function collectionChanges<T extends object>(previous: T[], current: T[], key: (item: T) => string,
+  label: (key: string) => string): string[] {
+  const before = new Map(previous.map((item) => [key(item), item]));
+  const after = new Map(current.map((item) => [key(item), item]));
+  return [...new Set([...before.keys(), ...after.keys()])].sort(compare).flatMap((id) => {
+    const old = before.get(id);
+    const next = after.get(id);
+    if (!old) return [`${label(id)} added`];
+    if (!next) return [`${label(id)} removed`];
+    const fields = changedFields(old, next);
+    return fields.length ? [`${label(id)} changed (${fields.join(", ")})`] : [];
+  });
+}
+function evidenceChanges(previous: ReviewSnapshot, current: ReviewSnapshot): string[] {
+  const { comments: oldComments, files: oldFiles, ...before } = normalizedEvidence(previous);
+  const { comments, files, ...after } = normalizedEvidence(current);
+  return [
+    ...changedFields(before, after).map((field) => `${field} changed`),
+    ...collectionChanges(oldComments, comments, (comment) => comment.key, (key) => key),
+    ...collectionChanges(oldFiles, files, (file) => file.path, (path) => `file ${JSON.stringify(path)}`),
+  ];
+}
+function outputRefreshReasons(conversationId: ConversationId, reasons: string[]): void {
+  console.log(`[audit] Refreshing audit ${conversationId}; reasons:`);
+  for (const reason of reasons.slice(0, 10)) console.log(`[audit]   - ${reason}`);
+  if (reasons.length > 10) console.log(`[audit]   - ${reasons.length - 10} more changes`);
 }
 
 const snapshotDisclaimer = "This is the agent's assessment of a saved snapshot, not proof of correctness or the PR's current live state.";
@@ -366,6 +404,10 @@ export async function runAudit(url: string, options: {
       (await tx.doc(AuditRuns)).restartModel = options.model;
     }, context);
     let state = await harness.snapshot(AuditRuns, context);
+    const previousId = state?.latestSuccess?.conversationId ?? state?.active;
+    if (state?.restartModel && previousId != null) {
+      outputRefreshReasons(state.active ?? previousId, [options.force ? "--force requested" : "saved --force restart intent"]);
+    }
     if (state?.restartModel && state.active !== null && !state.complete) {
       const existing = await harness.conversation(state.active, context);
       if (!existing) throw new Error("Incomplete audit conversation is missing");
@@ -395,10 +437,12 @@ export async function runAudit(url: string, options: {
       console.log(`[audit] PR title: ${stripControlCharacters(snapshot.title)}`);
       const fingerprint = evidenceFingerprint(snapshot, policy);
       const cached = !state?.restartModel && state?.latestSuccess;
-      if (cached && cached.fingerprint === fingerprint) {
+      const refreshReasons: string[] = [];
+      if (cached) {
         const saved = await harness.snapshot(AuditDocument, cached.conversationId, context);
         const identity = await harness.snapshot(AuditIdentity, cached.conversationId, context);
-        if (saved?.snapshot && saved.report && identity?.fingerprint === fingerprint && identity.policy === policy) {
+        if (cached.fingerprint === fingerprint && saved?.snapshot && saved.report
+          && identity?.fingerprint === fingerprint && identity.policy === policy) {
           await harness.commit(async (tx) => {
             const runs = await tx.doc(AuditRuns);
             runs.latestSuccess!.lastCheckedAt = snapshot.fetchedAt;
@@ -410,7 +454,19 @@ export async function runAudit(url: string, options: {
           await outputReport(saved.snapshot, saved.report, options);
           return;
         }
+        if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
+        else {
+          if (identity.policy !== policy) refreshReasons.push("audit policy changed (model, inference settings, instructions or tools)");
+          if (identity.fingerprint !== cached.fingerprint) refreshReasons.push("saved cache identity is inconsistent");
+        }
+        if (!saved?.report) refreshReasons.push("saved assessment report is missing");
+        if (saved?.snapshot) refreshReasons.push(...evidenceChanges(saved.snapshot, snapshot));
+        else refreshReasons.push("saved evidence snapshot is missing");
+        if (!refreshReasons.length) refreshReasons.push("saved fingerprint does not match current evidence and policy");
+      } else if (!state?.restartModel && previousId != null) {
+        refreshReasons.push("no reusable successful assessment is available");
       }
+      if (previousId != null && refreshReasons.length) outputRefreshReasons(previousId, refreshReasons);
       conversation = await harness.createConversation({
         ownership: { kind: "ownerless" }, agent: { model, instructions, thinkingLevel, extensions: [Auditor] },
         init: async (tx, id) => {

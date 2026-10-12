@@ -252,6 +252,17 @@ After interruption, run the same PR audit from the same directory to resume its 
 
 After completion, the auditor fetches current evidence and compares it with the latest successful assessment. It reuses that assessment when the evidence and assessment policy match. A cache hit makes no model requests. The terminal shows when the assessment was saved and when the evidence was rechecked.
 
+Before refreshing an existing audit, Pronto prints the reasons in the terminal. These identify changed PR fields, added or removed comment keys, changed comment fields, and changed file paths. Comment changes include metadata such as timestamps, replies and thread state, even when the body is unchanged. For example:
+
+```text
+[audit] Refreshing audit 2; reasons:
+[audit]   - comment:6029796791 changed (updatedAt)
+[audit]   - comment:6029929136 removed
+[audit]   - comment:6031034805 added
+```
+
+Pronto also reports policy changes, `--force`, saved restart intent, and missing or unusable cache state. Policy changes cover the model, inference settings, instructions and tools; the saved policy hash does not identify which changed. Output shows up to 10 reasons and counts any remaining changes. It does not print comment bodies or patches in these diagnostics. First-time audits and cache hits do not print refresh reasons. These messages do not change cache eligibility or add model requests.
+
 The fingerprint includes:
 
 - head and base SHAs and repository identities
