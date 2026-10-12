@@ -65,7 +65,7 @@ The audit checks whether existing review findings have been addressed. It is not
 
 ### What addressed means
 
-`addressed` can mean a code fix, an adequate explanation or specific reported testing. A reasonable scope or trade-off decision can address a finding without implementing the requested change.
+`addressed` can mean a code fix, an adequate explanation, an explicit future-work deferral or specific reported testing. A scope or trade-off decision can address a finding without implementing the requested change.
 
 An explicit author decision not to fix a finding because of effort, complexity, likelihood or scope can qualify. A concise reply can be enough when the original finding supplies the context. Risk acceptance is not risk elimination: the auditor does not require a new safeguard, quantified probability or code change merely because a known bug remains possible.
 
@@ -73,11 +73,15 @@ A bot's “blocking” label does not establish a mandatory requirement. Explici
 
 For example, a bot reports that a transcript can list previews that fail to seed. The author replies, “skipped, don't think this is worth the fixing effort”. If no explicit project requirement or unresolved human demand requires a fix, this counts as `addressed` by an author trade-off decision. The report must still state that the transcript can reference missing previews and no consistency fix was made.
 
-A supported scope decision explains the PR's current purpose or audience, its remaining behaviour and relevant mitigations, and why the trade-off is reasonable. The auditor checks factual claims against the pinned code and discussion. Follow-up work can be explicitly deferred, but the current rationale must stand on its own. A future fix is not a current fix.
+An explicit author reply saying the finding will be addressed in future work counts as a scope decision. The thread can supply the context. No separate rationale, mitigation, deadline or follow-up link is required. A reviewer requesting a change does not itself prohibit deferral. An explicit requirement to fix in this PR or an unresolved human rejection of deferral remains blocking.
+
+For example, a guide claims multi-region support that the current code lacks. The author replies, “will soon be true see #307”. This can count as `addressed` by deferral. The report must state that the guide still overstates current coverage and the multi-region fix is not implemented. The auditor does not need to inspect the linked follow-up to accept the deferral.
+
+The auditor checks factual claims about explanations and claimed fixes against pinned code and discussion. A known bug or documentation inconsistency remaining does not contradict a promise to fix it later. A future fix is not a current fix.
 
 For example, a setup PR for first-time users can explain that re-runs overwrite active configuration, preserve backups, and leave smart merging to follow-up work. If the code supports those claims and the scope rationale adequately addresses the concern, the finding can be `addressed` through explanation. This does not mean configuration now merges. The finding's reason must identify the explanation and describe the remaining limitation and deferred work.
 
-Bare acknowledgements, dismissals without a rationale and unexplained promises to fix later do not qualify. A factual claim contradicted by evidence, an unmet mandatory requirement or a concern outside the rationale remains `outstanding`. For example, code showing that a failure can occur contradicts “this cannot happen”, but not “this is not worth fixing”. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
+Bare acknowledgements and dismissals without a rationale do not qualify. A contradicted claim about an explanation or current fix remains `outstanding`. So does an unmet mandatory requirement or a concern outside the explanation or deferral. For example, code showing that a failure can occur contradicts “this cannot happen”, but not “this is not worth fixing”. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
 
 ### Reported testing and deployment evidence
 
@@ -189,7 +193,7 @@ pronto --apply --approve https://github.com/owner/repo/pull/42
 
 `--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. Approval requires no `outstanding` or `uncertain` findings by default. Audits with only `not-actionable` findings, or no findings, also qualify. No `addressed` finding is required.
 
-Supported explanations, scope decisions and specific reported testing can count as `addressed`. Approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
+Supported explanations, scope decisions, explicit future-work deferrals and specific reported testing can count as `addressed`. Approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
 
 Add `--allow-uncertain` to permit approval with uncertain findings, provided there are no outstanding findings:
 

@@ -181,6 +181,10 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.match(policy, /including later messages that soften an earlier blocking label or leave\s+the decision to the author\./);
   assert.match(policy, /A trade-off decision does not override an explicit mandatory requirement or excuse\s+a factual claim contradicted by evidence\./);
   assert.match(policy, /Do not treat the remaining bug itself as a factual\s+contradiction of an author's cost-benefit judgment\./);
+  assert.match(policy, /Accept an explicit author reply that the finding will be addressed in future work\./);
+  assert.match(policy, /No separate rationale, mitigation, deadline or follow-up link is required\./);
+  assert.match(policy, /An acknowledged bug or documentation inconsistency remaining at the pinned head\s+does not contradict a future-work deferral\./);
+  assert.doesNotMatch(policy, /unexplained promise(?:s)? to fix later/);
   assert.match(output, /\[audit\] PR title: Access checks/);
   assert.match(output, /Verdict: Not all actionable findings are addressed/);
   assert.match(output, /1 addressed · 1 outstanding · 1 uncertain · 3 not-actionable/);

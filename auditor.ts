@@ -63,7 +63,7 @@ A reply saying "fixed", a resolved thread, an outdated diff hunk, or an approval
 Assess concerns in replies too, and consider later PR-level discussion as possible explanations.
 Separate multiple findings in one comment. For each finding choose:
 - addressed: current code fixes it, or an evidence-supported explanation adequately addresses it,
-  including specific reported testing or a reasonable scope or trade-off decision
+  including specific reported testing, a reasonable trade-off or an explicit future-work deferral
 - outstanding: the actionable concern is neither fixed nor adequately addressed by an explanation
 - uncertain: evidence is insufficient or unreadable to assess the code or explanation
 - not-actionable: praise, boilerplate, summaries without requests, or a duplicate linked to another finding
@@ -83,12 +83,24 @@ Explicit project requirements and unresolved human demands for a fix remain bloc
 Use review discussion to establish whether such a requirement or human demand still applies,
 including later messages that soften an earlier blocking label or leave
 the decision to the author. Approval alone is not proof of a fix or agreement with a particular reply.
-A bare dismissal or unexplained promise to fix later is insufficient.
+A bare dismissal is insufficient.
+Accept an explicit author reply that the finding will be addressed in future work.
+A concise promise to fix later counts as an author scope decision. The thread can supply
+the context for what is being deferred.
+No separate rationale, mitigation, deadline or follow-up link is required.
+A reviewer requesting a change does not by itself prohibit deferral. An explicit requirement
+to fix in this PR or an unresolved human rejection of deferral remains blocking.
 A trade-off decision does not override an explicit mandatory requirement or excuse
 a factual claim contradicted by evidence. Do not treat the remaining bug itself as a factual
 contradiction of an author's cost-benefit judgment.
-Explicitly scoped follow-up work can be part of an adequate explanation, but the current rationale
-must stand on its own without treating the future fix as already implemented.
+An acknowledged bug or documentation inconsistency remaining at the pinned head
+does not contradict a future-work deferral. Verify claims about current fixes separately;
+never treat the future fix as already implemented.
+For example, a guide claims multi-region support that the current code lacks. The author replies
+"will soon be true see #307". Unless fixing it in this PR is explicitly required, mark the finding
+addressed by a future-work scope decision. State that the guide still overstates current coverage
+and the multi-region fix is deferred, not implemented. The linked follow-up is context, not
+proof of a current fix; inspecting it is not required to accept the deferral.
 For example, a bot labels a transcript/preview mismatch "blocking". The author replies
 "skipped, don't think this is worth the fixing effort". If no explicit project requirement or
 unresolved human demand requires a fix, mark it addressed by an author trade-off decision.
@@ -115,14 +127,15 @@ If available evidence contradicts the claimed outcome, keep the unresolved conce
 Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient.
 This acceptance applies only to external results, not claims about accessible code behaviour.
 Inspect available code to verify claimed code fixes; do not substitute a testing report for a fix.
-Bare acknowledgements, dismissals without a rationale and unexplained promises to fix later are not enough.
-A factual claim contradicted by evidence, an unmet mandatory requirement, or a concern not covered
-by the rationale stays outstanding.
+Bare acknowledgements and dismissals without a rationale are not enough.
+A factual claim about the explanation or a claimed fix contradicted by evidence,
+an unmet mandatory requirement, or a concern not covered by the explanation or deferral stays outstanding.
 Use uncertain when evidence is insufficient to assess the concern, such as a testing report that
 does not establish the relevant outcome, or inaccessible code needed to verify a claimed fix.
 Do not assume reviewer agreement.
 For every addressed finding, say in the reason whether it is addressed by a code fix, an
-explanation/scope decision or reported testing. Cite the PR URL for reports in its description,
+explanation/scope decision (including future-work deferral) or reported testing.
+Cite the author reply for a deferral, the PR URL for reports in its description,
 or the human comment or reply URL for reports in discussion.
 For reported testing, state that the results were not independently inspected.
 For an explanation, state remaining limitations and deferred work truthfully; never imply that
