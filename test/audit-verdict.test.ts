@@ -187,7 +187,7 @@ test("sticky comments replace the latest own audit across pages, preview updates
   assert.deepEqual(github.issueComments, original, "dry-run must not change existing comments");
 
   const updated = await f.run("", ["--apply", url]);
-  assert.match(updated, /Verdict comment updated/);
+  assert.ok(updated.includes(`[audit] Verdict comment updated on the PR: ${url}#issuecomment-11`));
   assert.deepEqual(github.updates, [11], "choose the latest created audit, not the latest edited or unrelated comment");
   assert.equal(github.issueComments.length, 5);
   assert.match(github.issueComments[1].body, /## Review audit · Verification needed/);
@@ -195,18 +195,20 @@ test("sticky comments replace the latest own audit across pages, preview updates
   assert.ok(preview.includes(github.issueComments[1].body), "preview must match the replacement body");
   assert.deepEqual(github.issueComments.filter((comment) => comment.id !== 11), original.filter((comment) => comment.id !== 11));
 
-  await f.run("", ["--sticky=false", "--apply", url, "local/test"]);
+  const cliPosted = await f.run("", ["--sticky=false", "--apply", url, "local/test"]);
   assert.equal(github.issueComments.length, 6);
+  assert.ok(cliPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-15`));
   assert.deepEqual(github.updates, [11], "disabling sticky must append even when a matching comment exists");
-  await f.run(`/audit ${url} --sticky false --apply\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
+  const chatPosted = await f.run(`/audit ${url} --sticky false --apply\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
   assert.equal(github.issueComments.length, 7, "chat must also support opting out");
+  assert.ok(chatPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-16`));
   const latest = github.issueComments.at(-1)!;
   latest.body = `An edited audit heading\n\n${marker}`;
   const previousBody = latest.body;
 
   status = "addressed";
   const replaced = await f.run(`/audit --sticky=true --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
-  assert.match(replaced, /Verdict comment updated/);
+  assert.ok(replaced.includes(`[audit] Verdict comment updated on the PR: ${url}#issuecomment-16`));
   assert.deepEqual(github.updates, [11, latest.id]);
   assert.equal(github.issueComments.length, 7);
   assert.notEqual(latest.body, previousBody, "sticky must replace the body, not just find the comment");

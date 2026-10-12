@@ -325,9 +325,9 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
   const dryRun = !options.apply;
   if (dryRun) console.log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
   // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const action = await postReviewComment(snapshot.target, body, options.sticky, options.apply);
+  const { action, url } = await postReviewComment(snapshot.target, body, options.sticky, options.apply);
   console.log(dryRun ? `[audit:dry-run] Comment would be ${action}.`
-    : `[audit] Verdict comment ${action} ${action === "updated" ? "on" : "to"} the PR`);
+    : stripControlCharacters(`[audit] Verdict comment ${action} ${action === "updated" ? "on" : "to"} the PR: ${url}`));
   if (options.approve) {
     const { counts, approvable } = summarizeFindings(assessments);
     const canApprove = approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding);

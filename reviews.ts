@@ -214,7 +214,9 @@ export async function fetchReviewSnapshot(target: ReviewTarget): Promise<ReviewS
 // Keep this marker stable across package renames so existing sticky comments remain identifiable.
 export const AUDIT_COMMENT_MARKER = "<!-- pi-durable-demo:review-audit -->";
 
-export async function postReviewComment(target: ReviewTarget, body: string, sticky = true, apply = false): Promise<"posted" | "updated"> {
+export async function postReviewComment(target: ReviewTarget, body: string, sticky = true, apply = false): Promise<{
+  action: "posted" | "updated"; url: string | null;
+}> {
   const client = github();
   const path = `/repos/${target.owner}/${target.repo}/issues`;
   let existing: RawComment | undefined;
@@ -230,11 +232,12 @@ export async function postReviewComment(target: ReviewTarget, body: string, stic
         || comment.body?.startsWith(`PR review audit · ${target.url}\n\nHead: `)))
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || b.id - a.id)[0];
   }
-  if (apply) {
-    if (existing) await client.request(`${client.base}${path}/comments/${existing.id}`, { body }, "PATCH");
-    else await client.request(`${client.base}${path}/${target.pr}/comments`, { body });
-  }
-  return existing ? "updated" : "posted";
+  const action = existing ? "updated" : "posted";
+  if (!apply) return { action, url: null };
+  const comment = existing
+    ? await client.request<{ html_url: string }>(`${client.base}${path}/comments/${existing.id}`, { body }, "PATCH")
+    : await client.request<{ html_url: string }>(`${client.base}${path}/${target.pr}/comments`, { body });
+  return { action, url: comment.html_url };
 }
 
 export async function approveReview(snapshot: ReviewSnapshot, body: string, apply = false): Promise<void> {
