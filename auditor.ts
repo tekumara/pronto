@@ -564,7 +564,7 @@ export async function runAudit(url: string, options: {
       if (answer?.role === "assistant") {
         const stopReason = answer.rawStopReason ? `${answer.stopReason} (${answer.rawStopReason})` : answer.stopReason;
         reason = answer.stopReason === "length"
-          ? ` The model hit its token limit: ${stopReason}; ${answer.usage.output} output tokens.`
+          ? ` The model hit its token limit: ${stopReason}; ${answer.usage.totalTokens} total tokens.`
           : ` Model stop reason: ${stopReason}.`;
       }
       throw new Error(stripControlCharacters(`Agent finished without a complete assessment.${reason} No verdict was produced.`));
