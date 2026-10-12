@@ -53,6 +53,8 @@ The controller fetches evidence before asking the model to assess it:
 
 Answered and resolved findings remain in scope. Boilerplate is included for the agent to classify rather than discarded by a filter. The audit stops if the changed-file list is incomplete or the head or base SHA changes during fetching. Comments can still change during the fetch window; the report records that window and is not a live-state guarantee.
 
+Pronto omits its own marked output from any account before saving evidence. This includes PR comments, inline comments and replies, and submitted review bodies such as approval reports. A standalone `<!-- pronto:review-audit -->` marker at the end identifies this output. Excluded comments are not archived separately, sent to the model or included in the evidence fingerprint. Ordinary discussion from the same accounts, quoted or embedded markers, and unmarked older reports remain in scope.
+
 The model can read remote text files at those pinned commits, including the fork head. It cannot execute shell commands, access local files, edit code, post comments, or resolve threads. It does not fetch check results, workflow runs or logs. Inaccessible code needed to verify a fix leads to `uncertain`, not a guessed fix. Specific reports of external testing can count as reported evidence under the policy below.
 
 The terminal report lists each comment and its findings as `addressed`, `outstanding`, `uncertain`, or `not-actionable`, with explanations and evidence links. GitHub thread resolution is reported separately. A resolved thread or a reply claiming a fix is not proof that the code addresses the finding. The host checks comment coverage and evidence references before printing a verdict. Assessment of the findings remains the model's judgement.
@@ -146,7 +148,7 @@ This audit checks review findings, not overall PR correctness.
 
 </details>
 
-<!-- pi-durable-demo:review-audit -->
+<!-- pronto:review-audit -->
 ```
 
 The headline is “Changes needed” when findings remain outstanding, or “Verification needed” when only uncertainty remains. With neither, it says “All actionable findings addressed” if there is at least one addressed finding, or “No actionable findings identified” otherwise.
@@ -155,7 +157,7 @@ Outstanding findings appear before uncertain findings. Only their reasoning and 
 
 The verdict comment is previewed by default. With `--apply`, Pronto posts it. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to create and edit PR comments.
 
-Comments are sticky by default (`--sticky=true`). Each invocation with `--apply` updates the latest audit comment posted by your authenticated GitHub account, or creates one if none exists. Other accounts' comments and your unrelated comments are left unchanged. New audit comments include a hidden marker; older verdict comments are recognised by their audit heading.
+Comments are sticky by default (`--sticky=true`). Each invocation with `--apply` updates the latest audit comment posted by your authenticated GitHub account, or creates one if none exists. Other accounts' comments and your unrelated comments are left unchanged. Audit comments include a hidden marker on their final line. Sticky updates recognise this marker, not the heading; unmarked older reports are left unchanged.
 
 To create a new comment every time, set `--sticky=false`:
 
@@ -165,7 +167,7 @@ pronto --apply --sticky=false https://github.com/owner/repo/pull/42
 
 You can also write `--sticky false`. A bare `--sticky`, `--sticky true` or `--sticky=true` enables sticky updates. The flag only controls whether the verdict comment is updated or newly created; it does not change approval behaviour. If several audit comments already exist, only the latest created one is updated; older comments remain.
 
-With `--apply`, the host posts or updates only after a complete, validated assessment, including a cache hit. It looks up live comments even when the assessment uses a saved snapshot. The model remains read-only. Creating or changing a comment changes the PR discussion and invalidates the evidence cache on the next audit.
+With `--apply`, the host posts or updates only after a complete, validated assessment, including a cache hit. It looks up live comments even when the assessment uses a saved snapshot. The model remains read-only. Posting or updating marked Pronto comments and approval reports does not invalidate the evidence cache. Changes to other PR discussion still do.
 
 GitHub writes are not replayed by Durable, and the flags do not persist across invocations. If a write fails, the CLI exits 1 but retains the completed assessment. A failed update does not fall back to creating a new comment. After an interruption or ambiguous network failure, check the PR before retrying. Concurrent first-time posts can still create duplicates.
 
@@ -246,7 +248,7 @@ Unfinished audit?
 
 `--force`, or a saved restart intent, overrides this flow. It cancels any unfinished attempt, fetches fresh evidence and skips cache lookup.
 
-After interruption, run the same PR audit from the same directory to resume its saved snapshot and model.
+After interruption, run the same PR audit from the same directory to resume its saved snapshot and model. If an older unfinished snapshot contains marked Pronto output, resuming stops before model execution. Use `--force` to start with fresh, filtered evidence. Historical snapshots and transcripts remain unchanged.
 
 After completion, the auditor fetches current evidence and compares it with the latest successful assessment. It reuses that assessment when the evidence and assessment policy match. A cache hit makes no model requests. The terminal shows when the assessment was saved and when the evidence was rechecked.
 

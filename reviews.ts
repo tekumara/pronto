@@ -185,18 +185,19 @@ export async function fetchReviewSnapshot(target: ReviewTarget): Promise<ReviewS
     if (cursor) cursors.add(cursor);
   } while (cursor);
 
-  // Preserve bodies and review summaries. Let the auditor classify boilerplate, not a heuristic filter.
+  // Exclude our own output before saving evidence or hashing it. Keep all other discussion,
+  // including ordinary comments from accounts that also post audits, for the model to assess.
   const groups: [ReviewComment["kind"], RawComment[]][] = [
     ["inline", raw.reviewComments.filter((c) => !c.in_reply_to_id)],
     ["comment", raw.issueComments],
     ["review", raw.reviews.filter((c) => c.body?.trim())],
   ];
-  const comments: ReviewComment[] = groups.flatMap(([kind, list]) => list.map((c) => ({
+  const comments: ReviewComment[] = groups.flatMap(([kind, list]) => list.filter((c) => !isAuditComment(c.body)).map((c) => ({
     key: `${kind}:${c.id}`, kind, author: c.user?.login ?? "unknown", body: c.body ?? "", url: c.html_url,
     createdAt: c.created_at ?? c.submitted_at ?? "", updatedAt: c.updated_at ?? c.created_at ?? c.submitted_at ?? "",
     path: c.path ?? null, line: c.line ?? c.original_line ?? null, diffHunk: c.diff_hunk ?? null,
     reviewState: c.state ?? null, thread: kind === "inline" ? threads.get(String(c.id)) ?? null : null,
-    replies: kind === "inline" ? raw.reviewComments.filter((r) => r.in_reply_to_id === c.id).map((r) => ({
+    replies: kind === "inline" ? raw.reviewComments.filter((r) => r.in_reply_to_id === c.id && !isAuditComment(r.body)).map((r) => ({
       author: r.user?.login ?? "unknown", body: r.body ?? "", url: r.html_url, createdAt: r.created_at ?? "",
     })) : [],
   })));
@@ -211,8 +212,13 @@ export async function fetchReviewSnapshot(target: ReviewTarget): Promise<ReviewS
   };
 }
 
-// Keep this marker stable across package renames so existing sticky comments remain identifiable.
-export const AUDIT_COMMENT_MARKER = "<!-- pi-durable-demo:review-audit -->";
+// Shared marker for sticky updates and evidence exclusion.
+export const AUDIT_COMMENT_MARKER = "<!-- pronto:review-audit -->";
+
+export function isAuditComment(body: string | null | undefined): boolean {
+  // Only a standalone trailing marker identifies output; quoted or embedded markers are discussion.
+  return body?.trimEnd().split("\n").at(-1) === AUDIT_COMMENT_MARKER;
+}
 
 export async function postReviewComment(target: ReviewTarget, body: string, sticky = true, apply = false): Promise<{
   action: "posted" | "updated"; url: string | null;
@@ -227,9 +233,7 @@ export async function postReviewComment(target: ReviewTarget, body: string, stic
       client.pages<RawComment>(`${path}/${target.pr}/comments?per_page=100`),
     ]);
     existing = comments.filter((comment) => comment.user?.login.toLowerCase() === viewer.login.toLowerCase()
-      && (comment.body?.trimEnd().endsWith(AUDIT_COMMENT_MARKER)
-        // Recognise verdicts posted before the marker was introduced.
-        || comment.body?.startsWith(`PR review audit · ${target.url}\n\nHead: `)))
+      && isAuditComment(comment.body))
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || b.id - a.id)[0];
   }
   const action = existing ? "updated" : "posted";

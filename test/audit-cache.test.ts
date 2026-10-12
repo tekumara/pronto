@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, join, resolve } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createSession, defineDoc, type JsonObject } from "@earendil-works/pi-durable";
+import { createSession, defineDoc, type ConversationId, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { ReviewSnapshot } from "../reviews.ts";
 import { fixture, reply, tool, type Request } from "./fixtures.ts";
@@ -13,8 +13,15 @@ import { fixture, reply, tool, type Request } from "./fixtures.ts";
 const url = "https://github.com/acme/project/pull/9";
 const audit = resolve("audit.ts");
 const chat = resolve("agent.ts");
+// Persisted document contracts used to inspect evidence and simulate a pre-filtering snapshot.
+const auditRuns = defineDoc<{ active: ConversationId | null }>({
+  kind: "app.review-audit-runs", version: 2, scope: "session", initial: () => ({ active: null }),
+});
+const auditDocument = defineDoc<{ snapshot: ReviewSnapshot | null }>({
+  kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ snapshot: null }),
+});
 
-function evidence() {
+function evidence(extra: { inline?: object[]; comments?: object[]; reviews?: object[] } = {}) {
   const state = {
     headSha: "a".repeat(40), baseSha: "b".repeat(40), title: "Example PR", description: "The intended change.",
     commentBody: "Please explain this behaviour.", replyBody: "An explanation.", reviewBody: "Please document the trade-off.",
@@ -41,17 +48,18 @@ function evidence() {
           { ...comment(1, state.commentBody), path: "example.ts", line: 1, diff_hunk: "@@ -1 +1 @@", commit_id: state.headSha },
           { ...comment(11, state.replyBody), in_reply_to_id: 1 },
           { ...comment(12, "A later clarification."), in_reply_to_id: 1 },
+          ...(extra.inline ?? []),
         ];
         data = state.reverse ? comments.reverse() : comments;
         break;
       }
       case "/github/repos/acme/project/issues/9/comments": {
-        const comments = [comment(20, "A general comment."), comment(21, "Another general comment.")];
+        const comments = [comment(20, "A general comment."), comment(21, "Another general comment."), ...(extra.comments ?? [])];
         data = state.reverse ? comments.reverse() : comments;
         break;
       }
       case "/github/repos/acme/project/pulls/9/reviews":
-        data = [{ ...comment(30, state.reviewBody), state: state.reviewState, submitted_at: "2026-01-01T00:00:00Z" }];
+        data = [{ ...comment(30, state.reviewBody), state: state.reviewState, submitted_at: "2026-01-01T00:00:00Z" }, ...(extra.reviews ?? [])];
         break;
       case "/github/repos/acme/project/pulls/9/files": data = []; break;
       case "/github/graphql":
@@ -134,6 +142,54 @@ test("unchanged evidence reuses a saved assessment across directories, CLI and c
   assert.match(second, /Not all actionable findings are addressed/);
   const output = await f.run(`/audit ${url}\n/quit\n`, [], { entrypoint: chat });
   assert.match(output, reuseMessage);
+  assert.equal(calls, 1);
+});
+
+test("marked audit output from any account is omitted from saved and model evidence without hiding ordinary discussion", { timeout: 20_000 }, async (t) => {
+  const marker = "<!-- pronto:review-audit -->";
+  const comment = (id: number, body: string, login: string, extra: object = {}) => ({
+    id, body, user: { login }, html_url: `${url}#issuecomment-${id}`, ...extra,
+  });
+  const comments = [
+    comment(40, `Own audit output\n\n${marker}\n  `, "auditor"),
+    comment(41, `Another account's audit output\n\n${marker}`, "another-auditor"),
+    comment(42, "A human explanation from the auditor's account.", "auditor"),
+    comment(43, `PR review audit · ${url}\n\nHead: ${"a".repeat(40)}\n\nAn unmarked older report.`, "another-auditor"),
+    comment(44, `Discussing ${marker}`, "auditor"),
+    comment(45, `Quoting the marker:\n> ${marker}`, "another-auditor"),
+    comment(46, `Showing the marker as code:\n\n    ${marker}`, "auditor"),
+  ];
+  const reviews = [comment(50, `Approval audit output\n\n${marker}`, "another-auditor", { state: "APPROVED" })];
+  const inline = [
+    comment(60, `Inline audit output\n\n${marker}`, "another-auditor"),
+    comment(61, `Audit reply\n\n${marker}`, "auditor", { in_reply_to_id: 1 }),
+  ];
+  const github = evidence({ comments, reviews, inline });
+  const expectedKeys = ["inline:1", "comment:20", "comment:21", "comment:42", "comment:43", "comment:44", "comment:45", "comment:46", "review:30"];
+  let calls = 0;
+  let supplied: ReviewSnapshot | undefined;
+  const f = await fixture(t, (body, response) => {
+    supplied = assess(body, response, ++calls);
+  }, { entrypoint: audit, github: github.handler });
+  await f.run("", [url]);
+  assert.deepEqual(supplied?.comments.map((c) => c.key), expectedKeys);
+  assert.deepEqual(supplied?.comments[0]!.replies.map((r) => r.body), ["An explanation.", "A later clarification."]);
+
+  const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
+  try {
+    const state = await session.snapshot(auditRuns, BACKGROUND_CONTEXT);
+    assert.ok(state?.active);
+    const saved = await session.snapshot(auditDocument, state.active, BACKGROUND_CONTEXT);
+    assert.deepEqual(saved?.snapshot?.comments.map((c) => c.key), expectedKeys);
+    assert.deepEqual(saved?.snapshot?.comments[0]!.replies.map((r) => r.body), ["An explanation.", "A later clarification."]);
+  } finally { await session.close(BACKGROUND_CONTEXT); }
+
+  // Changing, adding or removing only marked output must leave the assessment reusable.
+  comments.splice(0, 2);
+  reviews[0]!.body = `Updated approval report\n\n${marker}`;
+  inline.push(comment(62, `A new audit reply\n\n${marker}`, "another-auditor", { in_reply_to_id: 1 }));
+  const cached = await f.run("", [url]);
+  assert.match(cached, /Reusing saved assessment/);
   assert.equal(calls, 1);
 });
 
@@ -301,7 +357,7 @@ test("a failed forced reassessment leaves the previous successful cache usable",
   assert.match(cached, /Assessment 1/);
 });
 
-test("--force cancels an unfinished audit and starts with newly fetched evidence", { timeout: 20_000 }, async (t) => {
+test("unfinished snapshots containing marked audit output require --force to restart with fresh evidence", { timeout: 20_000 }, async (t) => {
   const github = evidence();
   let calls = 0;
   let started!: () => void;
@@ -321,6 +377,25 @@ test("--force cancels an unfinished audit and starts with newly fetched evidence
   await pending;
   first.child.kill("SIGKILL");
   await first.done;
+  // Model an unfinished snapshot saved before audit-output filtering was introduced.
+  const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
+  try {
+    const state = await session.snapshot(auditRuns, BACKGROUND_CONTEXT);
+    assert.ok(state?.active);
+    const active = state.active;
+    await session.commit(async (tx) => {
+      const doc = await tx.doc(auditDocument, active);
+      assert.ok(doc.snapshot);
+      doc.snapshot.comments[0]!.body = "Saved auditor output\n\n<!-- pronto:review-audit -->";
+    }, BACKGROUND_CONTEXT);
+  } finally { await session.close(BACKGROUND_CONTEXT); }
+  const blocked = f.start([url]);
+  blocked.child.stdin.end();
+  const rejected = await blocked.done;
+  assert.equal(rejected.code, 1);
+  assert.match(rejected.stderr, /saved audit.*Pronto output.*--force/i);
+  assert.equal(calls, 1, "contaminated saved evidence must not be sent to the model on resume");
+
   github.state.commentBody = "A newer concern.";
   const restarted = await f.run("", [url, "--force"]);
   assert.equal(calls, 2, "the cancelled request must not be resumed before the new one");

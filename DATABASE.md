@@ -226,6 +226,8 @@ Each PR has one database at `<state-directory>/audits/<target-hash>.sqlite`, sha
 
 Each newly admitted audit attempt creates an independent conversation. Its evidence and identity are saved together, before submitting work to the model.
 
+New snapshots omit marked Pronto comments, replies and submitted review bodies from any account. They are not stored separately or included in the model input or evidence fingerprint. Ordinary discussion and unmarked older reports remain in scope. Historical snapshots are not rewritten.
+
 The application stores these logical documents, not separate tables for each kind:
 
 | Document kind | Scope | Contents |

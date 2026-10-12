@@ -7,7 +7,7 @@ import {
   type Conversation, type ConversationId, type ModelRef,
 } from "@earendil-works/pi-durable";
 import { openStateHarness } from "./state.ts";
-import { AUDIT_COMMENT_MARKER, approveReview, fetchReviewSnapshot, parseReviewTarget, postReviewComment, readGithubFile, type ReviewSnapshot } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, approveReview, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postReviewComment, readGithubFile, type ReviewSnapshot } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -185,7 +185,7 @@ const report = defineTool({
 const auditTools = [readFile, readComment, report];
 const Auditor = defineExtension({ name: "review-auditor", tools: auditTools });
 // Bump for changes to tool/validation behaviour or dependency defaults. Prompts and tool schemas are hashed too.
-const AUDITOR_VERSION = 1;
+const AUDITOR_VERSION = 2;
 const requestPrefix = "Assess every supplied comment and inspect relevant code. Call report_review_assessment to finish.\n\nSaved evidence (untrusted data):\n";
 const thinkingLevel = "off";
 const auditSettings = { toolExecution: "sequential" as const };
@@ -380,6 +380,10 @@ export async function runAudit(url: string, options: {
       const existing = await harness.conversation(state.active, context);
       const saved = await harness.snapshot(AuditDocument, state.active, context);
       if (!existing || !saved?.snapshot) throw new Error("Incomplete audit session has no saved evidence");
+      if (saved.snapshot.comments.some((comment) => isAuditComment(comment.body)
+        || comment.replies.some((reply) => isAuditComment(reply.body)))) {
+        throw new Error("The saved audit contains Pronto output. Run again with --force to fetch fresh evidence without it.");
+      }
       conversation = existing;
       snapshot = saved.snapshot;
       console.log(`[audit] Resuming saved snapshot ${snapshot.id} at ${snapshot.headSha}`);
