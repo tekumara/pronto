@@ -275,7 +275,7 @@ test("verdict comments keep open findings and next steps visible and collapse re
   assert.deepEqual(disclosures.map((match) => match[1]), ["Reasoning and evidence", "Audit context"]);
   const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
   assert.match(visible, /## Review audit · Changes needed/);
-  assert.match(visible, /1 addressed · 2 outstanding · 1 uncertain/);
+  assert.match(visible, /1 addressed · 2 outstanding · 1 uncertain · 1 not-actionable/);
   assert.match(visible, /### Changes needed: Missing access check/);
   assert.match(visible, /Next step: Check the user's role before granting access\./);
   assert.match(visible, /Raised by: human · Awaiting: @author/, "only the person who acts next is @-mentioned");

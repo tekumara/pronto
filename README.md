@@ -120,7 +120,7 @@ Example comment:
 ```markdown
 ## Review audit · Changes needed
 
-4 addressed · 1 outstanding · 1 uncertain
+4 addressed · 1 outstanding · 1 uncertain · 2 not-actionable
 
 ### Changes needed: Missing access check
 

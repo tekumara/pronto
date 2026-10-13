@@ -379,7 +379,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[]): str
     : counts.addressed ? "All actionable findings addressed" : "No actionable findings identified";
   const sections = [
     `## Review audit · ${headline}`,
-    `${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain`,
+    `${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not-actionable`,
   ];
   const byKey = new Map(assessments.map((a) => [a.commentKey, a]));
   const pending = ["outstanding", "uncertain"].flatMap((status) => snapshot.comments.flatMap((comment) =>
