@@ -330,10 +330,10 @@ The host requires exactly one assessment per supplied source. Each assessment co
 }
 ```
 
-Finding counts include every item in every assessment's `findings` array, including `not-actionable` items. They count findings, not sources. For example, 5 sources can produce 6 findings when one source contains 2 findings. The terminal currently groups findings under source headings, so the number of headings can differ from the finding count.
+Finding counts include every item in every assessment's `findings` array, including `not-actionable` items. They count findings, not sources. For example, 5 sources can produce 6 findings when one source contains 2 findings. The terminal shows both totals and gives each finding its own numbered block, repeating the source information underneath. These numbers are local to the printed report, not stored finding IDs.
 
 Findings have no separate database ID. Each belongs to a source through its parent assessment's `commentKey`. Author, source URL and GitHub thread state remain in `snapshot.comments`, rather than being copied into each finding. Thread resolution describes the source thread; it is not a finding status.
 
 `nextStep` and `awaiting` are optional schema fields. The auditor is instructed to supply both for `outstanding` and `uncertain` findings, and the host rejects those findings if `awaiting` is missing. Older saved reports may omit these fields; the renderer uses a generic next step and `unknown` ownership where needed.
 
-The overall verdict and status counts are calculated from the saved findings when printing. They are not additional report fields. Rendering one block per finding instead of grouping by source would not require a database migration or a new model assessment.
+The overall verdict and status counts are calculated from the saved findings when printing. They are not additional report fields. Finding-first rendering uses the existing saved assessments without a database migration or a new model assessment. See [Finding-first terminal output](README.md#finding-first-terminal-output) for an example.

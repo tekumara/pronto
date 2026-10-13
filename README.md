@@ -69,11 +69,36 @@ Pronto omits its own marked output from any account before saving evidence. This
 
 The model can read remote text files at those pinned commits, including the fork head. It cannot execute shell commands, access local files, edit code, post comments, or resolve threads. It does not fetch check results, workflow runs or logs. Inaccessible code needed to verify a fix leads to `uncertain`, not a guessed fix. Specific reports of external testing can count as reported evidence under the policy below.
 
-The terminal report lists each comment and its findings as `addressed`, `outstanding`, `uncertain`, or `not-actionable`, with explanations and evidence links. GitHub thread resolution is reported separately. A resolved thread or a reply claiming a fix is not proof that the code addresses the finding. The host checks comment coverage and evidence references before printing a verdict. Assessment of the findings remains the model's judgement.
+The terminal report gives each finding its own numbered block as `addressed`, `outstanding`, `uncertain`, or `not-actionable`, with explanations and evidence links. GitHub thread resolution is reported separately. A resolved thread or a reply claiming a fix is not proof that the code addresses the finding. The host checks comment coverage and evidence references before printing a verdict. Assessment of the findings remains the model's judgement.
 
-One comment or review summary can contain multiple findings, so finding counts can exceed the number of source headings. Counts include `not-actionable` items. See [How findings are stored](DATABASE.md#how-findings-are-stored) for the saved structure and source relationships.
+One comment or review summary can contain multiple findings, so finding counts can exceed source counts. Counts include `not-actionable` items. See [How findings are stored](DATABASE.md#how-findings-are-stored) for the saved structure and source relationships.
 
 The audit checks whether existing review findings have been addressed. It is not a general code review or proof that the PR is correct.
+
+### Finding-first terminal output
+
+The report shows the total findings and sources, followed by one block per finding. Each block repeats its source key, author and URL. Inline findings also show the source thread's resolution and outdated state. Outstanding and uncertain findings retain their `Awaiting` person and `Next step`.
+
+For example, one review summary can produce 2 findings. This shortened report shows both separately:
+
+```text
+Findings: 2 across 1 source
+1 addressed · 0 outstanding · 0 uncertain · 1 not-actionable
+
+[1] addressed: External key policy remains a deployment prerequisite
+    Source: review:303 · reviewer[bot]
+    https://github.com/owner/repo/pull/42#pullrequestreview-303
+    The author documented the external policy requirement. No key-policy fix or deployment verification is claimed.
+    Evidence: https://github.com/owner/repo/pull/42
+
+[2] not-actionable: Change overview and review boilerplate
+    Source: review:303 · reviewer[bot]
+    https://github.com/owner/repo/pull/42#pullrequestreview-303
+    The remaining review summarizes the implementation without requesting another change.
+    Evidence: https://github.com/owner/repo/pull/42#pullrequestreview-303
+```
+
+Findings appear in saved source order, then in the order within each source's assessment. Numbers are local to the printed report, not persistent finding IDs. Saved assessments use this format without a database migration or another model assessment. The compact GitHub verdict comment remains unchanged.
 
 ### What addressed means
 

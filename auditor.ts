@@ -314,17 +314,18 @@ function summarizeFindings(assessments: Assessment[]) {
   const approvable = !counts.outstanding && !counts.uncertain;
   const verdict = counts.outstanding || counts.uncertain ? "Not all actionable findings are addressed."
     : counts.addressed ? "All actionable findings appear addressed." : "No actionable findings identified.";
-  return { counts, verdict, approvable };
+  return { counts, verdict, approvable, total: findings.length };
 }
 
 function formatSummary(snapshot: ReviewSnapshot, assessments: Assessment[]): string[] {
-  const { counts, verdict } = summarizeFindings(assessments);
+  const { counts, verdict, total } = summarizeFindings(assessments);
   const inline = snapshot.comments.filter((c) => c.kind === "inline");
   const resolved = inline.filter((c) => c.thread?.resolved).length;
   const unknown = inline.filter((c) => !c.thread).length;
   return [
     `PR review audit · ${snapshot.target.url}`, `Head: ${snapshot.headSha}`, `Evidence fetched: ${snapshot.startedAt} to ${snapshot.fetchedAt}`,
-    `Verdict: ${verdict}`, `Findings: ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not-actionable`,
+    `Verdict: ${verdict}`, `Findings: ${total} across ${snapshot.comments.length} ${snapshot.comments.length === 1 ? "source" : "sources"}`,
+    `${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not-actionable`,
     "Addressed includes code fixes and supported explanations or scope decisions, not necessarily the requested code change.",
     `GitHub: ${resolved}/${inline.length} inline threads resolved (${unknown} unknown). PR-level comments and review summaries have no thread-resolution state.`,
   ];
@@ -357,17 +358,19 @@ function ownership(comment: { author: string }, finding: { awaiting?: string }, 
 function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[]): string {
   const lines = [...formatSummary(snapshot, assessments), ""];
   const byKey = new Map(assessments.map((a) => [a.commentKey, a]));
+  let index = 0;
   for (const comment of snapshot.comments) {
-    const thread = comment.kind !== "inline" ? "not a review thread" : !comment.thread ? "resolution unknown"
+    const thread = !comment.thread ? "resolution unknown"
       : `${comment.thread.resolved ? "resolved" : "open"}${comment.thread.outdated ? ", outdated" : ""}`;
-    lines.push(`${comment.key} · ${comment.author} · GitHub: ${thread}`, comment.url);
     for (const finding of byKey.get(comment.key)!.findings) {
-      lines.push(`  ${finding.status}: ${finding.summary}`, `  ${finding.reason}`,
-        ...(finding.status === "outstanding" || finding.status === "uncertain" ? [`  ${ownership(comment, finding)}`,
-          `  Next step: ${finding.nextStep ?? genericNextStep(finding.status)}`] : []),
-        ...finding.evidence.map((url) => `  Evidence: ${url}`));
+      lines.push(`[${++index}] ${finding.status}: ${finding.summary}`,
+        `    Source: ${comment.key} · ${comment.author}`, `    ${comment.url}`,
+        ...(comment.kind === "inline" ? [`    GitHub thread: ${thread}`] : []),
+        `    ${finding.reason}`,
+        ...(finding.status === "outstanding" || finding.status === "uncertain" ? [`    ${ownership(comment, finding)}`,
+          `    Next step: ${finding.nextStep ?? genericNextStep(finding.status)}`] : []),
+        ...finding.evidence.map((url) => `    Evidence: ${url}`), "");
     }
-    lines.push("");
   }
   lines.push(snapshotDisclaimer);
   return stripControlCharacters(lines.join("\n"));

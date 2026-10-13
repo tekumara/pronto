@@ -130,7 +130,11 @@ for (const status of ["addressed", "uncertain"] as const) {
     for (const report of preview) {
       assert.match(report, /Addressed includes code fixes and supported explanations or scope decisions, not necessarily the requested code change\./);
     }
-    if (status === "addressed") assert.match(preview[0], /addressed: Requested explanation\n  The reply explains the intentional behaviour\./);
+    assert.match(preview[0], /^Findings: 1 across 1 source$/m);
+    if (status === "addressed") {
+      assert.match(preview[0], /^\[1\] addressed: Requested explanation$/m);
+      assert.match(preview[0], /^    The reply explains the intentional behaviour\.$/m);
+    }
     assert.equal(github.comments.length, 0, "dry-runs must not post comments");
     assert.equal(github.approvals.length, 0, "audits must not approve without --approve");
 
@@ -247,7 +251,7 @@ test("sticky comments preserve reused assessments, replace fresh ones across pag
   assert.equal(github.issueComments.length, 7);
 });
 
-test("verdict comments keep open findings and next steps visible and collapse reasoning and audit context", { timeout: 20000 }, async (t) => {
+test("terminal reports number each finding and verdict comments keep open findings visible with collapsed context", { timeout: 20000 }, async (t) => {
   const github = githubEvidence({ issueComment: true });
   const issueUrl = `${url}#issuecomment-3`;
   const f = await fixture(t, (_body, response) => {
@@ -268,7 +272,36 @@ test("verdict comments keep open findings and next steps visible and collapse re
       ] },
     ] });
   }, { entrypoint: resolve("audit.ts"), github: github.handler });
-  await f.run("", ["--apply", url]);
+  const terminal = await f.run("", ["--apply", url]);
+  assert.match(terminal, /^Findings: 5 across 2 sources$/m);
+  const findings = terminal.split("\n\n").filter((block) => /^\[\d+\] /.test(block));
+  assert.deepEqual(findings.map((block) => block.split("\n")[0]), [
+    "[1] outstanding: Missing access check",
+    "[2] addressed: Null guard",
+    "[3] not-actionable: Duplicate request",
+    "[4] uncertain: Undefined access policy",
+    "[5] outstanding: Missing policy documentation",
+  ]);
+  for (const [index, finding] of findings.entries()) {
+    const inline = index < 3;
+    assert.ok(finding.includes(`    Source: ${inline ? "inline:1" : "comment:3"} · human`));
+    assert.ok(finding.includes(`    ${inline ? evidenceUrl : issueUrl}\n`));
+    if (inline) assert.match(finding, /^    GitHub thread: open$/m);
+    else assert.doesNotMatch(finding, /GitHub thread:/, "PR-level comments have no thread state");
+    assert.ok(finding.includes(`    Evidence: ${inline ? evidenceUrl : issueUrl}`));
+  }
+  assert.match(findings[0], /The current code still grants access without checking roles\./);
+  assert.match(findings[0], /Raised by: human · Awaiting: author/);
+  assert.match(findings[0], /Next step: Check the user's role before granting access\./);
+  assert.ok(findings[0].includes(`    Evidence: ${url}#discussion_r2`));
+  assert.match(findings[1], /The null guard is already fixed\./);
+  assert.match(findings[2], /This repeats the access check finding\./);
+  assert.match(findings[3], /The discussion does not specify which roles should have access\./);
+  assert.match(findings[3], /Raised by: human · Awaiting: human/);
+  assert.match(findings[3], /Next step: Confirm which roles should have access\./);
+  assert.match(findings[4], /The requested policy documentation is still absent\./);
+  assert.match(findings[4], /Next step: Address the finding with a code fix or an evidence-supported explanation\./);
+  assert.doesNotMatch(terminal, /@author|@human|\u001b/);
   assert.equal(github.comments.length, 1);
   const body = github.comments[0];
   const disclosures = [...body.matchAll(/<details>\n<summary>(.*?)<\/summary>\n([\s\S]*?)\n<\/details>/g)];
@@ -431,6 +464,10 @@ for (const { statuses, approve, chat, allowUncertain } of [
       assert.match(output, /Reusing saved assessment/);
       assert.match(output, /Verdict comment unchanged/);
       assert.match(output, /Verdict: No actionable findings identified/);
+      if (!statuses.length) {
+        assert.match(output, /^Findings: 0 across 0 sources$/m);
+        assert.doesNotMatch(output, /^\[\d+\] /m);
+      }
       assert.match(github.comments[0], /0 addressed · 0 outstanding · 0 uncertain/);
     }
     if (approve) {

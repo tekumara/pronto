@@ -219,8 +219,8 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.match(output, /Verdict: Not all actionable findings are addressed/);
   assert.match(output, /1 addressed · 1 outstanding · 1 uncertain · 3 not-actionable/);
   assert.match(output, /GitHub: 1\/2 inline threads resolved \(0 unknown\)/);
-  assert.match(output, new RegExp(`inline:${accessId} · human · GitHub: resolved[\\s\\S]*outstanding: Access check`));
-  assert.match(output, /inline:102 · human · GitHub: open, outdated[\s\S]*addressed: Null check/);
+  assert.ok(output.includes(`[1] outstanding: Access check\n    Source: inline:${accessId} · human\n    ${commentUrl(accessId)}\n    GitHub thread: resolved`));
+  assert.ok(output.includes(`[2] addressed: Null check\n    Source: inline:102 · human\n    ${commentUrl(102)}\n    GitHub thread: open, outdated`));
   assert.equal(turn, 5);
   await assert.rejects(readFile(join(f.cwd, "audit-should-not-write")), { code: "ENOENT" });
   const files = await readdir(join(f.stateDir, "audits"));
