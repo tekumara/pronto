@@ -71,6 +71,8 @@ The model can read remote text files at those pinned commits, including the fork
 
 The terminal report lists each comment and its findings as `addressed`, `outstanding`, `uncertain`, or `not-actionable`, with explanations and evidence links. GitHub thread resolution is reported separately. A resolved thread or a reply claiming a fix is not proof that the code addresses the finding. The host checks comment coverage and evidence references before printing a verdict. Assessment of the findings remains the model's judgement.
 
+One comment or review summary can contain multiple findings, so finding counts can exceed the number of source headings. Counts include `not-actionable` items. See [How findings are stored](DATABASE.md#how-findings-are-stored) for the saved structure and source relationships.
+
 The audit checks whether existing review findings have been addressed. It is not a general code review or proof that the PR is correct.
 
 ### What addressed means

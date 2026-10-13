@@ -236,7 +236,7 @@ The application stores these logical documents, not separate tables for each kin
 | `app.review-audit-identity` | Conversation | `fingerprint`: evidence and policy hash. `policy`: model and auditor configuration hash. Older conversations may not have this document. |
 | `app.review-audit-runs` | Session | `active`: latest admitted conversation ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
 
-Each assessment in `report` has a `commentKey` and a `findings` array. Each finding contains `summary`, `status`, `reason` and `evidence` URLs. The overall verdict and counts are calculated when printing; they are not additional report fields.
+See [How findings are stored](#how-findings-are-stored) for the report structure, finding fields and relationship between sources and finding counts.
 
 Once the input is placed, the conversation transcript also contains the full snapshot as a user message. Committed model responses and tool results follow it. Remote file excerpts appear in file-tool results; this is not a local PR checkout. Accepted assessment arguments appear in the assistant's `report_review_assessment` call. That tool's result is an acknowledgement, while the accepted assessment is mirrored in `app.review-audit.report`. Rejected report proposals can also appear in the transcript.
 
@@ -283,3 +283,57 @@ JS
 ```
 
 Conversation IDs are numeric database identities, not PR numbers. These application documents retain their latest value per scope; they are not a complete history of every document edit. Separate older audit conversations still retain their snapshots and reports.
+
+## How findings are stored
+
+There is no `findings` table. Findings live in the JSON value of the conversation-scoped `app.review-audit` document. The `documents` table identifies that document; `document_revisions` stores its value as a base and subsequent deltas. Use Durable's snapshot API to read the reconstructed value.
+
+The structure is defined in [`auditor.ts`](auditor.ts):
+
+```text
+app.review-audit
+├── snapshot
+│   └── comments[]          original sources, authors, URLs and thread states
+├── report[]                one assessment per source, or null before acceptance
+│   ├── commentKey          links to snapshot.comments[].key
+│   └── findings[]          one or more findings
+│       ├── summary         short title
+│       ├── status          addressed | outstanding | uncertain | not-actionable
+│       ├── reason          assessment and its basis
+│       ├── evidence[]      supporting URLs
+│       ├── nextStep?       what needs to happen next
+│       └── awaiting?       GitHub login of the person who acts next
+└── inspected[]             file URLs inspected during assessment
+```
+
+A source is an inline comment with its replies, a PR-level comment or a non-empty review summary. Its key includes its kind and GitHub ID, such as `inline:101`, `comment:202` or `review:303`.
+
+The host requires exactly one assessment per supplied source. Each assessment contains at least one finding. A review summary can contain a substantive concern and informational boilerplate, classified separately:
+
+```json
+{
+  "commentKey": "review:303",
+  "findings": [
+    {
+      "summary": "External key policy remains a deployment prerequisite",
+      "status": "addressed",
+      "reason": "The author documented the external policy requirement. No key-policy fix or deployment verification is claimed.",
+      "evidence": ["https://github.com/owner/repo/pull/42"]
+    },
+    {
+      "summary": "Change overview and review boilerplate",
+      "status": "not-actionable",
+      "reason": "The remaining review summarizes the implementation without requesting another change.",
+      "evidence": ["https://github.com/owner/repo/pull/42#pullrequestreview-303"]
+    }
+  ]
+}
+```
+
+Finding counts include every item in every assessment's `findings` array, including `not-actionable` items. They count findings, not sources. For example, 5 sources can produce 6 findings when one source contains 2 findings. The terminal currently groups findings under source headings, so the number of headings can differ from the finding count.
+
+Findings have no separate database ID. Each belongs to a source through its parent assessment's `commentKey`. Author, source URL and GitHub thread state remain in `snapshot.comments`, rather than being copied into each finding. Thread resolution describes the source thread; it is not a finding status.
+
+`nextStep` and `awaiting` are optional schema fields. The auditor is instructed to supply both for `outstanding` and `uncertain` findings, and the host rejects those findings if `awaiting` is missing. Older saved reports may omit these fields; the renderer uses a generic next step and `unknown` ownership where needed.
+
+The overall verdict and status counts are calculated from the saved findings when printing. They are not additional report fields. Rendering one block per finding instead of grouping by source would not require a database migration or a new model assessment.
