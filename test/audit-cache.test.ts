@@ -349,6 +349,10 @@ test("resuming an older saved report without migration status preserves the audi
   assert.match(resumed, /Run again with --force before approving/);
   assert.doesNotMatch(resumed, /PR would be approved/);
   assert.equal(calls, 1, "an existing report must not need a new model request to enforce the approval guard");
+  const allowed = await f.run("", [url, "--approve", "--allow-uncertain", "--approve-migrations"]);
+  assert.match(allowed, /PR would be approved/);
+  assert.doesNotMatch(allowed, /Approval blocked:|Approval would be skipped/);
+  assert.equal(calls, 1, "explicitly bypassing missing migration status must reuse the assessment");
 });
 
 test("chat --force bypasses a completed cache entry", { timeout: 20_000 }, async (t) => {
@@ -368,6 +372,7 @@ test("invalid audit flags are rejected before audit storage or network access in
   const f = await fixture(t, () => assert.fail("Invalid commands must not reach the model"), { entrypoint: audit, github: github.handler });
   for (const args of [[url, "--froce"], [url, "--force", "--force"],
     [url, "--comment"], [url, "--approve", "--approve"], [url, "--approve=false"],
+    [url, "--approve-migrations", "--approve-migrations"], [url, "--approve-migrations=false"],
     [url, "--apply", "--apply"], [url, "--apply=false"], [url, "--dry-run"], [url, "--apply", "--dry-run"], [url, "local/test", "extra"],
     [url, "--sticky="], [url, "--sticky=maybe"], [url, "--sticky", "--sticky=false"],
     [url, "--sticky=true", "--sticky", "false"]]) {
@@ -378,12 +383,13 @@ test("invalid audit flags are rejected before audit storage or network access in
     assert.match(result.stderr, /Usage:/);
   }
   const { child, done } = f.start([], { entrypoint: chat });
-  child.stdin.end(`/audit ${url} --force --force\n/audit ${url} --comment\n/audit ${url} --approve --approve\n/audit ${url} --apply --apply\n/audit ${url} --dry-run\n/audit ${url} --sticky --sticky=false\n/audit ${url} --sticky=maybe\n/audit ${url} --skip\n/audit ${url} --skip=\n/audit ${url} --skip --apply\n/quit\n`);
+  child.stdin.end(`/audit ${url} --force --force\n/audit ${url} --comment\n/audit ${url} --approve --approve\n/audit ${url} --approve-migrations --approve-migrations\n/audit ${url} --apply --apply\n/audit ${url} --dry-run\n/audit ${url} --sticky --sticky=false\n/audit ${url} --sticky=maybe\n/audit ${url} --skip\n/audit ${url} --skip=\n/audit ${url} --skip --apply\n/quit\n`);
   const result = await done;
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stderr, /--force can be supplied only once/);
   assert.match(result.stderr, /Unknown audit option: --comment/);
   assert.match(result.stderr, /--approve can be supplied only once/);
+  assert.match(result.stderr, /--approve-migrations can be supplied only once/);
   assert.match(result.stderr, /--apply can be supplied only once/);
   assert.match(result.stderr, /Unknown audit option: --dry-run/);
   assert.match(result.stderr, /--sticky can be supplied only once/);

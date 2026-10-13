@@ -452,7 +452,7 @@ for (const { statuses, migrationStatus } of [
   { statuses: ["uncertain"], migrationStatus: "migration" },
   { statuses: ["addressed"], migrationStatus: "uncertain" },
 ] satisfies { statuses: Status[]; migrationStatus: "migration" | "uncertain" }[]) {
-  test(`database migration status ${migrationStatus} still audits ${statuses.join(" + ") || "no findings"} but never approves, including cached and forced audits`, { timeout: 20000 }, async (t) => {
+  test(`--approve-migrations opts into approval for ${migrationStatus} with ${statuses.join(" + ") || "no findings"} across cached and forced audits without persisting`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence({ empty: !statuses.length,
       ...(migrationStatus === "migration" ? {
         title: "Backfill customer IDs", description: "Run a database data migration before deploying the new customer lookup.",
@@ -499,10 +499,31 @@ for (const { statuses, migrationStatus } of [
     assert.equal(calls, 2);
     assert.equal(github.comments.length, 2);
     assert.equal(github.approvals.length, 0, "neither --force nor --allow-uncertain may override the migration guard");
+
+    const withoutApproval = await f.run("", ["--apply", "--approve-migrations", url]);
+    assert.doesNotMatch(withoutApproval, /PR approved/);
+    assert.equal(github.approvals.length, 0, "--approve-migrations must not imply --approve");
+
+    const allowed = await f.run("", [...flags, "--approve-migrations", url]);
+    assert.match(allowed, /Reusing saved assessment/);
+    assert.match(allowed, /PR would be approved/);
+    assert.doesNotMatch(allowed, /Approval blocked:|Approval would be skipped/);
+    assert.equal(github.approvals.length, 0, "allowing migrations still requires --apply to submit approval");
+
+    const allowedApply = await f.run(`/audit --apply --approve-migrations ${flags.join(" ")} ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
+    assert.match(allowedApply, /Reusing saved assessment/);
+    assert.match(allowedApply, /PR approved/);
+    assert.doesNotMatch(allowedApply, /Approval blocked:|Approval skipped/);
+    assert.equal(github.approvals.length, 1);
+
+    const guardedAgain = await f.run("", [...flags, url]);
+    assert.match(guardedAgain, /Approval would be skipped: database migration/);
+    assert.equal(github.approvals.length, 1, "allowing migrations must not persist to later invocations");
+    assert.equal(calls, 2, "allowing migration approval must not invalidate the assessment cache");
   });
 }
 
-for (const { statuses, approve, chat, allowUncertain } of [
+for (const { statuses, approve, chat, allowUncertain, approveMigrations } of [
   { statuses: ["addressed", "not-actionable"], approve: true, chat: true, allowUncertain: false },
   { statuses: ["addressed", "outstanding"], approve: false, chat: false, allowUncertain: false },
   { statuses: ["addressed", "uncertain"], approve: false, chat: false, allowUncertain: false },
@@ -513,11 +534,15 @@ for (const { statuses, approve, chat, allowUncertain } of [
   { statuses: ["addressed", "outstanding", "uncertain"], approve: false, chat: false, allowUncertain: true },
   { statuses: ["not-actionable"], approve: true, chat: false, allowUncertain: true },
   { statuses: [], approve: true, chat: false, allowUncertain: true },
-] satisfies { statuses: Status[]; approve: boolean; chat: boolean; allowUncertain: boolean }[]) {
-  const flags = ["--approve", "--apply", ...(allowUncertain ? ["--allow-uncertain"] : [])];
+  { statuses: ["outstanding"], approve: false, chat: true, allowUncertain: true, approveMigrations: true },
+  { statuses: ["uncertain"], approve: false, chat: false, allowUncertain: false, approveMigrations: true },
+] satisfies { statuses: Status[]; approve: boolean; chat: boolean; allowUncertain: boolean; approveMigrations?: boolean }[]) {
+  const flags = ["--approve", "--apply", ...(allowUncertain ? ["--allow-uncertain"] : []), ...(approveMigrations ? ["--approve-migrations"] : [])];
   test(`${flags.join(" ")} ${approve ? "approves" : "skips"} ${statuses.join(" + ") || "an empty audit"} and posts a verdict comment`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence({ empty: !statuses.length });
-    const f = await fixture(t, (body, response) => assess(body, response, statuses), { entrypoint: resolve("audit.ts"), github: github.handler });
+    const f = await fixture(t, (body, response) => assess(body, response, statuses,
+      approveMigrations ? { status: "migration", reason: "The PR backfills database records." } : noDatabaseMigration),
+    { entrypoint: resolve("audit.ts"), github: github.handler });
     const noActionable = statuses.every((status) => status === "not-actionable");
     if (noActionable) {
       const preview = await f.run("", ["--approve", url]);

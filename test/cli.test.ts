@@ -23,6 +23,7 @@ test("npm link exposes pronto from source outside the checkout", { timeout: 2000
   const { stdout } = await exec(join(prefix, "bin", "pronto"), ["--help"], { cwd: directory });
   assert.match(stdout, /^Usage: pronto /m);
   assert.match(stdout, /--skip <label>/);
+  assert.match(stdout, /--approve-migrations.*default: false/);
 });
 
 const prUrl = "https://github.com/acme/demo/pull/7";
@@ -57,7 +58,7 @@ async function selectionFixture(t: TestContext, labels: string[] = []) {
 
 for (const { name, args, selector } of [
   { name: "current branch", args: [], selector: undefined },
-  { name: "current branch with flags only", args: ["--force", "--approve", "--sticky=false"], selector: undefined },
+  { name: "current branch with flags only", args: ["--force", "--approve", "--approve-migrations", "--sticky=false"], selector: undefined },
   { name: "explicit branch and model", args: ["feature/pr-inference", "local/test", "--force"], selector: "feature/pr-inference" },
   { name: "fork branch", args: ["contributor:feature/pr-inference"], selector: "contributor:feature/pr-inference" },
   { name: "branch containing shell metacharacters", args: ["feature/with;$value"], selector: "feature/with;$value" },

@@ -53,7 +53,7 @@ async function main() {
     if (!available.some((m) => m.provider === agent.model?.provider && m.id === agent.model?.modelId)) {
       throw new Error("The saved model is unavailable. Run npm start -- provider/model-id to select another.");
     }
-    console.log(`Pi Durable · ${agent.model!.provider}/${agent.model!.modelId}\n${cwd}\n/audit [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--apply] <PR URL> to audit · /quit to exit · Ctrl+C saves unfinished work for restart\n`);
+    console.log(`Pi Durable · ${agent.model!.provider}/${agent.model!.modelId}\n${cwd}\n/audit [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <PR URL> to audit · /quit to exit · Ctrl+C saves unfinished work for restart\n`);
 
     // Events contain both partial deltas and authoritative final messages.
     const printed = new Map<number, number>();
@@ -105,8 +105,8 @@ async function main() {
       if (content === "/quit") break;
       if (/^\/audit(?:\s|$)/.test(content)) {
         try {
-          const { selector: url, skipLabels, force, sticky, approve, allowUncertain, apply } = parseAuditOptions(content.slice("/audit".length).trim().split(/\s+/).filter(Boolean), "chat");
-          await runAudit(url, { models, model: agent.model!, skipLabels, force, sticky, approve, allowUncertain, apply });
+          const { selector: url, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(content.slice("/audit".length).trim().split(/\s+/).filter(Boolean), "chat");
+          await runAudit(url, { models, model: agent.model!, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply });
         } catch (error) {
           console.error(error instanceof Error ? error.message : error);
         }

@@ -4,11 +4,11 @@ import { parseReviewTarget } from "./reviews.ts";
 
 const exec = promisify(execFile);
 
-export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--apply] [<number> | <branch> | <GitHub PR URL>] [provider/model-id]";
+export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <GitHub PR URL>] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "chat") {
-  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--apply] <GitHub PR URL>";
-  const flags = ["--force", "--sticky", "--approve", "--allow-uncertain", "--apply"];
+  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--skip <label>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <GitHub PR URL>";
+  const flags = ["--force", "--sticky", "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];
   const supplied = new Set<string>();
   const positional: string[] = [];
   const skipLabels: string[] = [];
@@ -40,7 +40,8 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat") {
   // Chat still requires a URL. Reject malformed URLs before credentials, storage or network access.
   if (source === "chat" || selector.includes("://")) parseReviewTarget(selector);
   return { selector, requested, skipLabels, force: supplied.has("--force"), sticky,
-    approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"), apply: supplied.has("--apply") };
+    approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"),
+    approveMigrations: supplied.has("--approve-migrations"), apply: supplied.has("--apply") };
 }
 
 export async function resolveAuditUrl(selector: string, cwd: string): Promise<string> {

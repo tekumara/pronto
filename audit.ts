@@ -13,14 +13,15 @@ async function main() {
     console.log("--sticky updates your latest verdict comment after a fresh assessment; reused assessments leave it unchanged (default: true; --sticky=false creates a new comment).");
     console.log("--approve selects approval when no outstanding or uncertain findings remain; requires --apply to submit (default: false).");
     console.log("--allow-uncertain allows --approve with uncertain findings and no outstanding findings (default: false).");
+    console.log("--approve-migrations allows --approve for database migrations or uncertain/missing migration status; the audit always runs (default: false).");
     console.log("--apply publishes the verdict comment and any selected approval to GitHub (default: false; otherwise previews only).");
     return;
   }
-  const { selector, requested, skipLabels, force, sticky, approve, allowUncertain, apply } = parseAuditOptions(args, "cli");
+  const { selector, requested, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");
   const cwd = process.cwd();
   const url = await resolveAuditUrl(selector, cwd);
   const { models, model } = await createModelRuntime(cwd, requested);
-  await runAudit(url, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, force, sticky, approve, allowUncertain, apply });
+  await runAudit(url, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply });
 }
 
 main().catch((error) => {
