@@ -228,7 +228,13 @@ Add `--apply --approve` to post the verdict comment and submit a GitHub approval
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. Approval requires no `outstanding` or `uncertain` findings by default. Audits with only `not-actionable` findings, or no findings, also qualify. No `addressed` finding is required.
+`--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. Approval requires a PR classified as `not-migration`, with no `outstanding` or `uncertain` findings by default. Audits with only `not-actionable` findings, or no findings, also qualify if the PR is not a database migration. No `addressed` finding is required.
+
+Pronto does not approve database-migration PRs. The model classifies the PR using its title, description, changed files and patches, inspecting pinned code as needed. Database schema or data migrations, backfills and database cutovers require human approval, even when the PR also contains unrelated changes. Migration-framework maintenance, documentation or test fixtures alone do not count as a database migration.
+
+The audit still runs and saves its assessment. With `--apply`, it still posts or updates the verdict comment. The terminal report and comment explain why approval is blocked. Finding statuses and the audit verdict remain unchanged. Neither `--allow-uncertain` nor `--force` overrides this approval block.
+
+Approval is also blocked if migration status is `uncertain`, or an older saved report has no migration classification. Use `--force` to request a fresh assessment when classification is missing. Completed assessments from the previous policy are refreshed automatically.
 
 Supported explanations, scope decisions, explicit future-work deferrals and specific reported testing can count as `addressed`. Approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
 
@@ -238,7 +244,7 @@ Add `--allow-uncertain` to permit approval with uncertain findings, provided the
 pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
 ```
 
-`--allow-uncertain` defaults to false and does not persist across invocations. It still requires `--approve`, and `--apply` to submit a review. Audits with only uncertain findings can qualify. Audits with no actionable findings qualify without this flag. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
+`--allow-uncertain` defaults to false and does not persist across invocations. It still requires `--approve`, and `--apply` to submit a review. Audits with only uncertain findings can qualify if the PR is classified as `not-migration`. Audits with no actionable findings qualify without this flag if the PR is not a database migration. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA and has no body. The full audit report remains in the PR comment, so approval does not duplicate it. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
@@ -261,7 +267,7 @@ The normal report is followed by a labelled comment preview and the planned acti
 [audit:dry-run] PR would be approved at 0123456789abcdef0123456789abcdef01234567
 ```
 
-Outstanding findings always skip approval. Uncertain findings also skip approval unless you add `--allow-uncertain`. Audits with no actionable findings qualify for approval. An eligible approval still checks the current head and base SHAs; changed commits stop the preview with an error.
+Database migrations and uncertain or missing migration classifications always skip approval. Outstanding findings also skip approval. Uncertain findings skip approval unless you add `--allow-uncertain`. Audits with no actionable findings qualify only when classified as `not-migration`. An eligible approval still checks the current head and base SHAs; changed commits stop the preview with an error.
 
 To perform the selected actions, add `--apply`:
 

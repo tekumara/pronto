@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parseArgs, promisify } from "node:util";
-import { fixture, tool } from "./fixtures.ts";
+import { fixture, noDatabaseMigration, tool } from "./fixtures.ts";
 
 const exec = promisify(execFile);
 
@@ -29,7 +29,7 @@ const prUrl = "https://github.com/acme/demo/pull/7";
 
 async function selectionFixture(t: TestContext, labels: string[] = []) {
   return fixture(t, (_body, response) => {
-    tool(response, "report_review_assessment", { assessments: [] });
+    tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
   }, {
     entrypoint: resolve("audit.ts"),
     github: (request, response) => {

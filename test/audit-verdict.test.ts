@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { test } from "node:test";
-import { fixture, reply, tool, type Request } from "./fixtures.ts";
+import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 // A small external fixture isolates the final verdict rule: an open GitHub thread
 // can be addressed, but uncertainty alone must prevent an all-addressed verdict.
@@ -14,11 +14,12 @@ const evidenceUrl = `${url}#discussion_r1`;
 
 type Status = "addressed" | "outstanding" | "uncertain" | "not-actionable";
 
-function assess(body: Request, response: ServerResponse, statuses: Status[] = ["addressed"]) {
+function assess(body: Request, response: ServerResponse, statuses: Status[] = ["addressed"],
+  databaseMigration: { status: "migration" | "not-migration" | "uncertain"; reason: string } = noDatabaseMigration) {
   const input = body.messages.findLast((message) => message.role === "user")!.content!;
   const marker = "Saved evidence (untrusted data):\n";
   const snapshot = JSON.parse(input.slice(input.indexOf(marker) + marker.length));
-  tool(response, "report_review_assessment", { assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
+  tool(response, "report_review_assessment", { databaseMigration, assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
     commentKey: comment.key, findings: comment.key === "inline:1" ? statuses.map((status) => ({
       summary: "Requested explanation", status, ...(status === "addressed" || status === "not-actionable" ? {} : { awaiting: "author" }),
       reason: status === "addressed" ? "The reply explains the intentional behaviour." : "The explanation needs more evidence.",
@@ -38,6 +39,7 @@ const auditBody = `## Review audit · Verification needed\n\n${auditMarker}`;
 function githubEvidence(options: {
   commentStatus?: number; approvalStatus?: number; empty?: boolean; issueComment?: boolean;
   issueComments?: IssueComment[]; pageSize?: number;
+  title?: string; description?: string; files?: { filename: string; status: string; patch?: string }[];
 } = {}) {
   const comments: string[] = [];
   const updates: number[] = [];
@@ -91,7 +93,7 @@ function githubEvidence(options: {
         nodes: options.empty ? [] : [{ isResolved: false, isOutdated: false, comments: { nodes: [{ fullDatabaseId: "1" }] } }],
       } } } } });
     } else if (path.endsWith("/pulls/8")) {
-      json({ title: "Explain behaviour", body: "", changed_files: 0,
+      json({ title: options.title ?? "Explain behaviour", body: options.description ?? "", changed_files: options.files?.length ?? 0,
         head: { sha: state.headSha, repo: { full_name: "acme/demo" } }, base: { sha: state.baseSha, repo: { full_name: "acme/demo" } } });
     } else if (path.endsWith("/pulls/8/comments")) {
       json(options.empty ? [] : [{ id: 1, body: "Why is this intentional?", html_url: evidenceUrl, user: { login: "human" }, created_at: "2026-01-01" },
@@ -106,7 +108,7 @@ function githubEvidence(options: {
       json(reviews);
     } else {
       assert.ok(path.endsWith("/pulls/8/files"));
-      json([]);
+      json(options.files ?? []);
     }
   };
   return { handler, comments, updates, issueComments, approvals, state };
@@ -255,7 +257,7 @@ test("terminal reports number each finding and verdict comments keep open findin
   const github = githubEvidence({ issueComment: true });
   const issueUrl = `${url}#issuecomment-3`;
   const f = await fixture(t, (_body, response) => {
-    tool(response, "report_review_assessment", { assessments: [
+    tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [
       { commentKey: "inline:1", findings: [
         { summary: "Missing access check", status: "outstanding",
           reason: "The current code still grants access without checking roles.\u001b", awaiting: "author",
@@ -350,10 +352,28 @@ test("an unstructured final answer cannot bypass complete report validation, pos
   assert.equal(github.approvals.length, 0);
 });
 
+test("a report without a database-migration classification cannot post a verdict or approve", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence({ empty: true });
+  let calls = 0;
+  const f = await fixture(t, (body, response) => {
+    if (++calls === 1) return tool(response, "report_review_assessment", { assessments: [] });
+    assert.match(body.messages.at(-1)?.content ?? "", /databaseMigration/);
+    reply(response, [{ role: "assistant", content: "Done." }]);
+  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  const { child, done } = f.start(["--approve", "--apply", url]);
+  child.stdin.end();
+  const result = await done;
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /without a complete assessment/);
+  assert.doesNotMatch(result.stdout, /Verdict:/);
+  assert.equal(github.comments.length, 0);
+  assert.equal(github.approvals.length, 0);
+});
+
 test("posted comments @-mention only the person who acts next and never bots, and the terminal report stays plain", { timeout: 20000 }, async (t) => {
   const github = githubEvidence({ issueComments: [issueComment(3, "Automated finding.", "Copilot"), issueComment(4, "Another.", "scanner[bot]")] });
   const f = await fixture(t, (_body, response) => {
-    tool(response, "report_review_assessment", { assessments: [
+    tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [
       { commentKey: "inline:1", findings: [{ summary: "Explain", status: "addressed", reason: "Explained.", evidence: [evidenceUrl] }] },
       { commentKey: "comment:3", findings: [{ summary: "Bot one", status: "outstanding", reason: "Open.", awaiting: "author",
         nextStep: "Confirm the compatibility contract.", evidence: [`${url}#issuecomment-3`] }] },
@@ -381,7 +401,7 @@ for (const awaiting of [undefined, "invented-person"]) {
       requests.push(JSON.stringify(body));
       if (requests.length > 1) return reply(response, [{ role: "assistant", content: "Done." }]);
       const snapshot = JSON.parse(body.messages.findLast((m) => m.role === "user")!.content!.split("Saved evidence (untrusted data):\n")[1]);
-      tool(response, "report_review_assessment", { assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
+      tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
         commentKey: comment.key, findings: [{ summary: "Open", status: "outstanding", reason: "Still open.", evidence: [comment.url],
           ...(awaiting ? { awaiting } : {}) }],
       })) });
@@ -423,6 +443,62 @@ for (const action of ["comment", "update", "approve"] as const) {
     assert.equal(github.comments.length, 1);
     assert.deepEqual(github.updates, action === "update" ? [10] : []);
     assert.equal(github.approvals.length, action === "approve" ? 1 : 0, "approval intent must not persist");
+  });
+}
+
+for (const { statuses, migrationStatus } of [
+  { statuses: ["addressed"], migrationStatus: "migration" },
+  { statuses: [], migrationStatus: "migration" },
+  { statuses: ["uncertain"], migrationStatus: "migration" },
+  { statuses: ["addressed"], migrationStatus: "uncertain" },
+] satisfies { statuses: Status[]; migrationStatus: "migration" | "uncertain" }[]) {
+  test(`database migration status ${migrationStatus} still audits ${statuses.join(" + ") || "no findings"} but never approves, including cached and forced audits`, { timeout: 20000 }, async (t) => {
+    const github = githubEvidence({ empty: !statuses.length,
+      ...(migrationStatus === "migration" ? {
+        title: "Backfill customer IDs", description: "Run a database data migration before deploying the new customer lookup.",
+        files: [{ filename: "db/migrations/004_customer_ids.sql", status: "added", patch: "@@ -0,0 +1 @@\n+UPDATE customers SET external_id = id;" }],
+      } : {
+        title: "Change customer lookup storage", description: "The deployment plan is not available.",
+        files: [{ filename: "services/customer/storage.ts", status: "modified" }],
+      }),
+    });
+    const reason = migrationStatus === "migration" ? "The added SQL backfills customer IDs in the database."
+      : "The changed storage code is unavailable, so a database migration cannot be ruled out.";
+    let calls = 0;
+    const f = await fixture(t, (body, response) => {
+      calls++;
+      assess(body, response, statuses, { status: migrationStatus, reason });
+    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    const flags = ["--approve", "--allow-uncertain"];
+    const verdict = !statuses.length ? /Verdict: No actionable findings identified/
+      : statuses[0] === "addressed" ? /Verdict: All actionable findings appear addressed/
+      : /Verdict: Not all actionable findings are addressed/;
+
+    const preview = await f.run("", [...flags, url]);
+    assert.match(preview, verdict);
+    assert.match(preview, /Approval would be skipped: database migration/);
+    assert.doesNotMatch(preview, /PR would be approved/);
+    assert.equal(github.comments.length, 0);
+    assert.equal(github.approvals.length, 0);
+
+    const cached = await f.run(`/audit --apply ${flags.join(" ")} ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
+    assert.match(cached, /Reusing saved assessment/);
+    assert.match(cached, verdict);
+    assert.match(cached, /Approval skipped: database migration/);
+    assert.equal(calls, 1);
+    assert.equal(github.comments.length, 1, "blocking approval must still publish the verdict comment");
+    assert.match(github.comments[0], /Approval blocked: database migration/);
+    assert.ok(github.comments[0].includes(reason), "the comment must explain the migration approval block");
+    if (migrationStatus === "uncertain") assert.match(cached, /database migration status is uncertain/);
+    assert.equal(github.approvals.length, 0);
+
+    const fresh = await f.run("", ["--force", "--apply", ...flags, url]);
+    assert.match(fresh, verdict);
+    assert.match(fresh, /Verdict comment updated/);
+    assert.match(fresh, /Approval skipped: database migration/);
+    assert.equal(calls, 2);
+    assert.equal(github.comments.length, 2);
+    assert.equal(github.approvals.length, 0, "neither --force nor --allow-uncertain may override the migration guard");
   });
 }
 

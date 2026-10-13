@@ -8,7 +8,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, defineDoc, type ConversationId, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { ReviewSnapshot } from "../reviews.ts";
-import { fixture, reply, tool, type Request } from "./fixtures.ts";
+import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 const url = "https://github.com/acme/project/pull/9";
 const audit = resolve("audit.ts");
@@ -86,7 +86,7 @@ function snapshotFrom(body: Request): ReviewSnapshot {
 
 function assess(body: Request, response: ServerResponse, number: number) {
   const snapshot = snapshotFrom(body);
-  tool(response, "report_review_assessment", { assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
+  tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: snapshot.comments.map((comment: { key: string; url: string }) => ({
     commentKey: comment.key, findings: [{ summary: `Assessment ${number}`, status: "uncertain", awaiting: "reviewer",
       reason: "The available evidence is insufficient.", evidence: [comment.url] }],
   })) });
@@ -319,6 +319,36 @@ test("a successful mixed-policy audit cannot publish a cache entry or reuse an o
   const cached = await f.run("", [url]);
   assert.match(cached, /Reusing.*assessment/);
   assert.equal(calls, 4);
+});
+
+test("resuming an older saved report without migration status preserves the audit but cannot approve", { timeout: 20_000 }, async (t) => {
+  const github = evidence();
+  let calls = 0;
+  const f = await fixture(t, (body, response) => assess(body, response, ++calls), { entrypoint: audit, github: github.handler });
+  await f.run("", [url]);
+  // Simulate an older report committed before its completion bookkeeping was saved.
+  const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
+  const report = defineDoc<JsonObject>({
+    kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({}),
+  });
+  const runs = defineDoc<JsonObject>({ kind: "app.review-audit-runs", version: 2, scope: "session", initial: () => ({}) });
+  try {
+    const state = await session.snapshot(auditRuns, BACKGROUND_CONTEXT);
+    assert.ok(state?.active);
+    const active = state.active;
+    await session.commit(async (tx) => {
+      delete (await tx.doc(report, active)).databaseMigration;
+      (await tx.doc(runs)).complete = false;
+    }, BACKGROUND_CONTEXT);
+  } finally { await session.close(BACKGROUND_CONTEXT); }
+  const resumed = await f.run("", [url, "--approve", "--allow-uncertain"]);
+  assert.match(resumed, /Resuming saved snapshot/);
+  assert.match(resumed, /Assessment 1/);
+  assert.match(resumed, /Verdict: Not all actionable findings are addressed/);
+  assert.match(resumed, /Approval would be skipped: database migration status was not assessed/);
+  assert.match(resumed, /Run again with --force before approving/);
+  assert.doesNotMatch(resumed, /PR would be approved/);
+  assert.equal(calls, 1, "an existing report must not need a new model request to enforce the approval guard");
 });
 
 test("chat --force bypasses a completed cache entry", { timeout: 20_000 }, async (t) => {

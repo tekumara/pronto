@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { fixture, reply, tool, type Request } from "./fixtures.ts";
+import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 const prUrl = "https://github.com/acme/demo/pull/7";
 const headSha = "a".repeat(40);
@@ -87,7 +87,7 @@ function evidenceInput(body: Request) {
   return JSON.parse(inputs[0]!.content!.split("Saved evidence (untrusted data):\n")[1]!);
 }
 function assessments() {
-  return { assessments: [
+  return { databaseMigration: noDatabaseMigration, assessments: [
     { commentKey: `inline:${accessId}`, findings: [{ summary: "Access check", status: "outstanding", awaiting: "human", reason: "The code returns true without checking access.", evidence: [codeUrl] }] },
     { commentKey: "inline:102", findings: [{ summary: "Null check", status: "addressed", reason: "The guard handles a missing user.", evidence: [codeUrl, commentUrl(103)] }] },
     { commentKey: "comment:201", findings: [{ summary: "Policy", status: "uncertain", awaiting: "human", reason: "The policy is not specified.", evidence: [commentUrl(201)] }] },
@@ -180,7 +180,7 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
         break;
       case 2:
         assert.match(latest, /bash/i);
-        tool(response, "report_review_assessment", { assessments: assessments().assessments.slice(0, -1) });
+        tool(response, "report_review_assessment", { ...assessments(), assessments: assessments().assessments.slice(0, -1) });
         break;
       case 3: {
         assert.match(latest, /Missing assessments: review:302/);

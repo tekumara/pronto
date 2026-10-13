@@ -232,7 +232,7 @@ The application stores these logical documents, not separate tables for each kin
 
 | Document kind | Scope | Contents |
 | --- | --- | --- |
-| `app.review-audit` | Conversation | `snapshot`: PR details, pinned commits, comments, replies, thread states, changed files and patches. `report`: accepted assessments, initially `null`. `inspected`: URLs of remote file ranges read by tools. |
+| `app.review-audit` | Conversation | `snapshot`: PR details, pinned commits, comments, replies, thread states, changed files and patches. `report`: accepted findings assessments, initially `null`. `databaseMigration`: model classification (`migration`, `not-migration` or `uncertain`) and reason, initially `null` and absent in older reports. `inspected`: URLs of remote file ranges read by tools. |
 | `app.review-audit-identity` | Conversation | `fingerprint`: evidence and policy hash. `policy`: model and auditor configuration hash. Older conversations may not have this document. |
 | `app.review-audit-runs` | Session | `active`: latest admitted conversation ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
 
@@ -294,6 +294,9 @@ The structure is defined in [`auditor.ts`](auditor.ts):
 app.review-audit
 ├── snapshot
 │   └── comments[]          original sources, authors, URLs and thread states
+├── databaseMigration       PR-level classification, or null before acceptance
+│   ├── status              migration | not-migration | uncertain
+│   └── reason              classification and its basis
 ├── report[]                one assessment per source, or null before acceptance
 │   ├── commentKey          links to snapshot.comments[].key
 │   └── findings[]          one or more findings
@@ -335,5 +338,7 @@ Finding counts include every item in every assessment's `findings` array, includ
 Findings have no separate database ID. Each belongs to a source through its parent assessment's `commentKey`. Author, source URL and GitHub thread state remain in `snapshot.comments`, rather than being copied into each finding. Thread resolution describes the source thread; it is not a finding status.
 
 `nextStep` and `awaiting` are optional schema fields. The auditor is instructed to supply both for `outstanding` and `uncertain` findings, and the host rejects those findings if `awaiting` is missing. Older saved reports may omit these fields; the renderer uses a generic next step and `unknown` ownership where needed.
+
+The database-migration classification is saved alongside the findings in the same report-acceptance transaction. It is independent of finding statuses and counts. Only `not-migration` permits approval, subject to the findings policy and explicit action flags. Migration, uncertain or missing classifications block approval without suppressing the audit report or verdict comment. See [Approve clean audits](README.md#approve-clean-audits).
 
 The overall verdict and status counts are calculated from the saved findings when printing. They are not additional report fields. Finding-first rendering uses the existing saved assessments without a database migration or a new model assessment. See [Finding-first terminal output](README.md#finding-first-terminal-output) for an example.
