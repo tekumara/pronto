@@ -275,21 +275,13 @@ The headline is “Changes needed” when findings remain outstanding, or “Ver
 
 Outstanding findings appear before uncertain findings. Their reasoning and evidence appear in the first collapsed section. When a database migration blocks approval, its explanation appears there under “Database migration assessment”. The visible approval-block line stays short. The section is omitted when there are no pending findings or migration explanations. Audit context remains available, including the audited head, fetch window, thread-resolution counts, non-actionable count and meaning of `addressed`. In the posted comment, only the person who acts next is written as `@login`, and only on the `Awaiting` line, so GitHub notifies them once. The next step is a short imperative saying what to do. The person who raised the finding is never tagged on that basis, bots (`[bot]` accounts and Copilot) are never mentioned, and the terminal report stays plain. Each shows `Raised by` (the comment author, taken from the evidence) and `Awaiting` (the person who must act next). The auditor chooses `Awaiting` from the thread order: the PR author when a reply is missing or does not do what was asked, or when a bot raised the finding; the reviewer who opened the thread when the author's reply hands a decision back. The login must appear in the PR evidence or be `unknown`, and a report without it is rejected. Saved assessments without a specific next step or `Awaiting` use a generic action and `unknown`. The terminal report retains explanations and evidence for all findings.
 
-The verdict comment is previewed by default. With `--apply`, Pronto posts it. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to create and edit PR comments.
+The verdict comment is previewed by default. With `--apply`, Pronto posts it. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to create PR comments.
 
-Comments are sticky by default (`--sticky=true`). A fresh assessment with `--apply` updates the latest audit comment posted by your authenticated GitHub account. A reused assessment leaves an existing comment unchanged, including its body and edit timestamp. Both create a comment if none exists. Other accounts' comments and your unrelated comments are left unchanged. Audit comments include a hidden marker on their final line. Sticky updates recognise this marker, not the heading; unmarked older reports are left unchanged.
+Every `--apply` posts a new comment. Pronto never edits or replaces an earlier audit comment, so each run leaves its own entry in the PR history. This includes a reused assessment: a cache hit posts the saved verdict again. Audit comments include a hidden marker on their final line. Pronto uses it to exclude its own comments from the evidence it assesses, so they do not invalidate the cache. The former `--sticky` flag has been removed; Pronto rejects it as an unknown option.
 
-To create a new comment every time, set `--sticky=false`:
+With `--apply`, the host posts comments only after a complete, validated assessment. A cache hit can post a comment, such as for an assessment first run as a preview. The model remains read-only. Marked Pronto comments and approval reviews without a body do not invalidate the evidence cache. Changes to other PR discussion still do.
 
-```sh
-pronto --apply --sticky=false https://github.com/owner/repo/pull/42
-```
-
-You can also write `--sticky false`. A bare `--sticky`, `--sticky true` or `--sticky=true` enables sticky updates. The flag only controls whether the verdict comment is updated or newly created; it does not change approval behaviour. If several audit comments already exist, only the latest created one is updated; older comments remain.
-
-With `--apply`, the host publishes comments only after a complete, validated assessment. It looks up live comments even when the assessment uses a saved snapshot. A cache hit can publish a missing comment, such as an assessment first run as a preview. It does not overwrite an existing sticky comment, even if someone edited its body. The terminal reports `Verdict comment unchanged`. Use `--force --apply` to replace an existing comment with a fresh assessment. The model remains read-only. Marked Pronto comments and approval reviews without a body do not invalidate the evidence cache. Changes to other PR discussion still do.
-
-GitHub writes are not replayed by Durable, and the flags do not persist across invocations. If a write fails, the CLI exits 1 but retains the completed assessment. A failed update does not fall back to creating a new comment. After an interruption or ambiguous network failure, check the PR before retrying. Concurrent first-time posts can still create duplicates.
+GitHub writes are not replayed by Durable, and the flags do not persist across invocations. If a write fails, the CLI exits 1 but retains the completed assessment. After an interruption or ambiguous network failure, check the PR before retrying. A retry after an ambiguous failure can post a duplicate comment.
 
 ### Approve clean audits
 
@@ -303,7 +295,7 @@ pronto --apply --approve https://github.com/owner/repo/pull/42
 
 Pronto does not approve database-migration PRs by default. The model classifies the PR using its title, description, changed files and patches, inspecting pinned code as needed. Database schema or data migrations, backfills and database cutovers block approval by default, even when the PR also contains unrelated changes. Migration-framework maintenance, documentation or test fixtures alone do not count as a database migration.
 
-The audit still runs and saves its assessment. With `--apply`, it still posts or updates the verdict comment. The terminal report and comment explain why approval is blocked. Finding statuses and the audit verdict remain unchanged. Neither `--allow-uncertain` nor `--force` overrides this approval block.
+The audit still runs and saves its assessment. With `--apply`, it still posts the verdict comment. The terminal report and comment explain why approval is blocked. Finding statuses and the audit verdict remain unchanged. Neither `--allow-uncertain` nor `--force` overrides this approval block.
 
 Approval is also blocked if migration status is `uncertain`, or an older saved report has no migration classification. Use `--force` to request a fresh assessment when classification is missing. Completed assessments from the previous policy are refreshed automatically.
 
@@ -315,7 +307,7 @@ pronto --apply --approve --approve-migrations https://github.com/owner/repo/pull
 
 `--approve-migrations` defaults to false and does not persist across invocations. It bypasses the migration approval block, including uncertain or missing migration classifications. It still requires `--approve`, and `--apply` to submit a review. Outstanding findings always prevent approval. Uncertain findings still require `--allow-uncertain`.
 
-The model always saves a migration classification. This flag only changes approval eligibility, not the classification, findings or cache. Existing sticky comments remain unchanged on cache hits, even if the current approval options differ.
+The model always saves a migration classification. This flag only changes approval eligibility, not the classification, findings or cache. A cache hit posts a new comment with the saved verdict, even if the current approval options differ.
 
 Supported explanations, scope decisions, explicit future-work deferrals and specific reported testing can count as `addressed`. Approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
 
@@ -329,7 +321,7 @@ pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA and has no body. The full audit report remains in the PR comment, so approval does not duplicate it. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
-With `--apply --approve`, the host handles the comment first, then submits the approval if eligible. Leaving an existing comment unchanged on a cache hit does not skip approval. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
+With `--apply --approve`, the host handles the comment first, then submits the approval if eligible. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
 
 Approvals are not replayed by Durable, and the flag does not persist across invocations. Approval errors exit 1 but retain the completed assessment. A comment already posted by `--apply` remains if approval fails. Check the PR before retrying after an interruption or ambiguous network failure.
 
@@ -341,7 +333,7 @@ Audits run in dry-run mode by default. They show the exact comment body without 
 pronto --approve https://github.com/owner/repo/pull/42
 ```
 
-The normal report is followed by a labelled comment preview and the planned actions. With sticky comments enabled, the preview looks up the latest matching audit comment. It reports whether the comment would be updated, created or left unchanged because the assessment was reused. The displayed body is the rendered assessment, not any manual edits to an existing comment. For an addressed verdict with no existing audit comment, the action preview looks like this:
+The normal report is followed by a labelled comment preview and the planned actions. The preview does not contact GitHub about existing comments. For an addressed verdict, the action preview looks like this:
 
 ```text
 [audit:dry-run] Comment would be posted.
@@ -356,7 +348,7 @@ To perform the selected actions, add `--apply`:
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--apply` defaults to false. When supplied, it performs the selected comment action; with `--approve`, it also submits an approval if eligible. Existing sticky comments remain unchanged when the assessment is reused. Without `--apply`, no comments or reviews are created or updated. The flag does not persist across invocations; every invocation that writes must include it.
+`--apply` defaults to false. When supplied, it posts a new comment; with `--approve`, it also submits an approval if eligible. Without `--apply`, no comments or reviews are created. The flag does not persist across invocations; every invocation that writes must include it.
 
 With no action flags, the default preview shows the rendered comment body and the planned comment action. A preview does not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed; omit `--apply` to preview.
 
@@ -388,7 +380,7 @@ Unfinished audit?
 
 After interruption, select the same PR again using the same state directory to resume its saved snapshot and model. A batch can resume several PRs independently. If an older unfinished snapshot contains marked Pronto output, resuming stops before model execution. Use `--force` to start with fresh, filtered evidence. Historical snapshots and transcripts remain unchanged.
 
-After completion, the auditor fetches current evidence and compares it with the latest successful assessment. It reuses that assessment when the evidence and assessment policy match. A cache hit makes no model requests and leaves any existing sticky verdict comment unchanged. The terminal shows when the assessment was saved and when the evidence was rechecked.
+After completion, the auditor fetches current evidence and compares it with the latest successful assessment. It reuses that assessment when the evidence and assessment policy match. A cache hit makes no model requests. With `--apply`, it still posts a new verdict comment. The terminal shows when the assessment was saved and when the evidence was rechecked.
 
 Before refreshing an existing audit, Pronto prints the reasons in the terminal. These identify changed PR fields, added or removed comment keys, changed comment fields, and changed file paths. Comment changes include metadata such as timestamps, replies and thread state, even when the body is unchanged. For example:
 
@@ -502,7 +494,7 @@ You can invoke the same PR auditor from chat:
 /audit --pr https://github.com/owner/repo/pull/42 --pr https://github.com/owner/repo/pull/43
 ```
 
-Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-approved`, `--exclude` (paths cannot contain spaces here), `--force`, `--sticky`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
+Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-approved`, `--exclude` (paths cannot contain spaces here), `--force`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
 
 To use the coding chat in another project, run the script from that directory:
 
@@ -534,7 +526,7 @@ npm run check
 npm test
 ```
 
-The tests verify that `npm link` exposes the source-backed `pronto` command from another directory. They use simulated model providers and local GitHub endpoints with temporary credentials. Audit tests cover both entry points, paginated evidence, fork-head code reads, blocked shell calls, report coverage and citations, inconsistent evidence, and restart recovery. They also cover opt-in verdict comments and approvals, sticky updates and opting out, default dry-run previews and per-invocation `--apply` consent for GitHub writes, skipped approvals, commit changes before approval, posting failures, cache reuse and invalidation, no expiry, failed reassessment, forced restarts, crashes during fetching and before printing, and retaining old per-PR databases without importing them. Concurrent audit tests cover CLI and chat batches, per-PR cache isolation, same-PR admission, caller cancellation, batch failures, asynchronous proxy transport, forced restart isolation, repo-wide process locks, deferred job recovery, and recovery after SIGKILL and SIGTERM. Chat tests exercise all 4 coding tools, streamed output, saved history, and recovery after SIGKILL and SIGTERM. Storage tests cover path precedence, private permissions, shared audit history, isolated chats, process locks and ignoring directory-local databases. Tests use temporary state directories and do not contact a real model provider or GitHub. Supplied model verdicts test report rendering, validation and action rules, not the model's ability to judge whether a scope explanation is adequate.
+The tests verify that `npm link` exposes the source-backed `pronto` command from another directory. They use simulated model providers and local GitHub endpoints with temporary credentials. Audit tests cover both entry points, paginated evidence, fork-head code reads, blocked shell calls, report coverage and citations, inconsistent evidence, and restart recovery. They also cover opt-in verdict comments and approvals, a new comment on every `--apply`, default dry-run previews and per-invocation `--apply` consent for GitHub writes, skipped approvals, commit changes before approval, posting failures, cache reuse and invalidation, no expiry, failed reassessment, forced restarts, crashes during fetching and before printing, and retaining old per-PR databases without importing them. Concurrent audit tests cover CLI and chat batches, per-PR cache isolation, same-PR admission, caller cancellation, batch failures, asynchronous proxy transport, forced restart isolation, repo-wide process locks, deferred job recovery, and recovery after SIGKILL and SIGTERM. Chat tests exercise all 4 coding tools, streamed output, saved history, and recovery after SIGKILL and SIGTERM. Storage tests cover path precedence, private permissions, shared audit history, isolated chats, process locks and ignoring directory-local databases. Tests use temporary state directories and do not contact a real model provider or GitHub. Supplied model verdicts test report rendering, validation and action rules, not the model's ability to judge whether a scope explanation is adequate.
 
 Pi Durable is experimental. Pi packages are pinned to 1.0.3, with `package-lock.json` included alongside the code.
 

@@ -42,7 +42,6 @@ function githubEvidence(options: {
   title?: string; description?: string; files?: { filename: string; status: string; patch?: string }[];
 } = {}) {
   const comments: string[] = [];
-  const updates: number[] = [];
   const issueComments = options.issueComments ?? (options.issueComment ? [issueComment(3, "Which roles should have access?", "human")] : []);
   const approvals: { body?: string; event: string; commit_id: string }[] = [];
   const reviews: (IssueComment & { state: string })[] = [];
@@ -51,25 +50,16 @@ function githubEvidence(options: {
     const requestUrl = new URL(request.url!, "http://fixture");
     const path = requestUrl.pathname;
     const json = (value: unknown) => { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); };
-    const update = request.method === "PATCH" && path.match(/^\/github\/repos\/acme\/demo\/issues\/comments\/(\d+)$/);
-    if (update || (request.method === "POST" && path === "/github/repos/acme/demo/issues/8/comments")) {
+    if (request.method === "POST" && path === "/github/repos/acme/demo/issues/8/comments") {
       assert.equal(request.headers["content-type"], "application/json");
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks).toString());
       assert.equal(typeof body.body, "string");
       comments.push(body.body);
-      const id = update ? Number(update[1]) : Math.max(2, ...issueComments.map((comment) => comment.id)) + 1;
-      if (update) updates.push(id);
-      response.statusCode = options.commentStatus ?? (update ? 200 : 201);
-      if (response.statusCode < 300) {
-        if (update) {
-          const existing = issueComments.find((comment) => comment.id === id);
-          assert.ok(existing, "PATCH must target an existing comment");
-          existing.body = body.body;
-          existing.updated_at = new Date().toISOString();
-        } else issueComments.push({ ...issueComment(id, body.body), created_at: new Date().toISOString() });
-      }
+      const id = Math.max(2, ...issueComments.map((comment) => comment.id)) + 1;
+      response.statusCode = options.commentStatus ?? 201;
+      if (response.statusCode < 300) issueComments.push({ ...issueComment(id, body.body), created_at: new Date().toISOString() });
       json({ html_url: `${url}#issuecomment-${id}` });
       return;
     }
@@ -111,7 +101,7 @@ function githubEvidence(options: {
       json(options.files ?? []);
     }
   };
-  return { handler, comments, updates, issueComments, approvals, state };
+  return { handler, comments, issueComments, approvals, state };
 }
 
 for (const status of ["addressed", "uncertain"] as const) {
@@ -152,21 +142,22 @@ for (const status of ["addressed", "uncertain"] as const) {
       ? await f.run("", [url, "local/test", "--approve", "--apply"])
       : await f.run(`/audit --approve --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
     assert.match(posted, verdict);
-    assert.match(posted, status === "addressed" ? /Verdict comment unchanged/ : /Verdict comment posted/);
-    assert.equal(github.comments.length, 1);
-    assert.match(github.comments[0], commentHeadline);
-    assert.ok(github.comments[0].includes(`audited head: \`${sha}\``));
-    assert.match(github.comments[0], status === "addressed" ? /1 addressed · 0 outstanding · 0 uncertain/ : /0 addressed · 0 outstanding · 1 uncertain/);
-    assert.match(github.comments[0], /Addressed includes code fixes and supported explanations or scope decisions, not necessarily the requested code change\./);
+    assert.match(posted, /Verdict comment posted/);
+    assert.equal(github.comments.length, status === "addressed" ? 2 : 1, "every --apply posts a new comment, even for a reused assessment");
+    const latestComment = github.comments.at(-1)!;
+    assert.match(latestComment, commentHeadline);
+    assert.ok(latestComment.includes(`audited head: \`${sha}\``));
+    assert.match(latestComment, status === "addressed" ? /1 addressed · 0 outstanding · 0 uncertain/ : /0 addressed · 0 outstanding · 1 uncertain/);
+    assert.match(latestComment, /Addressed includes code fixes and supported explanations or scope decisions, not necessarily the requested code change\./);
     if (status === "addressed") {
-      assert.deepEqual(github.issueComments, published, "reuse must preserve the published body and update timestamp");
-      assert.deepEqual(github.updates, [], "reusing an assessment must not PATCH an existing verdict comment");
+      assert.deepEqual(github.issueComments.slice(0, published.length), published, "a new comment must leave the earlier verdict comment untouched");
+      assert.equal(github.issueComments.length, published.length + 1);
       assert.match(posted, /Reusing saved assessment/);
       assert.equal(calls, 1, "publishing an audit comment must not invalidate the cache");
       assert.equal(github.approvals.length, 1);
       assert.equal(github.approvals[0].event, "APPROVE");
       assert.equal(github.approvals[0].commit_id, sha);
-      assert.doesNotMatch(github.comments[0], /Reasoning and evidence|The reply explains the intentional behaviour/);
+      assert.doesNotMatch(latestComment, /Reasoning and evidence|The reply explains the intentional behaviour/);
       assert.match(posted, /PR approved/);
       const rechecked = await f.run("", [url]);
       assert.match(rechecked, /Reusing saved assessment/);
@@ -180,7 +171,7 @@ for (const status of ["addressed", "uncertain"] as const) {
   });
 }
 
-test("sticky comments preserve reused assessments, replace fresh ones across pages and allow opting out in CLI and chat", { timeout: 20000 }, async (t) => {
+test("every --apply posts a new comment and never edits earlier audit comments, in CLI and chat", { timeout: 20000 }, async (t) => {
   const marker = auditMarker;
   const seeds = [
     { ...issueComment(10, auditBody), updated_at: "2026-06-01T00:00:00Z" },
@@ -199,58 +190,38 @@ test("sticky comments preserve reused assessments, replace fresh ones across pag
   }, { entrypoint: resolve("audit.ts"), github: github.handler });
 
   const preview = await f.run("", [url]);
-  assert.match(preview, /Comment would be updated/);
+  assert.match(preview, /Comment would be posted/);
   assert.equal(github.comments.length, 0);
   assert.deepEqual(github.issueComments, original, "dry-run must not change existing comments");
 
   const cachedPreview = await f.run("", [url]);
   assert.match(cachedPreview, /Reusing saved assessment/);
-  assert.match(cachedPreview, /Comment would be left unchanged/);
+  assert.match(cachedPreview, /Comment would be posted/);
   const cached = await f.run("", ["--apply", url]);
-  assert.ok(cached.includes(`[audit] Verdict comment unchanged on the PR: ${url}#issuecomment-11`));
-  assert.deepEqual(github.updates, []);
-  assert.deepEqual(github.issueComments, original, "reuse must leave an existing comment alone even when its body differs");
+  assert.match(cached, /Reusing saved assessment/);
+  assert.ok(cached.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-15`));
+  assert.equal(github.issueComments.length, 6, "a reused assessment still posts a new comment");
+  assert.deepEqual(github.issueComments.slice(0, 5), original, "earlier comments must not change");
   assert.equal(calls, 1);
 
-  const updated = await f.run("", ["--force", "--apply", url]);
-  assert.ok(updated.includes(`[audit] Verdict comment updated on the PR: ${url}#issuecomment-11`));
-  assert.deepEqual(github.updates, [11], "choose the latest created audit, not the latest edited or unrelated comment");
-  assert.equal(github.issueComments.length, 5);
-  assert.match(github.issueComments[1].body, /## Review audit · Verification needed/);
-  assert.ok(github.issueComments[1].body.endsWith(marker));
-  assert.deepEqual(github.issueComments.filter((comment) => comment.id !== 11), original.filter((comment) => comment.id !== 11));
-
-  const cliPosted = await f.run("", ["--sticky=false", "--apply", url, "local/test"]);
-  assert.equal(github.issueComments.length, 6);
-  assert.ok(cliPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-15`));
-  assert.deepEqual(github.updates, [11], "disabling sticky must append even when a matching comment exists");
-  const chatPosted = await f.run(`/audit ${url} --sticky false --apply\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
-  assert.equal(github.issueComments.length, 7, "chat must also support opting out");
-  assert.ok(chatPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-16`));
-  const latest = github.issueComments.at(-1)!;
-  latest.body = `An edited audit heading\n\n${marker}`;
-  const previousBody = latest.body;
-  const edited = structuredClone(github.issueComments);
-  const reused = await f.run("", ["--sticky", "--apply", url]);
-  assert.match(reused, /Reusing saved assessment/);
-  assert.ok(reused.includes(`[audit] Verdict comment unchanged on the PR: ${latest.html_url}`));
-  assert.deepEqual(github.updates, [11]);
-  assert.deepEqual(github.issueComments, edited, "reuse must preserve manual edits to the latest own audit");
+  const forced = await f.run("", ["--force", "--apply", url]);
+  assert.ok(forced.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-16`));
+  assert.equal(github.issueComments.length, 7);
+  assert.deepEqual(github.issueComments.slice(0, 5), original, "earlier comments must not change");
+  assert.match(github.issueComments[6].body, /## Review audit · Verification needed/);
+  assert.ok(github.issueComments[6].body.endsWith(marker));
   assert.equal(calls, 2, "only the forced refresh should make another model request");
 
+  const cliPosted = await f.run("", ["--apply", url, "local/test"]);
+  assert.equal(github.issueComments.length, 8);
+  assert.ok(cliPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-17`));
   status = "addressed";
-  const replaced = await f.run(`/audit --sticky=true --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
-  assert.ok(replaced.includes(`[audit] Verdict comment updated on the PR: ${url}#issuecomment-16`));
-  assert.deepEqual(github.updates, [11, latest.id]);
-  assert.equal(github.issueComments.length, 7);
-  assert.notEqual(latest.body, previousBody, "sticky must replace the body, not just find the comment");
-  assert.match(latest.body, /## Review audit · All actionable findings addressed/);
-  assert.doesNotMatch(latest.body, /Reasoning and evidence/);
-
-  const final = await f.run("", ["--sticky", "--apply", url]);
-  assert.match(final, /Verdict comment unchanged/);
-  assert.deepEqual(github.updates, [11, latest.id]);
-  assert.equal(github.issueComments.length, 7);
+  const chatPosted = await f.run(`/audit --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
+  assert.equal(github.issueComments.length, 9, "chat must also post a new comment");
+  assert.ok(chatPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#issuecomment-18`));
+  assert.match(github.issueComments[8].body, /## Review audit · All actionable findings addressed/);
+  assert.match(github.issueComments[7].body, /## Review audit · Verification needed/, "the previous verdict stays as posted");
+  assert.deepEqual(github.issueComments.slice(0, 5), original, "earlier comments must not change");
 });
 
 test("terminal reports number each finding and verdict comments keep open findings visible with collapsed context", { timeout: 20000 }, async (t) => {
@@ -416,10 +387,9 @@ for (const awaiting of [undefined, "invented-person"]) {
   });
 }
 
-for (const action of ["comment", "update", "approve"] as const) {
+for (const action of ["comment", "approve"] as const) {
   test(`a failed ${action} request exits nonzero without retrying or losing the completed assessment`, { timeout: 20000 }, async (t) => {
-    const github = githubEvidence({ commentStatus: action === "approve" ? undefined : 403, approvalStatus: 403,
-      issueComments: action === "update" ? [issueComment(10, auditBody)] : [] });
+    const github = githubEvidence({ commentStatus: action === "approve" ? undefined : 403, approvalStatus: 403 });
     let calls = 0;
     const f = await fixture(t, (body, response) => {
       calls++;
@@ -432,16 +402,14 @@ for (const action of ["comment", "update", "approve"] as const) {
     assert.match(result.stderr, /GitHub request failed \(403\)/);
     assert.match(result.stdout, /Verdict: All actionable findings appear addressed/);
     if (action === "approve") assert.match(result.stdout, /Verdict comment posted/);
-    else assert.doesNotMatch(result.stdout, /Verdict comment (?:posted|updated)|PR approved/);
+    else assert.doesNotMatch(result.stdout, /Verdict comment posted|PR approved/);
     assert.equal(github.comments.length, 1);
-    assert.deepEqual(github.updates, action === "update" ? [10] : []);
     assert.equal(github.approvals.length, action === "approve" ? 1 : 0, "writes must not retry");
 
     const cached = await f.run("", [url]);
     assert.match(cached, /Reusing saved assessment/);
     assert.equal(calls, 1, "a posted audit comment must not invalidate the completed assessment, even if approval fails");
     assert.equal(github.comments.length, 1);
-    assert.deepEqual(github.updates, action === "update" ? [10] : []);
     assert.equal(github.approvals.length, action === "approve" ? 1 : 0, "approval intent must not persist");
   });
 }
@@ -502,7 +470,7 @@ for (const { statuses, migrationStatus } of [
 
     const fresh = await f.run("", ["--force", "--apply", ...flags, url]);
     assert.match(fresh, verdict);
-    assert.match(fresh, /Verdict comment updated/);
+    assert.match(fresh, /Verdict comment posted/);
     assert.match(fresh, /Approval skipped: database migration/);
     assert.equal(calls, 2);
     assert.equal(github.comments.length, 2);
@@ -565,13 +533,13 @@ for (const { statuses, approve, chat, allowUncertain, approveMigrations } of [
     const output = chat
       ? await f.run(`/audit ${flags.join(" ")} ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") })
       : await f.run("", [...flags, url]);
-    assert.equal(github.comments.length, 1, "--apply posts the verdict comment by default");
+    assert.equal(github.comments.length, noActionable ? 2 : 1, "every --apply posts a new verdict comment, even for a reused assessment");
     assert.match(github.comments[0], /## Review audit ·/);
     assert.equal(github.approvals.length, approve ? 1 : 0);
     assert.match(output, approve ? /PR approved/ : /Approval skipped/);
     if (noActionable) {
       assert.match(output, /Reusing saved assessment/);
-      assert.match(output, /Verdict comment unchanged/);
+      assert.match(output, /Verdict comment posted/);
       assert.match(output, /Verdict: No actionable findings identified/);
       if (!statuses.length) {
         assert.match(output, /^Findings: 0 across 0 sources$/m);

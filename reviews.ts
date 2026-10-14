@@ -122,7 +122,7 @@ function github(signal?: AbortSignal) {
     if (new URL(url).origin !== new URL(base).origin) throw new Error("Unexpected GitHub REST origin");
     return checkedFetch(input, options);
   };
-  async function request<T>(url: string, body?: object, method: "GET" | "POST" | "PATCH" = body ? "POST" : "GET"): Promise<T> {
+  async function request<T>(url: string, body?: object, method: "GET" | "POST" = body ? "POST" : "GET"): Promise<T> {
     const response = await checkedFetch(url, {
       method,
       headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "pi-durable-auditor",
@@ -250,7 +250,7 @@ export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest,
   };
 }
 
-// Shared marker for sticky updates and evidence exclusion.
+// Marker for evidence exclusion: our own output is not review discussion.
 export const AUDIT_COMMENT_MARKER = "<!-- pronto:review-audit -->";
 
 export function isAuditComment(body: string | null | undefined): boolean {
@@ -258,32 +258,15 @@ export function isAuditComment(body: string | null | undefined): boolean {
   return body?.trimEnd().split("\n").at(-1) === AUDIT_COMMENT_MARKER;
 }
 
+/** Posts a new PR comment every time; earlier audit comments are never edited. Returns null unless applied. */
 export async function postAuditComment(target: ReviewTarget, body: string, {
-  sticky = true, apply = false, reused = false, signal,
-}: { sticky?: boolean; apply?: boolean; reused?: boolean; signal?: AbortSignal } = {}): Promise<{
-  action: "posted" | "updated" | "unchanged"; url: string | null;
-}> {
+  apply = false, signal,
+}: { apply?: boolean; signal?: AbortSignal } = {}): Promise<string | null> {
+  if (!apply) return null;
   const client = github(signal);
-  const path = `/repos/${target.owner}/${target.repo}/issues`;
-  let existing: RawComment | undefined;
-  if (sticky) {
-    // Look up live comments, not the saved snapshot: cached/resumed audits must still find the latest post.
-    const [viewer, comments] = await Promise.all([
-      client.request<{ login: string }>(`${client.base}/user`),
-      client.pages<RawComment>(`${path}/${target.pr}/comments?per_page=100`),
-    ]);
-    existing = comments.filter((comment) => comment.user?.login.toLowerCase() === viewer.login.toLowerCase()
-      && isAuditComment(comment.body))
-      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || b.id - a.id)[0];
-  }
-  // A recheck is not a new assessment. Preserve existing comments, including manual edits.
-  if (existing && reused) return { action: "unchanged", url: existing.html_url };
-  const action = existing ? "updated" : "posted";
-  if (!apply) return { action, url: null };
-  const comment = existing
-    ? await client.request<{ html_url: string }>(`${client.base}${path}/comments/${existing.id}`, { body }, "PATCH")
-    : await client.request<{ html_url: string }>(`${client.base}${path}/${target.pr}/comments`, { body });
-  return { action, url: comment.html_url };
+  const comment = await client.request<{ html_url: string }>(
+    `${client.base}/repos/${target.owner}/${target.repo}/issues/${target.pr}/comments`, { body });
+  return comment.html_url;
 }
 
 export async function approveReview(snapshot: ReviewSnapshot, apply = false, signal?: AbortSignal): Promise<void> {

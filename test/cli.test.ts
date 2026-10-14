@@ -65,7 +65,7 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
 
 for (const { name, args, selector } of [
   { name: "current branch", args: [], selector: undefined },
-  { name: "current branch with flags only", args: ["--force", "--approve", "--approve-migrations", "--sticky=false"], selector: undefined },
+  { name: "current branch with flags only", args: ["--force", "--approve", "--approve-migrations"], selector: undefined },
   { name: "explicit branch and model", args: ["feature/pr-inference", "local/test", "--force"], selector: "feature/pr-inference" },
   { name: "fork branch", args: ["contributor:feature/pr-inference"], selector: "contributor:feature/pr-inference" },
   { name: "branch containing shell metacharacters", args: ["feature/with;$value"], selector: "feature/with;$value" },

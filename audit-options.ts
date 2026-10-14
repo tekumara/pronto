@@ -5,19 +5,19 @@ import { parseReviewTarget } from "./reviews.ts";
 
 const exec = promisify(execFile);
 
-export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
+export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "chat") {
-  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--skip <label>]... [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <GitHub PR URL> | --pr <GitHub PR URL>...";
+  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--skip <label>]... [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <GitHub PR URL> | --pr <GitHub PR URL>...";
   // Boolean flags default to true and take an optional true|false value.
-  const booleanFlags = ["--sticky", "--skip-approved"];
+  const booleanFlags = ["--skip-approved"];
   const flags = ["--force", ...booleanFlags, "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];
   const supplied = new Set<string>();
   const positional: string[] = [];
   const targets: string[] = [];
   const skipLabels: string[] = [];
   const exclude: string[] = [];
-  const booleans = { "--sticky": true, "--skip-approved": true };
+  const booleans = { "--skip-approved": true };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg.startsWith("-")) { positional.push(arg); continue; }
@@ -50,7 +50,7 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat") {
     if (!flags.includes(flag)) throw new Error(`Unknown audit option: ${arg}\n${usage}`);
     if (supplied.has(flag)) throw new Error(`${flag} can be supplied only once\n${usage}`);
     supplied.add(flag);
-    if (flag === "--sticky" || flag === "--skip-approved") {
+    if (flag === "--skip-approved") {
       const value = arg.startsWith(`${flag}=`) ? arg.slice(flag.length + 1)
         : ["true", "false"].includes(args[i + 1]) ? args[++i] : "true";
       if (value !== "true" && value !== "false") throw new Error(`${flag} must be true or false\n${usage}`);
@@ -66,7 +66,7 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat") {
   }
   // Chat still requires URLs. Validate every explicit URL before credentials, storage or network access.
   for (const selector of selectors) if (source === "chat" || selector.includes("://")) parseReviewTarget(selector);
-  return { selectors, requested, skipLabels, skipApproved: booleans["--skip-approved"], exclude, force: supplied.has("--force"), sticky: booleans["--sticky"],
+  return { selectors, requested, skipLabels, skipApproved: booleans["--skip-approved"], exclude, force: supplied.has("--force"),
     approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"),
     approveMigrations: supplied.has("--approve-migrations"), apply: supplied.has("--apply") };
 }

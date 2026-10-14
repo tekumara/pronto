@@ -531,7 +531,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
 }
 
 async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined, options: {
-  sticky?: boolean; approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean; reused?: boolean;
+  approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
 }, log: (message: string) => void, signal?: AbortSignal): Promise<void> {
   const approvalBlock = options.approveMigrations ? null : migrationApprovalBlock(databaseMigration);
   log(`\n${formatReport(snapshot, assessments, approvalBlock)}\n`);
@@ -539,9 +539,9 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
   const dryRun = !options.apply;
   if (dryRun) log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
   // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const { action, url } = await postAuditComment(snapshot.target, body, { ...options, signal });
-  log(dryRun ? `[audit:dry-run] Comment would be ${action === "unchanged" ? "left unchanged (reused assessment)" : action}.`
-    : stripControlCharacters(`[audit] Verdict comment ${action} ${action === "posted" ? "to" : "on"} the PR: ${url}`));
+  const url = await postAuditComment(snapshot.target, body, { apply: options.apply, signal });
+  log(dryRun ? "[audit:dry-run] Comment would be posted."
+    : stripControlCharacters(`[audit] Verdict comment posted to the PR: ${url}`));
   if (options.approve) {
     if (approvalBlock) {
       console.log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${approvalBlock.message}`));
@@ -561,7 +561,7 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
 }
 
 export type AuditOptions = {
-  model: ModelRef; skipLabels?: string[]; skipApproved?: boolean; force?: boolean; sticky?: boolean;
+  model: ModelRef; skipLabels?: string[]; skipApproved?: boolean; force?: boolean;
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
   /** Path patterns left out of the size limit and the audit; see compileExclusions. */
   exclude?: string[];
@@ -784,7 +784,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           }, context);
           log(`[audit] Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`);
           outputSnapshotExclusions(snapshot, options.exclude, log);
-          await outputReport(saved.snapshot, saved.report, saved.databaseMigration, { ...options, reused: true }, log, context.abortSignal);
+          await outputReport(saved.snapshot, saved.report, saved.databaseMigration, options, log, context.abortSignal);
           return;
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
