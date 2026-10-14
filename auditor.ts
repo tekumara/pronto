@@ -7,7 +7,7 @@ import {
   AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, watchEvents,
   type Conversation, type ConversationId, type Harness, type ModelRef, type SubmissionId, type TaskId,
 } from "@earendil-works/pi-durable";
-import { openStateHarness } from "./state.ts";
+import { listRepositoryDatabases, openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { compileExclusions } from "./exclusions.ts";
 import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findApproval, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
@@ -603,11 +603,42 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
   const shutdown = new AbortController();
   let closing: Promise<void> | undefined;
 
+  const repositoryKey = (target: ReviewTarget) => `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}`;
+
+  /** Opens a repository's database, which takes its process lock. `host` and `name` are the path components in openStateHarness. */
+  function openRepository(host: string, name: string): Promise<RepositoryAudit> {
+    const registry = createRegistry();
+    const gate = createAuditExecutionGate(models);
+    registry.install(defineExtension({ ...Auditor, tools: [{
+      ...readFile,
+      execute: async (...args: Parameters<typeof readFile.execute>) => {
+        const [, api, context] = args;
+        const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
+        await gate.wait(provider?.sessionId, context);
+        return readFile.execute(...args);
+      },
+    }, readComment, report] }));
+    return openStateHarness({ kind: "repo", host, name }, {
+      models: gate.models, registry, settings: auditSettings, onReport: (error) => console.error(error),
+      // No execution environment or coding tools: audits cannot access local files.
+    }, BACKGROUND_CONTEXT).then((harness) => {
+      gate.attach(harness);
+      return {
+        harness,
+        allow: async (id: ConversationId, context: Context) => {
+          const provider = await harness.snapshot(ProviderDoc, id, context);
+          if (!provider) throw new Error("Audit provider session identity is missing");
+          gate.allow(provider.sessionId);
+        },
+      };
+    });
+  }
+
   return {
     async audit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<void> {
       if (closing) throw new Error("Auditor is closed");
       const target = parseReviewTarget(url);
-      const repository = `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}`;
+      const repository = repositoryKey(target);
       const requestKey = `${repository}#${target.pr}`;
       if (requests.has(requestKey)) throw new Error(`Audit is already in progress: ${target.url}`);
       requests.add(requestKey);
@@ -618,35 +649,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
       try {
         let opened = repositories.get(repository);
         if (!opened) {
-          const registry = createRegistry();
-          const gate = createAuditExecutionGate(models);
-          registry.install(defineExtension({ ...Auditor, tools: [{
-            ...readFile,
-            execute: async (...args: Parameters<typeof readFile.execute>) => {
-              const [, api, context] = args;
-              const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
-              await gate.wait(provider?.sessionId, context);
-              return readFile.execute(...args);
-            },
-          }, readComment, report] }));
-          const repositoryUrl = new URL(target.url);
-          const owner = target.owner.toLowerCase();
-          const name = `${owner}~${target.repo.toLowerCase()}`;
-          const host = encodeURIComponent(repositoryUrl.hostname.toLowerCase());
-          opened = openStateHarness({ kind: "repo", host, name }, {
-            models: gate.models, registry, settings: auditSettings, onReport: (error) => console.error(error),
-            // No execution environment or coding tools: audits cannot access local files.
-          }, BACKGROUND_CONTEXT).then((harness) => {
-            gate.attach(harness);
-            return {
-              harness,
-              allow: async (id: ConversationId, context: Context) => {
-                const provider = await harness.snapshot(ProviderDoc, id, context);
-                if (!provider) throw new Error("Audit provider session identity is missing");
-                gate.allow(provider.sessionId);
-              },
-            };
-          }).catch((error) => {
+          const name = `${target.owner.toLowerCase()}~${target.repo.toLowerCase()}`;
+          const host = encodeURIComponent(new URL(target.url).hostname.toLowerCase());
+          opened = openRepository(host, name).catch((error) => {
             repositories.delete(repository);
             throw error;
           });
@@ -658,6 +663,38 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
       } finally {
         requests.delete(requestKey);
       }
+    },
+    /**
+     * Opens every saved repository database and returns the PR URLs of audits that were unfinished when it was last
+     * closed, for the caller to audit again. A database with none is closed at once, so it is not held. One that cannot
+     * be opened, such as a database another process holds, is skipped and reported.
+     */
+    async recover(context: Context = BACKGROUND_CONTEXT): Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> {
+      const urls: string[] = [];
+      const skipped: { database: string; error: unknown }[] = [];
+      for (const { host, name } of await listRepositoryDatabases()) {
+        if (closing) throw new Error("Auditor is closed");
+        let repository: RepositoryAudit | undefined;
+        try {
+          repository = await openRepository(host, name);
+          const targets = await unfinishedAudits(repository.harness, context);
+          if (closing || !targets.length) {
+            await repository.harness.close(context);
+            repository = undefined;
+            if (closing) throw new Error("Auditor is closed");
+            continue;
+          }
+          // Register under the key audit() computes from the same URL, so it reuses this harness rather than opening the database again.
+          repositories.set(repositoryKey(targets[0]!), Promise.resolve(repository));
+          repository = undefined;
+          urls.push(...targets.map((target) => target.url));
+        } catch (error) {
+          if (closing) throw error;
+          await repository?.harness.close(context).catch(() => {});
+          skipped.push({ database: `${host}/${name}`, error });
+        }
+      }
+      return { urls, skipped };
     },
     close(): Promise<void> {
       if (!closing) {
@@ -709,6 +746,17 @@ type RepositoryAudit = {
   harness: Harness;
   allow(id: ConversationId, context: Context): Promise<void>;
 };
+
+/** PRs whose audit controller is still live in this database. A blocked one cannot run, so resuming it would only wait. */
+async function unfinishedAudits(harness: Harness, context: Context): Promise<ReviewTarget[]> {
+  const targets = new Map<string, ReviewTarget>();
+  for (const { record, state } of (await harness.inspect(context)).tasks) {
+    if (record.kind !== AuditController.definition.name || state.kind === "blocked") continue;
+    const target = (await harness.snapshot(AuditDocument, record.conversationId, context))?.snapshot?.target;
+    if (target) targets.set(target.url, target);
+  }
+  return [...targets.values()];
+}
 
 async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime }, repository: RepositoryAudit,
   context: Context, log: (message: string) => void, warn: (message: string) => void): Promise<void> {

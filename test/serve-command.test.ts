@@ -13,6 +13,7 @@ const env = { PRONTO_WEBHOOK_SECRET: webhookSecret };
 /** Simulated GitHub for one PR. The token's user is "Me", to show that logins match case-insensitively. */
 function github(user: (response: ServerResponse) => void = (response) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ login: "Me" }))) {
   const reviews: { event: string; body: string; commit_id: string }[] = [];
+  const state = { merged: false };
   const requests: string[] = [];
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     const path = request.url!.split("?")[0]!;
@@ -30,13 +31,13 @@ function github(user: (response: ServerResponse) => void = (response) => respons
       return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } });
     }
     if (path === "/github/repos/acme/demo/pulls/7") {
-      return json({ title: "Served PR", body: "", merged: false, draft: false, labels: [], changed_files: 0,
+      return json({ title: "Served PR", body: "", merged: state.merged, draft: false, labels: [], changed_files: 0,
         head: { sha: headSha, repo: { full_name: "acme/demo" } }, base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
     }
     assert.match(path, /^\/github\/repos\/acme\/demo\/(?:pulls\/7\/(?:comments|reviews|files)|issues\/7\/comments)$/);
     json([]);
   };
-  return { handler, reviews, requests };
+  return { handler, reviews, requests, state };
 }
 
 const assess = (response: ServerResponse) => tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
@@ -101,6 +102,101 @@ test("serve audits a requested review, submits one verdict, ignores other reques
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /Received SIGTERM; stopping/);
   assert.equal(gh.reviews.length, 1);
+});
+
+/** A model that hangs on its first request, so the first audit is still unfinished when its server is stopped. */
+function hangingModel() {
+  const started = Promise.withResolvers<void>();
+  const calls = { count: 0 };
+  const respond = (_body: unknown, response: ServerResponse) => {
+    if (++calls.count === 1) {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write(": pending\n\n");
+      started.resolve();
+    } else assess(response);
+  };
+  return { started: started.promise, calls, respond };
+}
+
+async function interruptedServe(f: Awaited<ReturnType<typeof fixture>>, model: ReturnType<typeof hangingModel>, signal: "SIGKILL" | "SIGTERM", args: string[] = []) {
+  const first = f.start(["serve", "--port", "0", ...args], { env });
+  const [, port] = await watchOutput(first.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  assert.equal((await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).status, 202);
+  await model.started;
+  first.child.kill(signal);
+  await first.done;
+}
+
+for (const signal of ["SIGKILL", "SIGTERM"] as const) {
+  test(`serve resumes an audit that ${signal} left unfinished when it starts again`, { timeout: 40_000 }, async (t) => {
+    const gh = github();
+    const model = hangingModel();
+    const f = await fixture(t, model.respond, { entrypoint: resolve("audit.ts"), github: gh.handler });
+    await interruptedServe(f, model, signal, ["--apply"]);
+    assert.equal(gh.reviews.length, 0);
+
+    const second = f.start(["serve", "--port", "0", "--apply"], { env });
+    const out = watchOutput(second.child);
+    await out.until(/\[serve\] Resuming unfinished audit: https:\/\/github\.com\/acme\/demo\/pull\/7/);
+    await out.until(/\[acme\/demo#7\] \[audit\] Resuming saved snapshot/);
+    await out.until(/\[acme\/demo#7\] \[audit\] Verdict comment posted to the PR: /);
+    assert.equal(gh.reviews.length, 1);
+    assert.equal(model.calls.count, 2, "the interrupted request is retried, not a new audit");
+    second.child.kill("SIGTERM");
+    const result = await second.done;
+    assert.equal(result.code, 0, result.stderr);
+  });
+}
+
+test("serve checks a resumed PR again, so one merged in the meantime is skipped", { timeout: 40_000 }, async (t) => {
+  const gh = github();
+  const model = hangingModel();
+  const f = await fixture(t, model.respond, { entrypoint: resolve("audit.ts"), github: gh.handler });
+  await interruptedServe(f, model, "SIGKILL", ["--apply"]);
+  gh.state.merged = true;
+  const second = f.start(["serve", "--port", "0", "--apply"], { env });
+  const out = watchOutput(second.child);
+  await out.until(/\[serve\] Resuming unfinished audit: /);
+  await out.until(/\[acme\/demo#7\] \[audit\] Skipping https:\/\/github\.com\/acme\/demo\/pull\/7: PR has already been merged\./);
+  second.child.kill("SIGTERM");
+  assert.equal((await second.done).code, 0);
+  assert.equal(model.calls.count, 1, "a merged PR must not resume model work");
+  assert.equal(gh.reviews.length, 0);
+});
+
+test("serve does not hold repository databases that have nothing to resume", { timeout: 40_000 }, async (t) => {
+  const gh = github();
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  // A finished audit leaves its repository database with no unfinished work.
+  await f.run("", [prUrl]);
+  const run = f.start(["serve", "--port", "0"], { env });
+  const out = watchOutput(run.child);
+  await out.until(/Listening on /);
+  assert.doesNotMatch(out.output, /Resuming unfinished audit/);
+  const cli = await f.run("", [prUrl]);
+  assert.match(cli, /Reusing saved assessment/, "the CLI must still be able to open the repository while the server runs");
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 0);
+});
+
+test("serve starts and reports a repository database that another process holds", { timeout: 40_000 }, async (t) => {
+  const gh = github();
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const first = f.start(["serve", "--port", "0"], { env });
+  const firstOut = watchOutput(first.child);
+  const [, port] = await firstOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  assert.equal((await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).status, 202);
+  // Once it has audited the PR, the first server holds the repository's database.
+  await firstOut.until(/Verdict:/);
+
+  const second = f.start(["serve", "--port", "0"], { env });
+  await watchOutput(second.child).until(/Listening on /);
+  second.child.kill("SIGTERM");
+  const result = await second.done;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /\[serve\] Skipped github\.com\/acme~demo, so its unfinished audits are not resumed: .*Database is already in use/);
+  first.child.kill("SIGTERM");
+  assert.equal((await first.done).code, 0);
 });
 
 test("serve keeps an interrupted audit's work for a later run to resume", { timeout: 40_000 }, async (t) => {

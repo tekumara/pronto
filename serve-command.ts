@@ -34,7 +34,7 @@ export async function runServe(args: string[]): Promise<void> {
     concurrency,
     audit: (url) => auditor.audit(url, options),
     onError: (url, error) => {
-      if (stopping) console.log(`[serve] Audit interrupted: ${url}. Its saved work is kept; request the review again to resume.`);
+      if (stopping) console.log(`[serve] Audit interrupted: ${url}. Its saved work is kept and resumes when the server starts again.`);
       else console.error(`[serve] Audit failed for ${url}: ${describe(error)}`);
     },
   });
@@ -44,9 +44,16 @@ export async function runServe(args: string[]): Promise<void> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
+    // Before listening, so a delivery cannot race recovery to open the same repository database.
+    const { urls: unfinished, skipped } = await auditor.recover();
+    for (const { database, error } of skipped) console.error(`[serve] Skipped ${database}, so its unfinished audits are not resumed: ${describe(error)}`);
     const address = await server.listen(port, host);
     console.log(`[serve] Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · previews only, add --apply to submit reviews"}`);
     console.log(`[serve] Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
+    for (const url of unfinished) {
+      console.log(`[serve] Resuming unfinished audit: ${url}`);
+      queue.enqueue(url);
+    }
     const signal = await stopped.promise;
     console.log(`[serve] Received ${signal}; stopping`);
   } finally {

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, readdir, realpath, stat, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry } from "@earendil-works/pi-durable";
-import { openStateHarness } from "../state.ts";
+import { listRepositoryDatabases, openStateHarness } from "../state.ts";
 import { fixture, reply } from "./fixtures.ts";
 
 for (const location of ["override", "xdg", "home", "relative-xdg"] as const) {
@@ -88,4 +89,27 @@ test("chat history is separate per working directory but shared through a symlin
   await f.run("recall\n/quit\n", [], { cwd: alias });
   assert.equal(calls, 3);
   assert.equal((await readdir(join(f.stateDir, "chats"))).filter((file) => file.endsWith(".sqlite")).length, 2);
+});
+
+test("lists saved repository databases and nothing else in the state directory", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pronto-state-list-"));
+  const previous = process.env.PRONTO_STATE_DIR;
+  process.env.PRONTO_STATE_DIR = root;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PRONTO_STATE_DIR;
+    else process.env.PRONTO_STATE_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.deepEqual(await listRepositoryDatabases(), [], "a fresh state directory has none");
+  for (const directory of ["repos/github.com", "repos/ghe.example.com", "repos/github.com/nested.sqlite", "audits", "chats"]) {
+    await mkdir(join(root, directory), { recursive: true });
+  }
+  for (const file of ["repos/github.com/acme~demo.sqlite", "repos/github.com/other~repo.sqlite", "repos/ghe.example.com/team~tools.sqlite",
+    // Lock files, other files, and databases of the earlier layouts are not repositories.
+    "repos/github.com/acme~demo.sqlite.lock", "repos/github.com/notes.txt", `repos/${"a".repeat(20)}.sqlite`, "audits/old.sqlite", "chats/chat.sqlite"]) {
+    await writeFile(join(root, file), "");
+  }
+  assert.deepEqual(await listRepositoryDatabases(), [
+    { host: "ghe.example.com", name: "team~tools" }, { host: "github.com", name: "acme~demo" }, { host: "github.com", name: "other~repo" },
+  ]);
 });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, realpath } from "node:fs/promises";
+import { mkdir, open, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -17,6 +17,28 @@ function stateDirectory(): string {
   }
   const xdg = process.env.XDG_STATE_HOME;
   return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "state"), "pronto");
+}
+
+/**
+ * Repository databases saved in the state directory, as the `host` and `name` that openStateHarness takes. Only
+ * `repos/<host>/<name>.sqlite` counts: earlier hash-named databases in `repos/` and lock files are not repositories.
+ */
+export async function listRepositoryDatabases(): Promise<{ host: string; name: string }[]> {
+  const repos = join(stateDirectory(), "repos");
+  const databases: { host: string; name: string }[] = [];
+  let hosts;
+  try {
+    hosts = await readdir(repos, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return databases;
+    throw error;
+  }
+  for (const host of hosts.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()) {
+    for (const file of (await readdir(join(repos, host), { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).sort()) {
+      if (file.endsWith(".sqlite")) databases.push({ host, name: file.slice(0, -".sqlite".length) });
+    }
+  }
+  return databases;
 }
 
 async function lockDatabase(path: string): Promise<() => void> {
