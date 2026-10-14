@@ -376,15 +376,24 @@ function ownership(comment: { author: string }, finding: { awaiting?: string }, 
   return `Raised by: ${comment.author} · Awaiting: ${awaiting}`;
 }
 
-function migrationApprovalBlock(assessment: MigrationAssessment | null | undefined): string | null {
-  if (!assessment) return "database migration status was not assessed. Run again with --force before approving.";
+type ApprovalBlock = { message: string; reason?: string };
+function migrationApprovalBlock(assessment: MigrationAssessment | null | undefined): ApprovalBlock | null {
+  if (!assessment) return { message: "database migration status was not assessed. Run again with --force before approving." };
   if (assessment.status === "not-migration") return null;
-  return `${assessment.status === "migration" ? "database migration requires human approval."
-    : "database migration status is uncertain; human approval is required."} ${assessment.reason}`;
+  return {
+    message: assessment.status === "migration" ? "database migration requires human approval."
+      : "database migration status is uncertain; human approval is required.",
+    reason: assessment.reason,
+  };
 }
 
-function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[], approvalBlock: string | null): string {
-  const lines = [...formatSummary(snapshot, assessments), ...(approvalBlock ? [`Approval blocked: ${approvalBlock}`] : []), ""];
+function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[], approvalBlock: ApprovalBlock | null): string {
+  const lines = [...formatSummary(snapshot, assessments)];
+  if (approvalBlock) {
+    lines.push(`Approval blocked: ${approvalBlock.message}`);
+    if (approvalBlock.reason) lines.push(`Database migration assessment: ${approvalBlock.reason}`);
+  }
+  lines.push("");
   const byKey = new Map(assessments.map((a) => [a.commentKey, a]));
   let index = 0;
   for (const comment of snapshot.comments) {
@@ -404,14 +413,14 @@ function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[], appro
   return stripControlCharacters(lines.join("\n"));
 }
 
-function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], approvalBlock: string | null): string {
+function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], approvalBlock: ApprovalBlock | null): string {
   const { counts } = summarizeFindings(assessments);
   const headline = counts.outstanding ? "Changes needed" : counts.uncertain ? "Verification needed"
     : counts.addressed ? "All actionable findings addressed" : "No actionable findings identified";
   const sections = [
     `## Review audit · ${headline}`,
     `${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not-actionable`,
-    ...(approvalBlock ? [`Approval blocked: ${approvalBlock}`] : []),
+    ...(approvalBlock ? [`Approval blocked: ${approvalBlock.message}`] : []),
   ];
   const byKey = new Map(assessments.map((a) => [a.commentKey, a]));
   const pending = ["outstanding", "uncertain"].flatMap((status) => snapshot.comments.flatMap((comment) =>
@@ -429,6 +438,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
       `Evidence:\n${finding.evidence.map((url) => `- ${url}`).join("\n")}`,
     ].join("\n\n"));
   }
+  if (approvalBlock?.reason) details.push(`### Database migration assessment\n\n${approvalBlock.reason}`);
   if (details.length) sections.push([
     "<details>", "<summary>Reasoning and evidence</summary>", "", details.join("\n\n"), "", "</details>",
   ].join("\n"));
@@ -463,7 +473,7 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
     : stripControlCharacters(`[audit] Verdict comment ${action} ${action === "posted" ? "to" : "on"} the PR: ${url}`));
   if (options.approve) {
     if (approvalBlock) {
-      console.log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${approvalBlock}`));
+      console.log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${approvalBlock.message}`));
       return;
     }
     const { counts, approvable } = summarizeFindings(assessments);

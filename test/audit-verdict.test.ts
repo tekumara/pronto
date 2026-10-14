@@ -487,8 +487,16 @@ for (const { statuses, migrationStatus } of [
     assert.match(cached, /Approval skipped: database migration/);
     assert.equal(calls, 1);
     assert.equal(github.comments.length, 1, "blocking approval must still publish the verdict comment");
-    assert.match(github.comments[0], /Approval blocked: database migration/);
-    assert.ok(github.comments[0].includes(reason), "the comment must explain the migration approval block");
+    const comment = github.comments[0];
+    const visible = comment.replace(/<details>[\s\S]*?<\/details>/g, "");
+    assert.match(visible, migrationStatus === "migration" ? /^Approval blocked: database migration requires human approval\.$/m
+      : /^Approval blocked: database migration status is uncertain; human approval is required\.$/m);
+    assert.equal(visible.includes(reason), false, "the classification rationale must not clutter the visible approval message");
+    const reasoning = comment.match(/<details>\n<summary>Reasoning and evidence<\/summary>\n([\s\S]*?)\n<\/details>/);
+    assert.ok(reasoning, "a migration rationale needs a disclosure even without pending findings");
+    assert.match(reasoning[1], /### Database migration assessment/);
+    assert.ok(reasoning[1].includes(reason), "the classification rationale must remain available in the disclosure");
+    assert.ok(cached.includes(reason), "the terminal report must retain the classification rationale");
     if (migrationStatus === "uncertain") assert.match(cached, /database migration status is uncertain/);
     assert.equal(github.approvals.length, 0);
 
