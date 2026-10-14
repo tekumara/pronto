@@ -37,6 +37,7 @@ export type ReviewFile = { path: string; previousPath: string | null; status: st
 export type ChangedFile = ReviewFile & { lines: number };
 type PullRequest = {
   labels?: { name: string }[];
+  draft?: boolean;
   merged: boolean; title: string; body: string | null; user?: { login: string } | null; changed_files: number;
   additions?: number; deletions?: number;
   head: { sha: string; repo: { full_name: string } | null };

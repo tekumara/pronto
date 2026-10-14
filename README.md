@@ -35,6 +35,14 @@ These forms require the GitHub CLI (`gh`). Pronto runs `gh pr view` in your curr
 
 Already merged PRs are skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto checks live merge status before starting, resuming or reusing an audit. It does not call the model or write to GitHub for merged PRs.
 
+Draft PRs are skipped by default (`--skip-drafts=true`). To audit a draft PR, turn off this check:
+
+```sh
+pronto --skip-drafts=false https://github.com/owner/repo/pull/42
+```
+
+You can also write `--skip-drafts false`. Pronto checks live draft status after the merged check and before starting, resuming or reusing an audit. A draft skip prints a message and exits with code 0, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence, call the model or write to GitHub. Skipping preserves unfinished work and cached assessments. The flag does not persist across invocations. Other skip rules still apply when you use `--skip-drafts=false`.
+
 Use `--skip <label>` to skip PRs with a matching label. Repeat the flag to provide multiple labels:
 
 ```sh
@@ -51,7 +59,7 @@ PRs already approved by any reviewer are skipped by default (`--skip-approved=tr
 pronto --skip-approved=false https://github.com/owner/repo/pull/42
 ```
 
-You can also write `--skip-approved false`. Like the label skip, this check runs after the merged and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching review evidence, calling the model or writing to GitHub, and preserves unfinished work and cached assessments. The check reads the PR's reviews, following pagination. It does not fetch your GitHub login. The flag does not persist across invocations.
+You can also write `--skip-approved false`. Like the label skip, this check runs after the merged, draft and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching review evidence, calling the model or writing to GitHub, and preserves unfinished work and cached assessments. The check reads the PR's reviews, following pagination. It does not fetch your GitHub login. The flag does not persist across invocations.
 
 PRs that change more than 10,000 lines are also skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto counts additions plus deletions from the PR's live metadata, so the check costs no extra request. It runs before fetching review evidence, calling the model or writing to GitHub.
 
@@ -500,7 +508,7 @@ You can invoke the same PR auditor from chat:
 /audit --pr https://github.com/owner/repo/pull/42 --pr https://github.com/owner/repo/pull/43
 ```
 
-Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-approved`, `--exclude` (paths cannot contain spaces here), `--force`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
+Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-drafts`, `--skip-approved`, `--exclude` (paths cannot contain spaces here), `--force`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
 
 To use the coding chat in another project, run the script from that directory:
 

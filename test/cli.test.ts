@@ -24,6 +24,7 @@ test("npm link exposes pronto from source outside the checkout", { timeout: 2000
   assert.match(stdout, /^Usage: pronto /m);
   assert.match(stdout, /--skip <label>/);
   assert.match(stdout, /--skip-approved.*default: true/);
+  assert.match(stdout, /--skip-drafts.*default: true/);
   assert.match(stdout, /--exclude <path>/);
   assert.match(stdout, /--approve-migrations.*default: false/);
 });
@@ -35,7 +36,7 @@ const review = (login: string, state: string, commit = headSha) => ({
   id: Math.floor(Math.random() * 1e9), user: { login }, body: "", state, commit_id: commit, html_url: `${prUrl}#pullrequestreview-1`,
 });
 
-async function selectionFixture(t: TestContext, labels: string[] = [], reviews: object[] = []) {
+async function selectionFixture(t: TestContext, labels: string[] = [], reviews: object[] = [], draft = false) {
   return fixture(t, (_body, response) => {
     tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
   }, {
@@ -45,7 +46,7 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
       const path = request.url!.split("?")[0];
       let data: unknown;
       if (path === "/github/repos/acme/demo/pulls/7") {
-        data = { title: "Selected PR", body: "", merged: false, labels: labels.map((name) => ({ name })), changed_files: 0,
+        data = { title: "Selected PR", body: "", merged: false, draft, labels: labels.map((name) => ({ name })), changed_files: 0,
           head: { sha: "a".repeat(40), repo: { full_name: "acme/demo" } },
           base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } };
       } else if (path === "/github/graphql") {
@@ -90,17 +91,23 @@ for (const { name, args, selector } of [
   });
 }
 
-for (const { name, labels, args } of [
+for (const { name, labels, args, draft = false, input = "", entrypoint = resolve("audit.ts") } of [
   { name: "an explicit PR URL works without gh or a Git checkout", labels: [], args: [prUrl, "local/test"] },
   { name: "CLI audits when no skip label matches exactly", labels: ["skip-audit"],
     args: ["--skip", "skip", prUrl, "local/test", "--skip=other"] },
   { name: "CLI audits an unlabelled PR when skip labels are provided", labels: [],
     args: [prUrl, "--skip", "skip-audit", "--skip=other"] },
   { name: "CLI audits a labelled PR when --skip is omitted", labels: ["skip-audit"], args: [prUrl] },
+  { name: "CLI audits a draft PR with --skip-drafts=false", labels: [], draft: true,
+    args: [prUrl, "--skip-drafts=false"] },
+  { name: "CLI audits a draft PR with --skip-drafts false", labels: [], draft: true,
+    args: ["--skip-drafts", "false", prUrl] },
+  { name: "chat audits a draft PR with --skip-drafts=false", labels: [], draft: true,
+    args: [], entrypoint: resolve("agent.ts"), input: `/audit --skip-drafts=false ${prUrl}\n/quit\n` },
 ]) {
   test(name, { timeout: 20_000 }, async (t) => {
-    const f = await selectionFixture(t, labels);
-    const output = await f.run("", args, { env: { PATH: f.cwd } });
+    const f = await selectionFixture(t, labels, [], draft);
+    const output = await f.run(input, args, { entrypoint, env: { PATH: f.cwd } });
     assert.match(output, /PR title: Selected PR/);
     assert.match(output, /Verdict:/);
     assert.doesNotMatch(output, /Skipping/);
@@ -156,6 +163,8 @@ for (const { name, args, gh, message } of [
   { name: "an option instead of a skip label", args: [prUrl, "--skip", "--force"], gh: undefined, message: /--skip requires a non-empty label/ },
   { name: "an invalid --skip-approved value", args: [prUrl, "--skip-approved=maybe"], gh: undefined, message: /--skip-approved must be true or false/ },
   { name: "a repeated --skip-approved", args: [prUrl, "--skip-approved", "--skip-approved=false"], gh: undefined, message: /--skip-approved can be supplied only once/ },
+  { name: "an invalid --skip-drafts value", args: [prUrl, "--skip-drafts=maybe"], gh: undefined, message: /--skip-drafts must be true or false/ },
+  { name: "a repeated --skip-drafts", args: [prUrl, "--skip-drafts", "--skip-drafts=false"], gh: undefined, message: /--skip-drafts can be supplied only once/ },
   { name: "missing batch target", args: ["--pr"], gh: undefined, message: /--pr requires a non-empty target/ },
   { name: "blank batch target", args: ["--pr=  "], gh: undefined, message: /--pr requires a non-empty target/ },
   { name: "an option instead of a batch target", args: ["--pr", "--force"], gh: undefined, message: /--pr requires a non-empty target/ },

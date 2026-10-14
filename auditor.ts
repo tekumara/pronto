@@ -590,7 +590,7 @@ async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessme
 }
 
 export type AuditOptions = {
-  model: ModelRef; skipLabels?: string[]; skipApproved?: boolean; force?: boolean;
+  model: ModelRef; skipLabels?: string[]; skipDrafts?: boolean; skipApproved?: boolean; force?: boolean;
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
   /** Path patterns left out of the size limit and the audit; see compileExclusions. */
   exclude?: string[];
@@ -720,6 +720,10 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     const pr = await fetchPullRequest(target, context.abortSignal);
     if (pr.merged) {
       log(`[audit] Skipping ${target.url}: PR has already been merged.`);
+      return;
+    }
+    if ((options.skipDrafts ?? true) && pr.draft) {
+      log(`[audit] Skipping ${target.url}: PR is a draft. Use --skip-drafts=false to audit anyway.`);
       return;
     }
     const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));

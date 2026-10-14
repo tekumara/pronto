@@ -14,7 +14,7 @@ const commentUrl = (id: number) => `${prUrl}#discussion_r${id}`;
 
 // GitHub and the model are external HTTP fixtures. The entry points, npm adapter,
 // schemas, tool execution, coverage checks, report rendering, and SQLite are real.
-function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; state?: "open" | "closed"; labels?: string[];
+function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; draft?: boolean; state?: "open" | "closed"; labels?: string[];
   /** 35000 changed lines in total, 150 of them in src/access.ts. */ large?: boolean;
   /** GitHub returns src/other.ts without counts or patch, as it does for very large PRs. */ uncountedOther?: boolean } = {}) {
   let prRequests = 0;
@@ -48,7 +48,7 @@ function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; m
     }
     assert.equal(request.method, "GET", "auditor must never mutate GitHub");
     if (url.pathname === "/github/repos/acme/demo/pulls/7") {
-      json({ title: "Access checks", body: "Review this change", merged: options.merged ?? false,
+      json({ title: "Access checks", body: "Review this change", merged: options.merged ?? false, draft: options.draft ?? false,
         labels: (options.labels ?? []).map((name) => ({ name })),
         state: options.state ?? (options.merged ? "closed" : "open"), changed_files: options.incompleteFiles ? 3 : 2,
         ...(options.large ? { additions: 30_000, deletions: 5_000 } : {}),
@@ -100,26 +100,35 @@ function assessments() {
   ] };
 }
 
-for (const { name, entrypoint, input, args } of [
+for (const { name, entrypoint, input, args, draft = false } of [
   { name: "CLI", entrypoint: resolve("audit.ts"), input: "", args: [prUrl, "--force", "--apply", "--approve"] },
   { name: "chat", entrypoint: resolve("agent.ts"), input: `/audit --force --apply --approve ${prUrl}\n/quit\n`, args: [] },
+  { name: "CLI default", entrypoint: resolve("audit.ts"), input: "", draft: true,
+    args: [prUrl, "--force", "--apply", "--approve", "--exclude", "generated"] },
+  { name: "CLI --skip-drafts", entrypoint: resolve("audit.ts"), input: "", draft: true,
+    args: [prUrl, "--skip-drafts", "--force", "--apply", "--approve"] },
+  { name: "CLI --skip-drafts=true", entrypoint: resolve("audit.ts"), input: "", draft: true,
+    args: [prUrl, "--force", "--apply", "--approve", "--skip-drafts=true"] },
+  { name: "chat default", entrypoint: resolve("agent.ts"), draft: true, args: [],
+    input: `/audit --force --apply --approve ${prUrl}\n/quit\n` },
 ]) {
-  test(`${name} skips an already merged PR successfully, even with --force --apply --approve`, { timeout: 20000 }, async (t) => {
+  test(`${name} skips ${draft ? "a draft" : "an already merged"} PR successfully, even with --force --apply --approve`, { timeout: 20000 }, async (t) => {
     let reads = 0;
-    const f = await fixture(t, () => assert.fail("Merged PRs must not reach the model"), {
+    const f = await fixture(t, () => assert.fail("Skipped PRs must not reach the model"), {
       entrypoint,
       github: (request, response) => {
         reads++;
-        assert.equal(request.method, "GET", "Merged PRs must not mutate GitHub");
-        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Merged PRs need no review or code evidence");
+        assert.equal(request.method, "GET", "Skipped PRs must not mutate GitHub");
+        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Skipped PRs need no review or code evidence");
         response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-          merged: true, state: "closed", title: "Merged PR", body: "", changed_files: 0,
+          merged: !draft, draft, state: draft ? "open" : "closed", title: "Skipped PR", body: "", changed_files: 0,
+          additions: 20_000, deletions: 0,
           head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: { full_name: "acme/demo" } },
         }));
       },
     });
     const output = await f.run(input, args);
-    assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR has already been merged.`));
+    assert.ok(output.includes(`[audit] Skipping ${prUrl}: ${draft ? "PR is a draft. Use --skip-drafts=false to audit anyway." : "PR has already been merged."}`));
     assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
     assert.equal(reads, 1);
   });
@@ -464,8 +473,8 @@ for (const failure of ["moved", "incompleteFiles"] as const) {
   });
 }
 
-test("restart checks live merge status and skip labels but preserves saved evidence and cache", { timeout: 20000 }, async (t) => {
-  const prState = { merged: false, labels: [] as string[] };
+test("restart checks live merge status, draft status and skip labels but preserves saved evidence and cache", { timeout: 30000 }, async (t) => {
+  const prState = { merged: false, draft: false, labels: [] as string[] };
   const github = githubEvidence(prState);
   const started = Promise.withResolvers<void>();
   let turn = 0;
@@ -487,6 +496,7 @@ test("restart checks live merge status and skip labels but preserves saved evide
         assert.deepEqual(github.requests.slice(snapshotRequests.length).sort(), [
           "/github/repos/acme/demo/pulls/7", // Label skip.
           "/github/repos/acme/demo/pulls/7", // Merged skip.
+          "/github/repos/acme/demo/pulls/7", // Draft skip.
           "/github/repos/acme/demo/pulls/7", // Resume status check.
           "/github/repos/acme/demo/pulls/7/reviews?per_page=100", // Approval check, which runs only for the resume.
         ], "only live PR metadata and the approval check must be fetched before resuming saved evidence");
@@ -523,13 +533,25 @@ test("restart checks live merge status and skip labels but preserves saved evide
   assert.doesNotMatch(skipped, /Resuming saved snapshot|Restarting unfinished audit|Verdict:/);
   assert.equal(turn, 1, "a merged PR must not resume or restart unfinished model work");
   prState.merged = false;
-  const output = await f.run("", [prUrl]);
+  prState.draft = true;
+  const skippedDraft = await f.run("", [prUrl, "--force", "--apply", "--approve"]);
+  assert.match(skippedDraft, /Skipping .*PR is a draft.*--skip-drafts=false/);
+  assert.doesNotMatch(skippedDraft, /Resuming saved snapshot|Restarting unfinished audit|Verdict:/);
+  assert.equal(turn, 1, "a draft PR must not resume or restart unfinished model work");
+  const output = await f.run("", [prUrl, "--skip-drafts=false"]);
   assert.match(output, /Resuming saved snapshot/);
   assert.match(output, /Verdict: Not all actionable findings are addressed/);
   assert.equal(turn, 3);
-  const cached = await f.run("", [prUrl]);
+  const draftReads = github.requests.length;
+  const skippedDraftCached = await f.run("", [prUrl, "--apply", "--approve"]);
+  assert.match(skippedDraftCached, /Skipping .*PR is a draft/);
+  assert.doesNotMatch(skippedDraftCached, /Reusing saved assessment|Verdict:/);
+  assert.deepEqual(github.requests.slice(draftReads), ["/github/repos/acme/demo/pulls/7"]);
+  assert.equal(turn, 3, "the draft opt-out must not persist across invocations");
+  const cached = await f.run("", [prUrl, "--skip-drafts=false"]);
   assert.match(cached, /Reusing saved assessment/);
   assert.equal(turn, 3, "a recovered successful assessment must be published to the cache");
+  prState.draft = false;
   prState.labels = ["skip-audit"];
   const labelReads = github.requests.length;
   const skippedLabelCached = await f.run("", [prUrl, "--skip=skip-audit", "--apply", "--approve"]);
