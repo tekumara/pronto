@@ -23,12 +23,18 @@ test("npm link exposes pronto from source outside the checkout", { timeout: 2000
   const { stdout } = await exec(join(prefix, "bin", "pronto"), ["--help"], { cwd: directory });
   assert.match(stdout, /^Usage: pronto /m);
   assert.match(stdout, /--skip <label>/);
+  assert.match(stdout, /--skip-approved.*default: true/);
   assert.match(stdout, /--approve-migrations.*default: false/);
 });
 
 const prUrl = "https://github.com/acme/demo/pull/7";
 
-async function selectionFixture(t: TestContext, labels: string[] = []) {
+const headSha = "a".repeat(40);
+const review = (login: string, state: string, commit = headSha) => ({
+  id: Math.floor(Math.random() * 1e9), user: { login }, body: "", state, commit_id: commit, html_url: `${prUrl}#pullrequestreview-1`,
+});
+
+async function selectionFixture(t: TestContext, labels: string[] = [], reviews: object[] = []) {
   return fixture(t, (_body, response) => {
     tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
   }, {
@@ -49,7 +55,7 @@ async function selectionFixture(t: TestContext, labels: string[] = []) {
         } } } } };
       } else {
         assert.match(path, /^\/github\/repos\/acme\/demo\/(?:pulls\/7\/(?:comments|reviews|files)|issues\/7\/comments)$/);
-        data = [];
+        data = path.endsWith("/reviews") ? reviews : [];
       }
       response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     },
@@ -103,6 +109,35 @@ for (const { name, labels, args } of [
   });
 }
 
+for (const { name, reviews, args, skipped } of [
+  { name: "the user's approval of the current head", reviews: [review("auditor", "APPROVED")], args: [], skipped: true },
+  { name: "the user's approval of the current head, even with --force --apply --approve", reviews: [review("auditor", "APPROVED")],
+    args: ["--force", "--apply", "--approve"], skipped: true },
+  { name: "an approval whose login differs only by case", reviews: [review("Auditor", "APPROVED")], args: [], skipped: true },
+  { name: "an approval followed by a comment-only review", reviews: [review("auditor", "APPROVED"), review("auditor", "COMMENTED")],
+    args: ["--skip-approved=true"], skipped: true },
+  { name: "an approval with --skip-approved=false", reviews: [review("auditor", "APPROVED")], args: ["--skip-approved=false"], skipped: false },
+  { name: "an approval with --skip-approved false", reviews: [review("auditor", "APPROVED")], args: ["--skip-approved", "false"], skipped: false },
+  { name: "another reviewer's approval", reviews: [review("someone-else", "APPROVED")], args: [], skipped: false },
+  { name: "the user's approval of an earlier head", reviews: [review("auditor", "APPROVED", "c".repeat(40))], args: [], skipped: false },
+  { name: "an approval followed by requested changes", reviews: [review("auditor", "APPROVED"), review("auditor", "CHANGES_REQUESTED")],
+    args: [], skipped: false },
+  { name: "a dismissed approval", reviews: [review("auditor", "DISMISSED")], args: [], skipped: false },
+  { name: "no reviews", reviews: [], args: [], skipped: false },
+]) {
+  test(`CLI ${skipped ? "skips" : "audits"} a PR with ${name}`, { timeout: 20_000 }, async (t) => {
+    const f = await selectionFixture(t, [], reviews);
+    const output = await f.run("", [prUrl, "local/test", ...args], { env: { PATH: f.cwd } });
+    if (skipped) {
+      assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR is already approved by auditor at ${headSha}.`));
+      assert.doesNotMatch(output, /PR title:|Verdict:/, "an approved PR must not fetch evidence or reach the model");
+    } else {
+      assert.match(output, /Verdict:/);
+      assert.doesNotMatch(output, /Skipping/);
+    }
+  });
+}
+
 for (const { name, args, gh, message } of [
   { name: "no matching PR", args: [], gh: 'process.stderr.write("no pull requests found for branch \\"feature\\"\\n"); process.exit(1);', message: /no pull requests found for branch "feature"/ },
   { name: "detached HEAD", args: [], gh: 'process.stderr.write("could not determine current branch: not on any branch\\n"); process.exit(1);', message: /not on any branch/ },
@@ -113,6 +148,8 @@ for (const { name, args, gh, message } of [
   { name: "empty skip label", args: [prUrl, "--skip", ""], gh: undefined, message: /--skip requires a non-empty label/ },
   { name: "blank inline skip label", args: [prUrl, "--skip=  "], gh: undefined, message: /--skip requires a non-empty label/ },
   { name: "an option instead of a skip label", args: [prUrl, "--skip", "--force"], gh: undefined, message: /--skip requires a non-empty label/ },
+  { name: "an invalid --skip-approved value", args: [prUrl, "--skip-approved=maybe"], gh: undefined, message: /--skip-approved must be true or false/ },
+  { name: "a repeated --skip-approved", args: [prUrl, "--skip-approved", "--skip-approved=false"], gh: undefined, message: /--skip-approved can be supplied only once/ },
   { name: "missing batch target", args: ["--pr"], gh: undefined, message: /--pr requires a non-empty target/ },
   { name: "blank batch target", args: ["--pr=  "], gh: undefined, message: /--pr requires a non-empty target/ },
   { name: "an option instead of a batch target", args: ["--pr", "--force"], gh: undefined, message: /--pr requires a non-empty target/ },

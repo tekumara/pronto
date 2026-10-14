@@ -361,11 +361,13 @@ test("restart checks live merge status and skip labels but preserves saved evide
         started.resolve();
         break;
       case 1:
-        assert.deepEqual(github.requests.slice(snapshotRequests.length), [
+        assert.deepEqual(github.requests.slice(snapshotRequests.length).sort(), [
           "/github/repos/acme/demo/pulls/7", // Label skip.
           "/github/repos/acme/demo/pulls/7", // Merged skip.
           "/github/repos/acme/demo/pulls/7", // Resume status check.
-        ], "only live PR metadata must be fetched before resuming saved evidence");
+          "/github/repos/acme/demo/pulls/7/reviews?per_page=100", // Approval check, which runs only for the resume.
+          "/github/user",
+        ], "only live PR metadata and the approval check must be fetched before resuming saved evidence");
         tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
         break;
       case 2:

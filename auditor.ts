@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
-import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, findViewerApproval, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -535,7 +535,7 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
 }
 
 export type AuditOptions = {
-  model: ModelRef; skipLabels?: string[]; force?: boolean; sticky?: boolean;
+  model: ModelRef; skipLabels?: string[]; skipApproved?: boolean; force?: boolean; sticky?: boolean;
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
 };
 
@@ -670,6 +670,13 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     if (skippedLabel) {
       log(`[audit] Skipping ${target.url}: PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
       return;
+    }
+    if (options.skipApproved ?? true) {
+      const approver = await findViewerApproval(target, pr.head.sha, context.abortSignal);
+      if (approver) {
+        log(`[audit] Skipping ${target.url}: PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`);
+        return;
+      }
     }
     // Persist force intent before cancellation/evidence fetching. A crash must not turn --force into a cache hit,
     // or silently switch its selected model. Clear the intent only when the new snapshot is admitted.

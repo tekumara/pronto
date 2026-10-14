@@ -16,7 +16,7 @@ const { getGitHubToken, getProxyFetch } = require("agent-reviews/lib/github.js")
 
 type RawComment = {
   id: number; user: { login: string } | null; body: string | null; html_url: string;
-  created_at?: string; submitted_at?: string; updated_at?: string; state?: string;
+  created_at?: string; submitted_at?: string; updated_at?: string; state?: string; commit_id?: string;
   in_reply_to_id?: number; path?: string; line?: number | null; original_line?: number | null; diff_hunk?: string;
 };
 export type ReviewTarget = { owner: string; repo: string; pr: number; url: string };
@@ -148,6 +148,23 @@ function github(signal?: AbortSignal) {
 export async function fetchPullRequest(target: ReviewTarget, signal?: AbortSignal): Promise<PullRequest> {
   const client = github(signal);
   return client.request<PullRequest>(`${client.base}/repos/${target.owner}/${target.repo}/pulls/${target.pr}`);
+}
+
+/**
+ * Returns the authenticated user's login when their latest approve, request-changes or dismiss review
+ * approves the PR's current head. Comment-only reviews do not change an approval, as in GitHub's own decision.
+ * An approval of an older head does not count: later commits are unreviewed.
+ */
+export async function findViewerApproval(target: ReviewTarget, headSha: string, signal?: AbortSignal): Promise<string | null> {
+  const client = github(signal);
+  const [viewer, reviews] = await Promise.all([
+    client.request<{ login: string }>(`${client.base}/user`),
+    // GitHub lists reviews chronologically.
+    client.pages<RawComment>(`/repos/${target.owner}/${target.repo}/pulls/${target.pr}/reviews?per_page=100`),
+  ]);
+  const latest = reviews.filter((review) => review.user?.login.toLowerCase() === viewer.login.toLowerCase()
+    && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state ?? "")).at(-1);
+  return latest?.state === "APPROVED" && latest.commit_id === headSha ? viewer.login : null;
 }
 
 export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest, startedAt: string, signal?: AbortSignal): Promise<ReviewSnapshot> {

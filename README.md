@@ -45,6 +45,14 @@ You can also write `--skip=skip-audit`. Labels match by full name, ignoring case
 
 Pronto checks live labels before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence, call the model or write to GitHub when a label matches. Skipping preserves unfinished work and cached assessments.
 
+PRs you have already approved are skipped by default (`--skip-approved=true`). A PR counts as approved when your latest approving, change-requesting or dismissed review, ignoring comment-only reviews, is an approval of the PR's current head commit. An approval of an earlier commit does not count, so a PR with new commits is audited again. Approvals by other reviewers do not count. Your latest review being a dismissal or a request for changes means the PR is not approved.
+
+```sh
+pronto --skip-approved=false https://github.com/owner/repo/pull/42
+```
+
+You can also write `--skip-approved false`. Like the label skip, this check runs after the merged and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching review evidence, calling the model or writing to GitHub, and preserves unfinished work and cached assessments. The check adds two GitHub reads: your login and the PR's reviews. The flag does not persist across invocations.
+
 You can also run the CLI without a global link using `npm run audit -- [<number> | <branch> | <GitHub PR URL>]` from this repository.
 
 The auditor uses your saved Pi default model, or the first available model if there is no usable default. Choose a specific model by adding `provider/model-id` after an explicit target:
@@ -479,7 +487,7 @@ You can invoke the same PR auditor from chat:
 /audit --pr https://github.com/owner/repo/pull/42 --pr https://github.com/owner/repo/pull/43
 ```
 
-Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--force`, `--sticky`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
+Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-approved`, `--force`, `--sticky`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
 
 To use the coding chat in another project, run the script from that directory:
 
