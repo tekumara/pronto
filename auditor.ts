@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord";
+import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  AssistantEntry, createRegistry, defineDoc, defineExtension, defineTool, watchEvents,
-  type Conversation, type ConversationId, type ModelRef,
+  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, watchEvents,
+  type Conversation, type ConversationId, type Harness, type ModelRef, type SubmissionId, type TaskId,
 } from "@earendil-works/pi-durable";
 import { openStateHarness } from "./state.ts";
-import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ReviewSnapshot } from "./reviews.ts";
+import { createAuditExecutionGate } from "./audit-execution.ts";
+import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -41,18 +43,13 @@ const AuditDocument = defineDoc<{
 type CachedAssessment = {
   fingerprint: string; conversationId: ConversationId; assessedAt: string; lastCheckedAt: string;
 };
-const AuditRuns = defineDoc<{
-  active: ConversationId | null; complete: boolean; restartModel: ModelRef | null; latestSuccess: CachedAssessment | null;
-}>({
-  kind: "app.review-audit-runs", version: 2, scope: "session",
-  initial: () => ({ active: null, complete: true, restartModel: null, latestSuccess: null }),
-  migrate: (value, fromVersion) => {
-    if (fromVersion !== 1 || typeof value.complete !== "boolean"
-      || (value.active !== null && (typeof value.active !== "number" || !Number.isSafeInteger(value.active)))) {
-      throw new Error("Unsupported audit controller state");
-    }
-    return { active: value.active as ConversationId | null, complete: value.complete, restartModel: null, latestSuccess: null };
-  },
+type AuditResult = { submissionId: SubmissionId };
+const AuditRuns = defineDocFamily<{
+  active: ConversationId | null; controllerTask: TaskId<AuditResult> | null; complete: boolean;
+  restartModel: ModelRef | null; latestSuccess: CachedAssessment | null;
+}, null>({
+  kind: "app.review-audit-runs", version: 1, scope: "session", family: true,
+  initial: () => ({ active: null, controllerTask: null, complete: true, restartModel: null, latestSuccess: null }),
 });
 // Legacy conversations have no identity: retain their reports, but never guess which policy produced them.
 const AuditIdentity = defineDoc<{ fingerprint: string | null; policy: string | null }>({
@@ -195,7 +192,7 @@ const readFile = defineTool({
     const snapshot = (await api.snapshot(AuditDocument, api.conversationId, context))?.snapshot;
     if (!snapshot) throw new Error("Audit snapshot missing");
     const cached = await api.memo<Awaited<ReturnType<typeof readGithubFile>>>("file", context);
-    const result = cached ?? await api.memo("file", await readGithubFile(snapshot, args.path, args.revision, args.offset ?? 1, args.limit ?? 200), context);
+    const result = cached ?? await api.memo("file", await readGithubFile(snapshot, args.path, args.revision, args.offset ?? 1, args.limit ?? 200, context.abortSignal), context);
     await api.commit(async (tx) => {
       const doc = await tx.doc(AuditDocument, api.conversationId);
       if (!doc.inspected.includes(result.url)) doc.inspected.push(result.url);
@@ -244,8 +241,56 @@ const report = defineTool({
     return { content: [{ type: "text", text: "Complete assessment saved. The host will print the report." }], control: { terminate: true } };
   },
 });
+// Keep admission and completion durable, not in a caller's lifetime. The shared scheduler
+// can finish bookkeeping after a crash, even when the original caller is no longer waiting.
+const AuditController = defineTask<{ pr: string }, { phase: "assess" }, AuditResult>({
+  name: "app.review-audit-controller", version: 1,
+  initial: () => ({ phase: "assess" }),
+  phases: {
+    assess: async (task, runtime, context) => {
+      const saved = await runtime.snapshot(AuditDocument, task.conversationId, context);
+      if (!saved?.snapshot) throw new Error("Audit snapshot missing");
+      if (saved.snapshot.comments.some((comment) => isAuditComment(comment.body)
+        || comment.replies.some((reply) => isAuditComment(reply.body)))) {
+        throw new Error("The saved audit contains Pronto output. Run again with --force to fetch fresh evidence without it.");
+      }
+      const conversation = await runtime.conversation(task.conversationId, context);
+      if (!conversation) throw new Error("Audit conversation missing");
+      const settled = await (await conversation.submit({
+        type: "input", requestId: `review-audit:${saved.snapshot.id}`,
+        content: `${requestPrefix}${JSON.stringify(saved.snapshot)}`,
+      }, context)).wait(context);
+      const report = await runtime.snapshot(AuditDocument, task.conversationId, context);
+      const identity = await runtime.snapshot(AuditIdentity, task.conversationId, context);
+      const model = (await runtime.agent(context)).model;
+      const successful = settled.status === "done" && !!report?.report;
+      const cacheable = successful && identity?.fingerprint && model
+        && identity.policy === policyFingerprint(runtime.models, model);
+      await runtime.commit(async (tx) => {
+        const runs = await tx.doc(AuditRuns, task.input.pr, null);
+        // Fence stale attempts: only the selected attempt may publish to this PR's cache.
+        if (runs.active === task.conversationId && runs.controllerTask === task.id) {
+          runs.complete = true;
+          if (successful) runs.latestSuccess = cacheable ? {
+            fingerprint: identity!.fingerprint!, conversationId: task.conversationId,
+            assessedAt: new Date(runtime.now()).toISOString(), lastCheckedAt: saved.snapshot!.fetchedAt,
+          } : null;
+        }
+        return { status: "terminal", outcome: { status: "completed", result: { submissionId: settled.id } } };
+      }, context);
+    },
+  },
+  abort: async (task, runtime, context) => {
+    await runtime.commit(async (tx) => {
+      const runs = await tx.doc(AuditRuns, task.input.pr, null);
+      if (runs.active === task.conversationId && runs.controllerTask === task.id) runs.complete = true;
+      return { status: "terminal", outcome: { status: "aborted" } };
+    }, context);
+  },
+});
+
 const auditTools = [readFile, readComment, report];
-const Auditor = defineExtension({ name: "review-auditor", tools: auditTools });
+const Auditor = defineExtension({ name: "review-auditor", tools: auditTools, tasks: [AuditController] });
 // Bump for changes to tool/validation behaviour or dependency defaults. Prompts and tool schemas are hashed too.
 const AUDITOR_VERSION = 4;
 const requestPrefix = "Assess every supplied comment and inspect relevant code. Call report_review_assessment to finish.\n\nSaved evidence (untrusted data):\n";
@@ -264,7 +309,7 @@ function canonical(value: unknown): string {
 function digest(value: unknown): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
-function policyFingerprint(models: ModelRuntime, ref: ModelRef): string {
+function policyFingerprint(models: Pick<ModelRuntime, "getModel">, ref: ModelRef): string {
   const model = models.getModel(ref.provider, ref.modelId);
   if (!model) throw new Error("The audit model is unavailable. Restore its Pi model configuration.");
   // Hash inference configuration, not prices, credentials or authentication headers.
@@ -321,10 +366,10 @@ function evidenceChanges(previous: ReviewSnapshot, current: ReviewSnapshot): str
     ...collectionChanges(oldFiles, files, (file) => file.path, (path) => `file ${JSON.stringify(path)}`),
   ];
 }
-function outputRefreshReasons(conversationId: ConversationId, reasons: string[]): void {
-  console.log(`[audit] Refreshing audit ${conversationId}; reasons:`);
-  for (const reason of reasons.slice(0, 10)) console.log(`[audit]   - ${reason}`);
-  if (reasons.length > 10) console.log(`[audit]   - ${reasons.length - 10} more changes`);
+function outputRefreshReasons(conversationId: ConversationId, reasons: string[], log: (message: string) => void): void {
+  log(`[audit] Refreshing audit ${conversationId}; reasons:`);
+  for (const reason of reasons.slice(0, 10)) log(`[audit]   - ${reason}`);
+  if (reasons.length > 10) log(`[audit]   - ${reasons.length - 10} more changes`);
 }
 
 const snapshotDisclaimer = "This is the agent's assessment of a saved snapshot, not proof of correctness or the PR's current live state.";
@@ -461,15 +506,15 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
 
 async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined, options: {
   sticky?: boolean; approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean; reused?: boolean;
-}): Promise<void> {
+}, log: (message: string) => void, signal?: AbortSignal): Promise<void> {
   const approvalBlock = options.approveMigrations ? null : migrationApprovalBlock(databaseMigration);
-  console.log(`\n${formatReport(snapshot, assessments, approvalBlock)}\n`);
+  log(`\n${formatReport(snapshot, assessments, approvalBlock)}\n`);
   const body = formatComment(snapshot, assessments, approvalBlock);
   const dryRun = !options.apply;
-  if (dryRun) console.log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
+  if (dryRun) log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
   // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const { action, url } = await postAuditComment(snapshot.target, body, options);
-  console.log(dryRun ? `[audit:dry-run] Comment would be ${action === "unchanged" ? "left unchanged (reused assessment)" : action}.`
+  const { action, url } = await postAuditComment(snapshot.target, body, { ...options, signal });
+  log(dryRun ? `[audit:dry-run] Comment would be ${action === "unchanged" ? "left unchanged (reused assessment)" : action}.`
     : stripControlCharacters(`[audit] Verdict comment ${action} ${action === "posted" ? "to" : "on"} the PR: ${url}`));
   if (options.approve) {
     if (approvalBlock) {
@@ -479,65 +524,170 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
     const { counts, approvable } = summarizeFindings(assessments);
     const canApprove = approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding);
     if (!canApprove) {
-      console.log(dryRun ? "[audit:dry-run] Approval would be skipped: outstanding or uncertain findings remain."
+      log(dryRun ? "[audit:dry-run] Approval would be skipped: outstanding or uncertain findings remain."
         : "[audit] Approval skipped: outstanding or uncertain findings remain.");
       return;
     }
-    await approveReview(snapshot, options.apply);
-    console.log(dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}`
+    await approveReview(snapshot, options.apply, signal);
+    log(dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}`
       : `[audit] PR approved at ${snapshot.headSha}`);
   }
 }
 
-export async function runAudit(url: string, options: {
-  models: ModelRuntime; model: ModelRef; skipLabels?: string[]; force?: boolean; sticky?: boolean; approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
-}): Promise<void> {
-  const context = BACKGROUND_CONTEXT;
-  const target = parseReviewTarget(url);
-  const key = createHash("sha256").update(`${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`).digest("hex").slice(0, 20);
-  const registry = createRegistry();
-  registry.install(Auditor);
-  const harness = await openStateHarness({ kind: "audit", key }, {
-    models: options.models, registry, settings: auditSettings, onReport: (error) => console.error(error),
-    // No execution environment and no coding tools: model calls cannot touch local files or mutate GitHub.
-  }, context);
-  let closing = false;
-  const quit = () => { closing = true; void harness.close(context).catch((error) => console.error(error)); };
+export type AuditOptions = {
+  model: ModelRef; skipLabels?: string[]; force?: boolean; sticky?: boolean;
+  approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
+};
+
+/** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
+export function createAuditor(models: ModelRuntime, { labelOutput = true } = {}) {
+  const repositories = new Map<string, Promise<RepositoryAudit>>();
+  const requests = new Set<string>();
+  const shutdown = new AbortController();
+  let closing: Promise<void> | undefined;
+
+  return {
+    async audit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<void> {
+      if (closing) throw new Error("Auditor is closed");
+      const target = parseReviewTarget(url);
+      const repository = `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}`;
+      const requestKey = `${repository}#${target.pr}`;
+      if (requests.has(requestKey)) throw new Error(`Audit is already in progress: ${target.url}`);
+      requests.add(requestKey);
+      const label = labelOutput ? `[${target.owner}/${target.repo}#${target.pr}] ` : "";
+      const log = (message: string) => console.log(`${label}${message}`);
+      const warn = (message: string) => console.error(`${label}${message}`);
+      const context = withAbortSignal(shutdown.signal, callerContext);
+      try {
+        let opened = repositories.get(repository);
+        if (!opened) {
+          const registry = createRegistry();
+          const gate = createAuditExecutionGate(models);
+          registry.install(defineExtension({ ...Auditor, tools: [{
+            ...readFile,
+            execute: async (...args: Parameters<typeof readFile.execute>) => {
+              const [, api, context] = args;
+              const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
+              await gate.wait(provider?.sessionId, context);
+              return readFile.execute(...args);
+            },
+          }, readComment, report] }));
+          const key = createHash("sha256").update(repository).digest("hex").slice(0, 20);
+          opened = openStateHarness({ kind: "repo", key }, {
+            models: gate.models, registry, settings: auditSettings, onReport: (error) => console.error(error),
+            // No execution environment or coding tools: audits cannot access local files.
+          }, BACKGROUND_CONTEXT).then((harness) => {
+            gate.attach(harness);
+            return {
+              harness,
+              allow: async (id: ConversationId, context: Context) => {
+                const provider = await harness.snapshot(ProviderDoc, id, context);
+                if (!provider) throw new Error("Audit provider session identity is missing");
+                gate.allow(provider.sessionId);
+              },
+            };
+          }).catch((error) => {
+            repositories.delete(repository);
+            throw error;
+          });
+          // Store the opening promise before yielding so concurrent first requests cannot open twice.
+          repositories.set(repository, opened);
+        }
+        const repositoryAudit = await awaitWithContext(opened, context);
+        await auditRequest(target, { ...options, models }, repositoryAudit, context, log, warn);
+      } finally {
+        requests.delete(requestKey);
+      }
+    },
+    close(): Promise<void> {
+      if (!closing) {
+        shutdown.abort(new Error("Auditor is closed"));
+        closing = (async () => {
+          const results = await Promise.allSettled([...repositories.values()].map((opened) =>
+            opened.then(({ harness }) => harness.close(BACKGROUND_CONTEXT), () => {})));
+          const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+          if (errors.length) throw new AggregateError(errors, "Failed to close audit storage");
+        })();
+      }
+      return closing;
+    },
+  };
+}
+
+/** CLI/chat batch lifecycle. A failed PR never closes another PR's harness or ends its request. */
+export async function runAudits(urls: string[], options: AuditOptions & { models: ModelRuntime }): Promise<void> {
+  const keys = new Set<string>();
+  for (const url of urls) {
+    const target = parseReviewTarget(url);
+    const key = `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`;
+    if (keys.has(key)) throw new Error(`Duplicate PR target: ${target.url}`);
+    keys.add(key);
+  }
+  const auditor = createAuditor(options.models, { labelOutput: urls.length > 1 });
+  let interrupted = false;
+  const quit = () => { interrupted = true; void auditor.close().catch((error) => console.error(error)); };
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
+  try {
+    const results = await Promise.allSettled(urls.map((url) => auditor.audit(url, options)));
+    if (interrupted) {
+      console.log("\nAudit interrupted. Run the same audit again to recover its saved work.");
+      return;
+    }
+    const failures = results.flatMap((result, i) => result.status === "rejected" ? [{ url: urls[i], error: result.reason }] : []);
+    if (failures.length === 1 && urls.length === 1) throw failures[0].error;
+    if (failures.length) throw new Error(failures.map(({ url, error }) =>
+      `${url}: ${error instanceof Error ? error.message : String(error)}`).join("\n"));
+  } finally {
+    process.off("SIGINT", quit);
+    process.off("SIGTERM", quit);
+    await auditor.close();
+  }
+}
+
+type RepositoryAudit = {
+  harness: Harness;
+  allow(id: ConversationId, context: Context): Promise<void>;
+};
+
+async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime }, repository: RepositoryAudit,
+  context: Context, log: (message: string) => void, warn: (message: string) => void): Promise<void> {
+  const { harness } = repository;
+  const prKey = String(target.pr);
   let stream: Awaited<ReturnType<typeof watchEvents>> | undefined;
   try {
     const startedAt = new Date().toISOString();
-    const pr = await fetchPullRequest(target);
+    const pr = await fetchPullRequest(target, context.abortSignal);
     if (pr.merged) {
-      console.log(`[audit] Skipping ${target.url}: PR has already been merged.`);
+      log(`[audit] Skipping ${target.url}: PR has already been merged.`);
       return;
     }
     const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));
     const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
     if (skippedLabel) {
-      console.log(`[audit] Skipping ${target.url}: PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
+      log(`[audit] Skipping ${target.url}: PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
       return;
     }
     // Persist force intent before cancellation/evidence fetching. A crash must not turn --force into a cache hit,
     // or silently switch its selected model. Clear the intent only when the new snapshot is admitted.
     if (options.force) await harness.commit(async (tx) => {
-      (await tx.doc(AuditRuns)).restartModel = options.model;
+      (await tx.doc(AuditRuns, prKey, null)).restartModel = options.model;
     }, context);
-    let state = await harness.snapshot(AuditRuns, context);
+    let state = await harness.snapshot(AuditRuns, prKey, context);
     const previousId = state?.latestSuccess?.conversationId ?? state?.active;
     if (state?.restartModel && previousId != null) {
-      outputRefreshReasons(state.active ?? previousId, [options.force ? "--force requested" : "saved --force restart intent"]);
+      outputRefreshReasons(state.active ?? previousId, [options.force ? "--force requested" : "saved --force restart intent"], log);
     }
     if (state?.restartModel && state.active !== null && !state.complete) {
       const existing = await harness.conversation(state.active, context);
       if (!existing) throw new Error("Incomplete audit conversation is missing");
-      console.log("[audit] Restarting unfinished audit; cancelling its saved work");
+      log("[audit] Restarting unfinished audit; cancelling its saved work");
       await existing.abort(context);
-      await harness.commit(async (tx) => { (await tx.doc(AuditRuns)).complete = true; }, context);
-      state = await harness.snapshot(AuditRuns, context);
+      await harness.commit(async (tx) => { (await tx.doc(AuditRuns, prKey, null)).complete = true; }, context);
+      state = await harness.snapshot(AuditRuns, prKey, context);
     }
     let conversation: Conversation;
+    let controllerTask = state?.controllerTask;
     let snapshot: ReviewSnapshot;
     if (state && state.active !== null && !state.complete) {
       const existing = await harness.conversation(state.active, context);
@@ -549,13 +699,13 @@ export async function runAudit(url: string, options: {
       }
       conversation = existing;
       snapshot = saved.snapshot;
-      console.log(`[audit] Resuming saved snapshot ${snapshot.id} at ${snapshot.headSha}`);
+      log(`[audit] Resuming saved snapshot ${snapshot.id} at ${snapshot.headSha}`);
     } else {
       const model = state?.restartModel ?? options.model;
       const policy = policyFingerprint(options.models, model);
-      console.log(`[audit] Fetching ${target.url}`);
-      snapshot = await fetchReviewSnapshot(target, pr, startedAt);
-      console.log(`[audit] PR title: ${stripControlCharacters(snapshot.title)}`);
+      log(`[audit] Fetching ${target.url}`);
+      snapshot = await fetchReviewSnapshot(target, pr, startedAt, context.abortSignal);
+      log(`[audit] PR title: ${stripControlCharacters(snapshot.title)}`);
       const fingerprint = evidenceFingerprint(snapshot, policy);
       const cached = !state?.restartModel && state?.latestSuccess;
       const refreshReasons: string[] = [];
@@ -565,14 +715,14 @@ export async function runAudit(url: string, options: {
         if (cached.fingerprint === fingerprint && saved?.snapshot && saved.report
           && identity?.fingerprint === fingerprint && identity.policy === policy) {
           await harness.commit(async (tx) => {
-            const runs = await tx.doc(AuditRuns);
+            const runs = await tx.doc(AuditRuns, prKey, null);
             runs.latestSuccess!.lastCheckedAt = snapshot.fetchedAt;
             await tx.appendEntry(cached.conversationId, { kind: "app.review-audit-recheck", data: {
               fingerprint, snapshotId: snapshot.id, startedAt: snapshot.startedAt, fetchedAt: snapshot.fetchedAt,
             } });
           }, context);
-          console.log(`[audit] Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`);
-          await outputReport(saved.snapshot, saved.report, saved.databaseMigration, { ...options, reused: true });
+          log(`[audit] Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`);
+          await outputReport(saved.snapshot, saved.report, saved.databaseMigration, { ...options, reused: true }, log, context.abortSignal);
           return;
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
@@ -587,7 +737,7 @@ export async function runAudit(url: string, options: {
       } else if (!state?.restartModel && previousId != null) {
         refreshReasons.push("no reusable successful assessment is available");
       }
-      if (previousId != null && refreshReasons.length) outputRefreshReasons(previousId, refreshReasons);
+      if (previousId != null && refreshReasons.length) outputRefreshReasons(previousId, refreshReasons, log);
       conversation = await harness.createConversation({
         ownership: { kind: "ownerless" }, agent: { model, instructions, thinkingLevel, extensions: [Auditor] },
         init: async (tx, id) => {
@@ -595,46 +745,44 @@ export async function runAudit(url: string, options: {
           const identity = await tx.doc(AuditIdentity, id);
           identity.fingerprint = fingerprint;
           identity.policy = policy;
-          const runs = await tx.doc(AuditRuns);
+          const runs = await tx.doc(AuditRuns, prKey, null);
           runs.active = id;
           runs.complete = false;
           runs.restartModel = null;
+          controllerTask = await tx.createTask(AuditController, { pr: prKey }, {
+            ownership: { kind: "conversation" }, conversationId: id,
+          });
+          runs.controllerTask = controllerTask;
         },
       }, context);
-      console.log(`[audit] ${snapshot.comments.length} comments · head ${snapshot.headSha}`);
+      log(`[audit] ${snapshot.comments.length} comments · head ${snapshot.headSha}`);
     }
     const savedModel = (await conversation.agent(context)).model;
     if (!options.models.getAvailableSnapshot().some((m) => m.provider === savedModel?.provider && m.id === savedModel.modelId)) {
       throw new Error("The saved audit model is unavailable. Restore its Pi credentials before resuming.");
     }
+    await repository.allow(conversation.id, context);
     stream = await watchEvents(harness, conversation.id, context);
     stream.start(async (events) => {
       for (const event of events) {
         if (event.type === "tool_execution_start") {
           const text = `[audit:${event.toolName}] ${event.args.path ?? event.args.commentKey ?? ""}`;
-          console.log(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
-        } else if (event.type === "auto_retry_start") console.error(`Audit retry ${event.attempt}: ${event.errorMessage}`);
+          log(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
+        } else if (event.type === "auto_retry_start") warn(`Audit retry ${event.attempt}: ${event.errorMessage}`);
       }
     });
-    // The snapshot was committed first. A crash before or after admission reuses both it and this request ID.
-    const settled = await (await conversation.submit({
-      type: "input", requestId: `review-audit:${snapshot.id}`,
-      content: `${requestPrefix}${JSON.stringify(snapshot)}`,
-    }, context)).wait(context);
+    if (controllerTask == null) throw new Error("Incomplete audit has no controller task");
+    // The controller durably admits the request and publishes completion, including after a crash.
+    const outcome = (await harness.waitForTask(controllerTask, context)).state.outcome;
+    if (outcome.status !== "completed") {
+      const reason = outcome.status === "failed" || outcome.status === "faulted"
+        ? outcome.error.message : outcome.reason ?? outcome.status;
+      throw new Error(`Audit controller failed: ${reason}`);
+    }
+    const submission = await harness.submission(outcome.result.submissionId, context);
+    if (!submission) throw new Error("Audit submission is missing");
+    const settled = await submission.wait(context);
     const saved = await harness.snapshot(AuditDocument, conversation.id, context);
-    const identity = await harness.snapshot(AuditIdentity, conversation.id, context);
-    const successful = settled.status === "done" && !!saved?.report;
-    const cacheable = successful && identity?.fingerprint && identity.policy === policyFingerprint(options.models, savedModel!);
-    // Publish atomically with completion. Failures retain the previous cache. A newer success without
-    // a trustworthy identity clears it: latest-success-only lookup must never fall back to an older assessment.
-    await harness.commit(async (tx) => {
-      const runs = await tx.doc(AuditRuns);
-      runs.complete = true;
-      if (successful) runs.latestSuccess = cacheable ? {
-        fingerprint: identity.fingerprint!, conversationId: conversation.id,
-        assessedAt: new Date().toISOString(), lastCheckedAt: snapshot.fetchedAt,
-      } : null;
-    }, context);
     if (settled.status === "unanswered") throw new Error(`Audit failed: ${settled.reason}`);
     if (!saved?.report) {
       const answer = settled.type === "input"
@@ -649,14 +797,8 @@ export async function runAudit(url: string, options: {
       }
       throw new Error(stripControlCharacters(`Agent finished without a complete assessment.${reason} No verdict was produced.`));
     }
-    await outputReport(snapshot, saved.report, saved.databaseMigration, options);
-  } catch (error) {
-    if (!closing) throw error;
-    console.log("\nAudit interrupted. Run the same audit again to recover its saved work.");
+    await outputReport(snapshot, saved.report, saved.databaseMigration, options, log, context.abortSignal);
   } finally {
-    process.off("SIGINT", quit);
-    process.off("SIGTERM", quit);
-    await harness.close(context);
     await stream?.stop();
   }
 }

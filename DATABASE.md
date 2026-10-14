@@ -1,6 +1,6 @@
 # Database data model
 
-Both `chats/<cwd-hash>.sqlite` and `audits/<target-hash>.sqlite` under Pronto's state directory use this schema. Each database is one Durable session.
+Both `chats/<cwd-hash>.sqlite` and `repos/<repo-hash>.sqlite` under Pronto's state directory use this schema. Each database is one Durable session. A repository session holds independent audit conversations for several PRs. Old per-PR databases in `audits/` remain untouched and are not imported.
 
 The default state directory is `~/.local/state/pronto`. `PRONTO_STATE_DIR` overrides it; otherwise an absolute `XDG_STATE_HOME` selects `$XDG_STATE_HOME/pronto`. See [Credentials and audit storage](README.md#credentials-and-audit-storage) for path selection and locking. The adjacent `.lock` files hold ownership locks, not conversation data.
 
@@ -40,7 +40,7 @@ A submission answers: "What is the status of this request, and where is its answ
 
 Tracks the individual pieces of work needed to answer a request.
 
-One submission can require several model generations and many tool calls. Each is a task with saved input, execution state and an eventual outcome.
+One submission can require several model generations and many tool calls. Each is a task with saved input, execution state and an eventual outcome. An `app.review-audit-controller` task belongs to each assessment conversation. It admits the saved evidence using a stable request ID, waits for the submission and publishes completion and the PR's cache pointer in one commit.
 
 While unfinished, a task stores the checkpoint needed to resume. It can also store temporary durable memos, such as a fetched GitHub file. Memos are removed once the task's outcome is decided; committed tool-result entries remain.
 
@@ -65,7 +65,7 @@ The table stores the document's identity, owner and history policy, not its actu
 | `pi.usage` | Token and cost totals |
 | `app.review-audit` | Saved evidence, accepted assessment and inspected file URLs |
 | `app.review-audit-identity` | Evidence-and-policy fingerprint and policy hash |
-| `app.review-audit-runs` | Current audit attempt, restart intent and cache pointer |
+| `app.review-audit-runs` | One family member per PR: current attempt, controller task, restart intent and cache pointer |
 
 #### `document_revisions`
 
@@ -203,7 +203,7 @@ conversations       identifies the assessment attempt
 documents           identifies its evidence and report state
 document_revisions  stores the evidence, then the accepted report
 submissions         tracks the assessment request
-tasks               runs the model and tools
+tasks               coordinates the assessment and runs the model and tools
 entries             preserves their messages and results
 ```
 
@@ -215,16 +215,16 @@ For an unchanged-evidence recheck, there is no new conversation, submission or m
 - A document's value is the latest `base` plus subsequent `delta` revisions, not `documents.record`. Use Durable's snapshot API to read the reconstructed value.
 - Submission-to-entry and task-to-entry links live inside JSON records.
 - Audit snapshots, reports and cache state are document kinds, not extra tables.
-- Rechecks are `entries` with kind `app.review-audit-recheck`. They also update `latestSuccess.lastCheckedAt` in the session-scoped `app.review-audit-runs` document.
+- Rechecks are `entries` with kind `app.review-audit-recheck`. They also update `latestSuccess.lastCheckedAt` in that PR's session-scoped `app.review-audit-runs` family member.
 - Commit sequences are not timestamps. Changes saved in the same atomic commit share a sequence.
 
 The audit document definitions are in [`auditor.ts`](auditor.ts).
 
 ## Audit database contents
 
-Each PR has one database at `<state-directory>/audits/<target-hash>.sqlite`, shared by the CLI and chat command across working directories. It can contain several audit conversations. The coding conversation remains separate in `<state-directory>/chats/<cwd-hash>.sqlite`.
+Each repository has one database at `<state-directory>/repos/<repo-hash>.sqlite`, shared by the CLI and chat command across working directories. Its key includes the GitHub origin and lower-case owner and repository names. One process owns the database; its shared harness can run independent PR audits concurrently. The coding conversation remains separate in `<state-directory>/chats/<cwd-hash>.sqlite`.
 
-Each newly admitted audit attempt creates an independent conversation. Its evidence and identity are saved together, before submitting work to the model.
+Each newly admitted audit attempt creates an independent conversation. Its evidence, identity, controller task and PR controller pointer are saved together, before submitting work to the model. Restored model requests and remote file reads wait until their PR is selected and passes live merge-status and label checks. Deferred-provider jobs keep their opaque handles in generation-task poll checkpoints. The execution gate resolves each handle's owning conversation from those saved checkpoints before polling it; unselected jobs are neither polled nor resubmitted.
 
 New snapshots omit marked Pronto comments, replies and submitted review bodies from any account. They are not stored separately or included in the model input or evidence fingerprint. Ordinary discussion and unmarked older reports remain in scope. Historical snapshots are not rewritten.
 
@@ -234,7 +234,7 @@ The application stores these logical documents, not separate tables for each kin
 | --- | --- | --- |
 | `app.review-audit` | Conversation | `snapshot`: PR details, pinned commits, comments, replies, thread states, changed files and patches. `report`: accepted findings assessments, initially `null`. `databaseMigration`: model classification (`migration`, `not-migration` or `uncertain`) and reason, initially `null` and absent in older reports. `inspected`: URLs of remote file ranges read by tools. |
 | `app.review-audit-identity` | Conversation | `fingerprint`: evidence and policy hash. `policy`: model and auditor configuration hash. Older conversations may not have this document. |
-| `app.review-audit-runs` | Session | `active`: latest admitted conversation ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
+| `app.review-audit-runs` | Session family, keyed by PR number as a string | `active`: latest admitted conversation ID. `controllerTask`: its durable controller task ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
 
 See [How findings are stored](#how-findings-are-stored) for the report structure, finding fields and relationship between sources and finding counts.
 
@@ -244,21 +244,21 @@ Expect these changes across invocations:
 
 | Event | Database effect |
 | --- | --- |
-| New audit after a cache miss | New conversation, evidence snapshot and identity; then submission, model and tool records, and an accepted report if successful. Older conversations remain stored. |
+| New audit after a cache miss | New conversation, evidence snapshot, identity and controller task; then submission, model and tool records, and an accepted report if successful. Older conversations remain stored. |
 | Resume an unfinished audit | Same conversation and snapshot. The stable `review-audit:<snapshot.id>` request ID avoids a duplicate submission. Recovery updates task state and can add further model and tool entries. |
 | Reuse an unchanged assessment | No new conversation, submission or assessment. Append an `app.review-audit-recheck` entry to the cached conversation and update `lastCheckedAt`. The receipt records the fingerprint, new check's snapshot ID and fetch window, not another full snapshot. Original evidence and report remain unchanged. |
-| Force a restart | Save restart intent, cancel unfinished work if present, then create a new conversation when fresh evidence is admitted. Keep the cancelled conversation's existing evidence and transcript. |
+| Force a restart | Save restart intent, cancel that PR's unfinished work if present, then create a new conversation when fresh evidence is admitted. Keep the cancelled conversation's existing evidence and transcript. |
 | Failed attempt | Keep any admitted conversation and its partial history. The report may remain `null`; the previous successful cache is not replaced. |
 
 A report can be saved before its submission finishes. Its presence alone does not establish a successful audit. Before the initial evidence is admitted, an interrupted fetch leaves no new conversation or snapshot, although a force-restart intent may already be saved.
 
 In SQLite, `conversations` identifies attempts, `entries` holds transcript and recheck records, `submissions` holds request IDs and status, and `tasks` holds execution state. Tool memos support recovery while a task is live; they are removed when its outcome is decided. `documents` identifies application and built-in `pi.*` documents. Their JSON values are stored in `document_revisions` as bases or deltas. Use Durable's snapshot API to read a materialised value rather than treating the latest delta as the whole document.
 
-For read-only inspection with Node's built-in SQLite, replace `<target-hash>` with the hash in the database filename:
+For read-only inspection with Node's built-in SQLite, replace `<repo-hash>` with the hash in the database filename:
 
 ```sh
 STATE_DIR="${PRONTO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pronto}"
-DB="$STATE_DIR/audits/<target-hash>.sqlite" node --input-type=module <<'JS'
+DB="$STATE_DIR/repos/<repo-hash>.sqlite" node --input-type=module <<'JS'
 import { DatabaseSync } from 'node:sqlite';
 const db = new DatabaseSync(process.env.DB, { readOnly: true });
 try {
@@ -267,7 +267,7 @@ try {
     `SELECT id, conversation_id, status,
             json_extract(record, '$.requestId') AS request_id
      FROM submissions ORDER BY id`,
-    `SELECT id, json_extract(record, '$.kind') AS kind, scope_kind, owner_id
+    `SELECT id, json_extract(record, '$.kind') AS kind, key_value, scope_kind, owner_id
      FROM documents WHERE retired_at IS NULL ORDER BY id`,
     `SELECT id, conversation_id, json_extract(record, '$.kind') AS kind
      FROM entries ORDER BY id`,

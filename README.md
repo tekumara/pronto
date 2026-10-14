@@ -53,7 +53,55 @@ The auditor uses your saved Pi default model, or the first available model if th
 pronto https://github.com/owner/repo/pull/42 provider/model-id
 ```
 
-A single positional argument is always a PR target, so branch names such as `feature/my-change` are not mistaken for models. Use a provider and model listed by Pi's `/model` command. The one-shot CLI is in [`audit.ts`](audit.ts).
+Without `--pr`, a single positional argument is always a PR target, so branch names such as `feature/my-change` are not mistaken for models. Use a provider and model listed by Pi's `/model` command. The one-shot CLI is in [`audit.ts`](audit.ts).
+
+## Concurrent audit batches
+
+Use `--pr` once for each target to check several PRs in one process:
+
+```sh
+pronto --pr 42 --pr 43
+pronto --pr feature/first --pr feature/second
+pronto --pr https://github.com/owner/repo/pull/42 \
+       --pr https://github.com/owner/repo/pull/43
+```
+
+Numbers and branches use the caller's Git checkout. Explicit URLs can select different repositories without a checkout. Pronto resolves and validates all targets before starting the batch. Duplicate PR targets are rejected, including aliases that differ only in repository-name case or a trailing slash.
+
+All selected PRs run concurrently. Each repository has one shared database and harness, with separate state and assessment conversations for each PR. GitHub fetches and model requests overlap; database commits are serialised. Keep batches within your GitHub and model-provider rate limits.
+
+Flags apply to every PR in the batch. With `--pr`, the optional positional argument is the model:
+
+```sh
+pronto --pr 42 --pr 43 provider/model-id --apply
+```
+
+Progress messages identify the repository and PR number. A failed PR does not stop the others. The CLI waits for all requests and exits 1 if any fail. Findings marked outstanding or uncertain are not operational failures.
+
+Separate CLI processes cannot share a repository database concurrently. There is no daemon: use one batch invocation, or a shared auditor in your own process.
+
+### Embed concurrent audits
+
+The shared module in [`auditor.ts`](auditor.ts) accepts concurrent requests and keeps repository harnesses open until you close it:
+
+```typescript
+import { createAuditor } from "./auditor.ts";
+import { createModelRuntime } from "./model.ts";
+
+const { models, model } = await createModelRuntime(process.cwd());
+const auditor = createAuditor(models);
+const options = { model: { provider: model.provider, modelId: model.id } };
+try {
+  await Promise.allSettled([
+    auditor.audit("https://github.com/owner/repo/pull/42", options),
+    auditor.audit("https://github.com/owner/repo/pull/43", options),
+  ]);
+} finally {
+  await auditor.close();
+}
+```
+
+An overlapping request for the same PR is rejected, including a forced restart. Pass a Chord context as the third `audit()` argument to cancel a caller's fetch or wait. Cancelling a wait does not cancel admitted model work or close another PR's harness. `close()` shuts down the owner and preserves unfinished work for recovery.
 
 ## How the audit works
 
@@ -315,7 +363,7 @@ Unfinished audit?
 
 `--force`, or a saved restart intent, overrides this flow. It cancels any unfinished attempt, fetches fresh evidence and skips cache lookup.
 
-After interruption, run the same PR audit from the same directory to resume its saved snapshot and model. If an older unfinished snapshot contains marked Pronto output, resuming stops before model execution. Use `--force` to start with fresh, filtered evidence. Historical snapshots and transcripts remain unchanged.
+After interruption, select the same PR again using the same state directory to resume its saved snapshot and model. A batch can resume several PRs independently. If an older unfinished snapshot contains marked Pronto output, resuming stops before model execution. Use `--force` to start with fresh, filtered evidence. Historical snapshots and transcripts remain unchanged.
 
 After completion, the auditor fetches current evidence and compares it with the latest successful assessment. It reuses that assessment when the evidence and assessment policy match. A cache hit makes no model requests and leaves any existing sticky verdict comment unchanged. The terminal shows when the assessment was saved and when the evidence was rechecked.
 
@@ -350,11 +398,13 @@ The flag can appear before or after the URL or CLI model argument. It bypasses t
 
 Use `--force` after a temporary evidence-access failure, when revisiting a time-sensitive finding, or when a model alias changes behind its ID.
 
-Cache pointers, fingerprints and recheck receipts live in Durable storage. Completion and cache publication share one transaction. If the process dies before printing a completed report, the next invocation can reuse it after checking the evidence. Terminal output is not exactly-once delivery.
+Cache pointers, fingerprints and recheck receipts live in Durable storage. Each assessment has a durable controller task that submits the saved evidence and publishes its result. Controller completion and cache publication share one transaction. They do not depend on the original caller still waiting. If the process dies before printing a completed report, the next invocation can reuse it after checking the evidence. Terminal output is not exactly-once delivery.
 
-Existing controller documents migrate without deleting their history. Assessments created before caching are not automatically eligible for reuse. If an unfinished audit resumes under a changed assessment policy, it can finish but cannot publish a mixed-policy cache entry. A successful but uncacheable assessment clears the cache slot rather than falling back to an older success. When changing tool behaviour, validation rules or dependency defaults, bump `AUDITOR_VERSION` in `auditor.ts`. Prompt and tool-schema changes invalidate the cache automatically.
+Each PR has its own controller document in the repository database. Old per-PR databases in `audits/` remain untouched and are not imported. Their history, caches and unfinished audits do not participate in the new storage model. If an unfinished audit resumes under a changed assessment policy, it can finish but cannot publish a mixed-policy cache entry. A successful but uncacheable assessment clears the cache slot rather than falling back to an older success. When changing tool behaviour, validation rules or dependency defaults, bump `AUDITOR_VERSION` in `auditor.ts`. Prompt and tool-schema changes invalidate the cache automatically.
 
-Pronto rejects concurrent audits of the same PR in the same state directory, even when launched from different working directories.
+Within one shared auditor, Pronto rejects overlapping requests for the same PR but permits requests for other PRs. Across processes, the entire repository database has one owner.
+
+Opening a repository restores Durable task state, but model requests and remote file reads remain paused for unselected PRs. Selecting a PR admits its conversation after live merge-status and label checks. Skipped PRs retain their saved work. Deferred-provider polling follows the same rule and resumes the saved remote job instead of submitting another. PRs already admitted in a running process continue if their caller stops waiting.
 
 The one-shot CLI exits 0 when it produces a complete report, even if findings remain outstanding. Operational failures or an incomplete assessment exit 1. The report is not a CI pass/fail signal.
 
@@ -362,7 +412,7 @@ The one-shot CLI exits 0 when it produces a complete report, even if findings re
 
 The auditor reuses Pi's `ModelRuntime` for credentials, OAuth refresh, and custom models. It reads the normal `~/.pi/agent` directory, or the directory set by `PI_CODING_AGENT_DIR`. It does not copy tokens into this repo. Pi extensions, skills, MCP servers, and its full system prompt are not loaded.
 
-`agent-reviews` 1.1.0 is a pinned npm dependency, imported directly; its CLI is not launched. Its authentication and proxy helpers may invoke `gh` or `curl`. `GITHUB_API_URL` and `GITHUB_GRAPHQL_URL` support enterprise and API-compatible endpoints.
+`agent-reviews` 1.1.0 is a pinned npm dependency, imported directly; its CLI is not launched. Its authentication helper may invoke `gh`. Pronto pins `undici` 8.10.2 directly so HTTP(S) proxy requests stay asynchronous rather than depending on a transitive installation. The proxy helper can fall back to `curl` if proxy setup fails. `GITHUB_API_URL` and `GITHUB_GRAPHQL_URL` support enterprise and API-compatible endpoints.
 
 Pronto stores databases outside your working directory. It chooses the state directory in this order:
 
@@ -382,23 +432,25 @@ The state directory contains:
 
 ```text
 pronto/
-├── audits/
+├── repos/
+│   └── <repo-hash>.sqlite
+├── audits/                      # old per-PR databases, if present
 │   └── <target-hash>.sqlite
 └── chats/
     └── <cwd-hash>.sqlite
 ```
 
-Each PR has one audit database, shared across working directories and both entry points. Its key includes the GitHub origin, owner, repository and PR number. Chat databases are separate, keyed by the canonical absolute working directory. Symlink aliases share a chat; different worktrees do not. Both filenames use the first 20 hexadecimal characters of a SHA-256 hash.
+Each repository has one audit database, shared across working directories and both entry points. Its key includes the GitHub origin and lower-case owner and repository names, not the PR number or fork head repository. Each PR has a separate controller document keyed by its PR number. Each assessment attempt still has an independent conversation. Chat databases are separate, keyed by the canonical absolute working directory. Symlink aliases share a chat; different worktrees do not. Both filenames use the first 20 hexadecimal characters of a SHA-256 hash.
 
 No separate JSON or Markdown report file is written. Evidence is saved in a Durable document and as a submitted conversation input. Remote file reads become tool results. The structured assessment is also retained in the session.
 
-Each database has a separate `<filename>.lock` file. Pronto holds an exclusive SQLite lock there until the harness closes. The operating system releases ownership after a crash, so restarts need no stale-lock cleanup. Lock files remain on disk; do not delete them while Pronto is running. Different databases can be used concurrently.
+Each database has a separate `<filename>.lock` file. Pronto holds an exclusive SQLite lock there until the harness closes. The operating system releases ownership after a crash, so restarts need no stale-lock cleanup. Lock files remain on disk; do not delete them while Pronto is running. One process owns each repository database. PRs within it run concurrently through one harness; a second process targeting any PR in that repo is rejected. Different repository databases can be used by different processes.
 
 Private review text and code are sent to your selected model provider and saved locally. New state directories use permissions `0700`; new database files use `0600`. Keep the state directory private and out of version control. SQLite protects against process crashes, but the newest commits can be lost on power failure.
 
 See [Audit database contents](DATABASE.md#audit-database-contents) for the saved evidence, reports, execution state and read-only inspection commands.
 
-Pronto ignores existing directory-local `.pi-durable/` databases and leaves them untouched. Only the configured state directory supplies history and recovery state. If no database exists there, Pronto starts a new session. Keep any old `.pi-durable/` directory out of version control.
+Pronto leaves old user-state `audits/` databases and directory-local `.pi-durable/` databases untouched. It does not migrate their records into `repos/`; the first audit in the new model fetches fresh evidence and creates a new assessment. Only the configured state directory supplies history and recovery state. If no database exists there, Pronto starts a new session. Keep any old `.pi-durable/` directory out of version control.
 
 ## Optional interactive chat
 
@@ -422,9 +474,10 @@ You can invoke the same PR auditor from chat:
 
 ```text
 /audit https://github.com/owner/repo/pull/42
+/audit --pr https://github.com/owner/repo/pull/42 --pr https://github.com/owner/repo/pull/43
 ```
 
-The command supports the same `--skip`, `--force`, `--sticky`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
+Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--force`, `--sticky`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
 
 To use the coding chat in another project, run the script from that directory:
 
@@ -447,7 +500,7 @@ Ctrl+C or SIGTERM closes the harness without cancelling its unfinished work. On 
 
 Pronto rejects a second chat process for the same working directory and state directory. Audits use separate databases, so they do not lock the coding conversation.
 
-To start a fresh conversation, stop the chat and move or delete its `<cwd-hash>.sqlite` file and SQLite sidecars (`-wal` and `-shm`). Keep the state directory's `audits/` subdirectory to retain saved audits. The chat database contains your prompts, model responses and tool results, so keep it private.
+To start a fresh conversation, stop the chat and move or delete its `<cwd-hash>.sqlite` file and SQLite sidecars (`-wal` and `-shm`). Keep the state directory's `repos/` subdirectory to retain current audits, and `audits/` if you want to retain older per-PR history. The chat database contains your prompts, model responses and tool results, so keep it private.
 
 ## Development checks
 
@@ -456,9 +509,9 @@ npm run check
 npm test
 ```
 
-The tests verify that `npm link` exposes the source-backed `pronto` command from another directory. They use local simulated model and GitHub endpoints with temporary credentials. Audit tests cover both entry points, paginated evidence, fork-head code reads, blocked shell calls, report coverage and citations, inconsistent evidence, and restart recovery. They also cover opt-in verdict comments and approvals, sticky updates and opting out, default dry-run previews and per-invocation `--apply` consent for GitHub writes, skipped approvals, commit changes before approval, posting failures, cache reuse and invalidation, no expiry, failed reassessment, forced restarts, crashes during fetching and before printing, and controller-schema migration. Chat tests exercise all 4 coding tools, streamed output, saved history, and recovery after SIGKILL and SIGTERM. Storage tests cover path precedence, private permissions, shared audit history, isolated chats, process locks and ignoring directory-local databases. Tests use temporary state directories and do not contact a real model provider or GitHub. Supplied model verdicts test report rendering, validation and action rules, not the model's ability to judge whether a scope explanation is adequate.
+The tests verify that `npm link` exposes the source-backed `pronto` command from another directory. They use simulated model providers and local GitHub endpoints with temporary credentials. Audit tests cover both entry points, paginated evidence, fork-head code reads, blocked shell calls, report coverage and citations, inconsistent evidence, and restart recovery. They also cover opt-in verdict comments and approvals, sticky updates and opting out, default dry-run previews and per-invocation `--apply` consent for GitHub writes, skipped approvals, commit changes before approval, posting failures, cache reuse and invalidation, no expiry, failed reassessment, forced restarts, crashes during fetching and before printing, and retaining old per-PR databases without importing them. Concurrent audit tests cover CLI and chat batches, per-PR cache isolation, same-PR admission, caller cancellation, batch failures, asynchronous proxy transport, forced restart isolation, repo-wide process locks, deferred job recovery, and recovery after SIGKILL and SIGTERM. Chat tests exercise all 4 coding tools, streamed output, saved history, and recovery after SIGKILL and SIGTERM. Storage tests cover path precedence, private permissions, shared audit history, isolated chats, process locks and ignoring directory-local databases. Tests use temporary state directories and do not contact a real model provider or GitHub. Supplied model verdicts test report rendering, validation and action rules, not the model's ability to judge whether a scope explanation is adequate.
 
-Pi Durable is experimental. Dependencies are pinned to 1.0.3, with `package-lock.json` included alongside the code.
+Pi Durable is experimental. Pi packages are pinned to 1.0.3, with `package-lock.json` included alongside the code.
 
 ## References
 

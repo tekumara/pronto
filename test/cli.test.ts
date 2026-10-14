@@ -113,6 +113,12 @@ for (const { name, args, gh, message } of [
   { name: "empty skip label", args: [prUrl, "--skip", ""], gh: undefined, message: /--skip requires a non-empty label/ },
   { name: "blank inline skip label", args: [prUrl, "--skip=  "], gh: undefined, message: /--skip requires a non-empty label/ },
   { name: "an option instead of a skip label", args: [prUrl, "--skip", "--force"], gh: undefined, message: /--skip requires a non-empty label/ },
+  { name: "missing batch target", args: ["--pr"], gh: undefined, message: /--pr requires a non-empty target/ },
+  { name: "blank batch target", args: ["--pr=  "], gh: undefined, message: /--pr requires a non-empty target/ },
+  { name: "an option instead of a batch target", args: ["--pr", "--force"], gh: undefined, message: /--pr requires a non-empty target/ },
+  { name: "a malformed URL later in a batch", args: ["--pr", prUrl, "--pr", "https://github.com/acme/demo/issues/8"], gh: undefined, message: /Expected a GitHub PR URL/ },
+  { name: "mixed positional and batch PR targets", args: ["--pr", prUrl, "8"], gh: undefined, message: /Use --pr for every target/ },
+  { name: "duplicate canonical PR targets", args: ["--pr", prUrl, "--pr", "https://github.com/ACME/demo/pull/7/"], gh: undefined, message: /Duplicate PR target/ },
 ]) {
   test(`CLI stops before model or audit storage for ${name}`, { timeout: 20_000 }, async (t) => {
     const f = await fixture(t, () => assert.fail("Selection failures must not reach the model"), {

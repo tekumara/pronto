@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { runAudit } from "./auditor.ts";
+import { runAudits } from "./auditor.ts";
 import { createModelRuntime } from "./model.ts";
 import { AUDIT_CLI_USAGE, parseAuditOptions, resolveAuditUrl } from "./audit-options.ts";
 
@@ -7,6 +7,7 @@ async function main() {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
     console.log(AUDIT_CLI_USAGE);
+    console.log("--pr <target> adds a PR to a concurrent batch. Repeat for multiple targets; flags and the optional model apply to every PR.");
     console.log("Without a target, selects the current branch's PR using gh pr view. Branch and number selection require gh; explicit URLs need no checkout.");
     console.log("--skip <label> skips the audit if the PR has that label (case-insensitive). Repeat for multiple labels; any match skips, even with --force or --apply.");
     console.log("--force bypasses the assessment cache and restarts any unfinished audit.");
@@ -17,11 +18,11 @@ async function main() {
     console.log("--apply publishes the verdict comment and any selected approval to GitHub (default: false; otherwise previews only).");
     return;
   }
-  const { selector, requested, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");
+  const { selectors, requested, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");
   const cwd = process.cwd();
-  const url = await resolveAuditUrl(selector, cwd);
+  const urls = await Promise.all(selectors.map((selector) => resolveAuditUrl(selector, cwd)));
   const { models, model } = await createModelRuntime(cwd, requested);
-  await runAudit(url, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply });
+  await runAudits(urls, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, force, sticky, approve, allowUncertain, approveMigrations, apply });
 }
 
 main().catch((error) => {

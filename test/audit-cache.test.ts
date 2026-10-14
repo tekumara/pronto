@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, join, resolve } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createSession, defineDoc, type ConversationId, type JsonObject } from "@earendil-works/pi-durable";
+import { createSession, defineDoc, defineDocFamily, type ConversationId, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { ReviewSnapshot } from "../reviews.ts";
 import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
@@ -14,8 +14,8 @@ const url = "https://github.com/acme/project/pull/9";
 const audit = resolve("audit.ts");
 const chat = resolve("agent.ts");
 // Persisted document contracts used to inspect evidence and simulate a pre-filtering snapshot.
-const auditRuns = defineDoc<{ active: ConversationId | null }>({
-  kind: "app.review-audit-runs", version: 2, scope: "session", initial: () => ({ active: null }),
+const auditRuns = defineDocFamily<{ active: ConversationId | null }, null>({
+  kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({ active: null }),
 });
 const auditDocument = defineDoc<{ snapshot: ReviewSnapshot | null }>({
   kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ snapshot: null }),
@@ -108,7 +108,7 @@ async function setMaxTokens(agentDir: string, maxTokens: number) {
 }
 
 async function storagePath(stateDir: string) {
-  const directory = join(stateDir, "audits");
+  const directory = join(stateDir, "repos");
   const files = (await readdir(directory)).filter((name) => name.endsWith(".sqlite"));
   assert.equal(files.length, 1);
   return join(directory, files[0]);
@@ -122,12 +122,12 @@ test("unchanged evidence reuses a saved assessment across directories, CLI and c
   assert.match(first, /Assessment 1/);
   assert.doesNotMatch(first, /Refreshing audit/);
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
-  const runs = defineDoc<{ latestSuccess: { conversationId: number } | null }>({
-    kind: "app.review-audit-runs", version: 2, scope: "session", initial: () => ({ latestSuccess: null }),
+  const runs = defineDocFamily<{ latestSuccess: { conversationId: number } | null }, null>({
+    kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({ latestSuccess: null }),
   });
   let assessmentId: number;
   try {
-    const state = await session.snapshot(runs, BACKGROUND_CONTEXT);
+    const state = await session.snapshot(runs, "9", BACKGROUND_CONTEXT);
     assert.ok(state?.latestSuccess);
     assessmentId = state.latestSuccess.conversationId;
   } finally { await session.close(BACKGROUND_CONTEXT); }
@@ -180,7 +180,7 @@ test("marked audit output from any account is omitted from saved and model evide
 
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
   try {
-    const state = await session.snapshot(auditRuns, BACKGROUND_CONTEXT);
+    const state = await session.snapshot(auditRuns, "9", BACKGROUND_CONTEXT);
     assert.ok(state?.active);
     const saved = await session.snapshot(auditDocument, state.active, BACKGROUND_CONTEXT);
     assert.deepEqual(saved?.snapshot?.comments.map((c) => c.key), expectedKeys);
@@ -331,14 +331,14 @@ test("resuming an older saved report without migration status preserves the audi
   const report = defineDoc<JsonObject>({
     kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({}),
   });
-  const runs = defineDoc<JsonObject>({ kind: "app.review-audit-runs", version: 2, scope: "session", initial: () => ({}) });
+  const runs = defineDocFamily<JsonObject, null>({ kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({}) });
   try {
-    const state = await session.snapshot(auditRuns, BACKGROUND_CONTEXT);
+    const state = await session.snapshot(auditRuns, "9", BACKGROUND_CONTEXT);
     assert.ok(state?.active);
     const active = state.active;
     await session.commit(async (tx) => {
       delete (await tx.doc(report, active)).databaseMigration;
-      (await tx.doc(runs)).complete = false;
+      (await tx.doc(runs, "9", null)).complete = false;
     }, BACKGROUND_CONTEXT);
   } finally { await session.close(BACKGROUND_CONTEXT); }
   const resumed = await f.run("", [url, "--approve", "--allow-uncertain"]);
@@ -396,7 +396,7 @@ test("invalid audit flags are rejected before audit storage or network access in
   assert.match(result.stderr, /--sticky must be true or false/);
   assert.match(result.stderr, /--skip requires a non-empty label/);
   assert.equal(github.reads(), 0);
-  await assert.rejects(readdir(join(f.stateDir, "audits")), { code: "ENOENT" });
+  await assert.rejects(readdir(join(f.stateDir, "repos")), { code: "ENOENT" });
 });
 
 test("matching cached assessments do not expire", { timeout: 20_000 }, async (t) => {
@@ -405,11 +405,11 @@ test("matching cached assessments do not expire", { timeout: 20_000 }, async (t)
   const f = await fixture(t, (body, response) => assess(body, response, ++calls), { entrypoint: audit, github: github.handler });
   await f.run("", [url]);
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
-  // Exercise the persisted v2 state protocol with an assessment that has aged since it was saved.
-  const runs = defineDoc<JsonObject>({ kind: "app.review-audit-runs", version: 2, scope: "session", initial: () => ({}) });
+  // Exercise the persisted per-PR state protocol with an assessment that has aged since it was saved.
+  const runs = defineDocFamily<JsonObject, null>({ kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({}) });
   try {
     await session.commit(async (tx) => {
-      const doc = await tx.doc(runs);
+      const doc = await tx.doc(runs, "9", null);
       assert.ok(doc.latestSuccess && typeof doc.latestSuccess === "object" && !Array.isArray(doc.latestSuccess));
       doc.latestSuccess.assessedAt = "2000-01-01T00:00:00.000Z";
       doc.latestSuccess.lastCheckedAt = "2000-01-01T00:00:00.000Z";
@@ -463,7 +463,7 @@ test("unfinished snapshots containing marked audit output require --force to res
   // Model an unfinished snapshot saved before audit-output filtering was introduced.
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
   try {
-    const state = await session.snapshot(auditRuns, BACKGROUND_CONTEXT);
+    const state = await session.snapshot(auditRuns, "9", BACKGROUND_CONTEXT);
     assert.ok(state?.active);
     const active = state.active;
     await session.commit(async (tx) => {
@@ -578,7 +578,7 @@ test("directory-local audit databases are ignored and left untouched", { timeout
   assert.deepEqual(await readFile(legacy), original);
 });
 
-test("existing v1 controller state migrates without being mistaken for a cached assessment", { timeout: 20_000 }, async (t) => {
+test("legacy per-PR databases are retained untouched and never imported into repo state", { timeout: 20_000 }, async (t) => {
   const github = evidence();
   let calls = 0;
   const f = await fixture(t, (body, response) => assess(body, response, ++calls), { entrypoint: audit, github: github.handler });
@@ -586,15 +586,19 @@ test("existing v1 controller state migrates without being mistaken for a cached 
   await mkdir(directory, { recursive: true });
   // The v1 per-PR key and controller document shape are independent compatibility contracts.
   const key = createHash("sha256").update("https://github.com/acme/project#9").digest("hex").slice(0, 20);
-  const session = createSession(await openNodeSqliteStorage(join(directory, `${key}.sqlite`)));
+  const legacyPath = join(directory, `${key}.sqlite`);
+  const session = createSession(await openNodeSqliteStorage(legacyPath));
   const legacy = defineDoc<JsonObject>({ kind: "app.review-audit-runs", version: 1, scope: "session", initial: () => ({ active: null, complete: true }) });
   try {
     await session.commit(async (tx) => { await tx.doc(legacy); }, BACKGROUND_CONTEXT);
   } finally { await session.close(BACKGROUND_CONTEXT); }
+  const original = await readFile(legacyPath);
   const output = await f.run("", [url]);
   assert.match(output, /Assessment 1/);
   assert.doesNotMatch(output, /Reusing.*assessment/);
   const cached = await f.run("", [url]);
   assert.match(cached, /Reusing.*assessment/);
   assert.equal(calls, 1);
+  assert.deepEqual(await readFile(legacyPath), original);
+  await storagePath(f.stateDir);
 });

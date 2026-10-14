@@ -73,7 +73,7 @@ function failureDetails(error: unknown): string {
   return details.filter(Boolean).join(": ");
 }
 
-function github() {
+function github(signal?: AbortSignal) {
   const token = getGitHubToken();
   if (!token) throw new Error("GitHub authentication required. Run gh auth login or set GITHUB_TOKEN/GH_TOKEN.");
   const base = (process.env.GITHUB_API_URL || "https://api.github.com").trim().replace(/\/+$/, "");
@@ -91,7 +91,7 @@ function github() {
     const endpoint = `${method} ${diagnostic(url.href)}`;
     let response: Response;
     try {
-      response = await proxyFetch(input, { ...options, signal: AbortSignal.timeout(30_000) });
+      response = await proxyFetch(input, { ...options, signal: AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : []), ...(options.signal ? [options.signal] : [])]) });
     } catch (error) {
       throw new Error(`GitHub request failed: ${endpoint}\n${diagnostic(failureDetails(error))}`, { cause: error });
     }
@@ -145,13 +145,13 @@ function github() {
   return { token, base, graphql, fetcher, request, pages };
 }
 
-export async function fetchPullRequest(target: ReviewTarget): Promise<PullRequest> {
-  const client = github();
+export async function fetchPullRequest(target: ReviewTarget, signal?: AbortSignal): Promise<PullRequest> {
+  const client = github(signal);
   return client.request<PullRequest>(`${client.base}/repos/${target.owner}/${target.repo}/pulls/${target.pr}`);
 }
 
-export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest, startedAt: string): Promise<ReviewSnapshot> {
-  const client = github();
+export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest, startedAt: string, signal?: AbortSignal): Promise<ReviewSnapshot> {
+  const client = github(signal);
   const path = `/repos/${target.owner}/${target.repo}/pulls/${target.pr}`;
   if (!pr.head.repo || !pr.base.repo || !/^[a-f\d]{40}$/i.test(pr.head.sha) || !/^[a-f\d]{40}$/i.test(pr.base.sha)) {
     throw new Error("PR repositories or immutable commit SHAs are unavailable");
@@ -225,11 +225,11 @@ export function isAuditComment(body: string | null | undefined): boolean {
 }
 
 export async function postAuditComment(target: ReviewTarget, body: string, {
-  sticky = true, apply = false, reused = false,
-}: { sticky?: boolean; apply?: boolean; reused?: boolean } = {}): Promise<{
+  sticky = true, apply = false, reused = false, signal,
+}: { sticky?: boolean; apply?: boolean; reused?: boolean; signal?: AbortSignal } = {}): Promise<{
   action: "posted" | "updated" | "unchanged"; url: string | null;
 }> {
-  const client = github();
+  const client = github(signal);
   const path = `/repos/${target.owner}/${target.repo}/issues`;
   let existing: RawComment | undefined;
   if (sticky) {
@@ -252,8 +252,8 @@ export async function postAuditComment(target: ReviewTarget, body: string, {
   return { action, url: comment.html_url };
 }
 
-export async function approveReview(snapshot: ReviewSnapshot, apply = false): Promise<void> {
-  const client = github();
+export async function approveReview(snapshot: ReviewSnapshot, apply = false, signal?: AbortSignal): Promise<void> {
+  const client = github(signal);
   const { owner, repo, pr } = snapshot.target;
   const path = `${client.base}/repos/${owner}/${repo}/pulls/${pr}`;
   const latest = await client.request<PullRequest>(path);
@@ -264,11 +264,11 @@ export async function approveReview(snapshot: ReviewSnapshot, apply = false): Pr
   if (apply) await client.request(`${path}/reviews`, { event: "APPROVE", commit_id: snapshot.headSha });
 }
 
-export async function readGithubFile(snapshot: ReviewSnapshot, path: string, revision: "head" | "base", offset: number, limit: number) {
+export async function readGithubFile(snapshot: ReviewSnapshot, path: string, revision: "head" | "base", offset: number, limit: number, signal?: AbortSignal) {
   if (path.split("/").some((part) => !part || part === "." || part === "..") || path.includes("\\") || path.startsWith("/")) {
     throw new Error("Expected a repository-relative file path without traversal");
   }
-  const client = github();
+  const client = github(signal);
   const sha = revision === "head" ? snapshot.headSha : snapshot.baseSha;
   const repository = revision === "head" ? snapshot.headRepository : snapshot.baseRepository;
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
