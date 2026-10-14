@@ -374,6 +374,10 @@ const MAX_LISTED_FILES = 20;
 function excludedPaths(snapshot: ReviewSnapshot): string[] {
   return snapshot.files.filter((file) => file.excluded).map((file) => file.path);
 }
+/** GitHub omits counts and patches for some files when the PR diff is too large. A rename can legitimately have neither. */
+function uncountedFile(file: ChangedFile): boolean {
+  return file.lines === 0 && file.patch === null && file.status !== "renamed";
+}
 function outputExcludedFiles(paths: string[], log: (message: string) => void): void {
   log(`[audit] Excluded ${paths.length} changed file${paths.length === 1 ? "" : "s"} (--exclude):`);
   for (const path of paths.slice(0, MAX_LISTED_FILES)) log(stripControlCharacters(`[audit]   - ${path}`));
@@ -699,14 +703,19 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     let changedLines = (pr.additions ?? 0) + (pr.deletions ?? 0);
     let excluded: ChangedFile[] = [];
     let excludedLines = 0;
+    let uncounted = 0;
     if (changedLines > MAX_CHANGED_LINES && options.exclude?.length) {
       // The PR's totals include excluded files, so measure what remains from the per-file counts.
       excluded = (await fetchChangedFiles(target, pr, context.abortSignal)).filter(isExcluded);
-      excludedLines = excluded.reduce((sum, file) => sum + file.lines, 0);
+      // Files without counts stay in the total: subtracting an unknown size would understate it.
+      const counted = excluded.filter((file) => !uncountedFile(file));
+      excludedLines = counted.reduce((sum, file) => sum + file.lines, 0);
+      uncounted = excluded.length - counted.length;
       changedLines -= excludedLines;
     }
     if (changedLines > MAX_CHANGED_LINES) {
       log(`[audit] Skipping ${target.url}: PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`);
+      if (uncounted) log(`[audit] GitHub gave no line counts for ${uncounted} excluded file${uncounted === 1 ? "" : "s"}, so ${uncounted === 1 ? "it still counts" : "they still count"} toward the limit.`);
       if (excluded.length) outputExcludedFiles(excluded.map((file) => file.path), log);
       return;
     }

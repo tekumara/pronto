@@ -15,7 +15,8 @@ const commentUrl = (id: number) => `${prUrl}#discussion_r${id}`;
 // GitHub and the model are external HTTP fixtures. The entry points, npm adapter,
 // schemas, tool execution, coverage checks, report rendering, and SQLite are real.
 function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; state?: "open" | "closed"; labels?: string[];
-  /** 35000 changed lines in total, 150 of them in src/access.ts. */ large?: boolean } = {}) {
+  /** 35000 changed lines in total, 150 of them in src/access.ts. */ large?: boolean;
+  /** GitHub returns src/other.ts without counts or patch, as it does for very large PRs. */ uncountedOther?: boolean } = {}) {
   let prRequests = 0;
   const requests: string[] = [];
   const handle = async (request: IncomingMessage, response: ServerResponse) => {
@@ -70,7 +71,7 @@ function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; m
       json([comment(301, "Looks good", { state: "APPROVED" }), comment(302, "Review summary: see access check finding", { state: "COMMENTED" })]);
     } else if (url.pathname === "/github/repos/acme/demo/pulls/7/files") {
       if (url.searchParams.get("page") === "2") json([{ filename: "src/other.ts", status: "modified",
-        ...(options.large ? { additions: 29_900, deletions: 4_950 } : {}) }]);
+        ...(options.large && !options.uncountedOther ? { additions: 29_900, deletions: 4_950 } : {}) }]);
       else json([{ filename: "src/access.ts", status: "modified", patch: "@@ -1 +1 @@\n-old\n+new",
         ...(options.large ? { additions: 100, deletions: 50 } : {}) }],
         "/github/repos/acme/demo/pulls/7/files?page=2");
@@ -220,6 +221,16 @@ test("--exclude still skips a PR that stays over 10000 lines, and reports the ex
   assert.ok(output.includes("[audit] Excluded 1 changed file (--exclude):\n[audit]   - src/access.ts\n"));
   assert.doesNotMatch(output, /Fetching|Verdict:/);
   assert.ok(!github.requests.some((path) => path.includes("/comments")), "no review evidence is fetched for a skipped PR");
+});
+
+test("--exclude does not subtract an excluded file that GitHub returned without line counts", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence({ large: true, uncountedOther: true });
+  const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), { entrypoint: resolve("audit.ts"), github: github.handle });
+  const output = await f.run("", [prUrl, "--exclude", "src/other.ts"]);
+  assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR changes 35000 lines, more than the 10000 line limit.`));
+  assert.ok(output.includes("[audit] GitHub gave no line counts for 1 excluded file, so it still counts toward the limit.\n"));
+  assert.ok(output.includes("[audit] Excluded 1 changed file (--exclude):\n[audit]   - src/other.ts\n"));
+  assert.doesNotMatch(output, /Fetching|Verdict:/);
 });
 
 test("--exclude brings an oversized PR under the limit and withholds the excluded patches from the audit", { timeout: 20000 }, async (t) => {
