@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { resolve } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
@@ -77,13 +78,6 @@ function githubEvidence(options: {
     }
     assert.equal(request.method, path === "/github/graphql" ? "POST" : "GET");
     if (path === "/github/graphql") {
-      const chunks = [];
-      for await (const chunk of request) chunks.push(chunk);
-      const { query } = JSON.parse(Buffer.concat(chunks).toString());
-      if (/\bviewer\s*\{/.test(query)) {
-        json({ data: { viewer: { login: state.login } } });
-        return;
-      }
       json({ data: { repository: { pullRequest: { reviewThreads: {
         pageInfo: { hasNextPage: false, endCursor: null },
         nodes: options.empty ? [] : [{ isResolved: false, isOutdated: false, comments: { nodes: [{ fullDatabaseId: "1" }] } }],
@@ -174,8 +168,8 @@ for (const status of ["addressed", "uncertain"] as const) {
       assert.match(posted, /PR approved/);
       const rechecked = await f.run("", [url, "--skip-approved=false", "--approve", "--apply"]);
       assert.match(rechecked, /Reusing saved assessment/);
-      assert.match(rechecked, /Comment skipped: matching verdict review already exists/);
-      assert.match(rechecked, /Approval already exists/);
+      assert.match(rechecked, /Comment skipped: matching verdict review recorded locally/);
+      assert.match(rechecked, /Approval previously submitted/);
       assert.doesNotMatch(rechecked, /Verdict comment posted|PR approved/);
       assert.equal(github.approvals.length, 1, "repeating approval must not submit another review");
       assert.equal(calls, 1, "an approval review carrying the verdict must not invalidate the cache either");
@@ -189,7 +183,7 @@ for (const status of ["addressed", "uncertain"] as const) {
   });
 }
 
-test("--apply skips duplicate verdict reviews across CLI, chat and forced refreshes without touching earlier comments", { timeout: 20000 }, async (t) => {
+test("--apply skips duplicate verdict reviews using local history across directories, CLI, chat and forced refreshes", { timeout: 20000 }, async (t) => {
   // Audit comments left by earlier versions are neither edited nor assessed as evidence.
   const seeds = [
     { ...issueComment(10, auditBody), updated_at: "2026-06-01T00:00:00Z" },
@@ -217,21 +211,23 @@ test("--apply skips duplicate verdict reviews across CLI, chat and forced refres
   assert.ok(first.includes(`[audit] Verdict comment posted to the PR: ${url}#pullrequestreview-100`));
   assert.equal(github.comments.length, 1, "an assessment first run as a preview can still be published");
 
-  // The matching review must be found beyond the first REST page.
-  github.reviews.unshift({ ...issueComment(90, auditBody), state: "COMMENTED", commit_id: sha });
+  // A later GitHub edit must not change the local submission receipt.
+  github.reviews[0].body = `Edited outside Pronto\n\n${auditMarker}`;
   const published = structuredClone(github.reviews);
   const cachedPreview = await f.run("", [url]);
-  assert.match(cachedPreview, /Comment would be skipped: matching verdict review already exists/);
-  const cached = await f.run("", ["--apply", url, "local/test"]);
+  assert.match(cachedPreview, /Comment would be skipped: matching verdict review recorded locally/);
+  const otherCwd = join(f.directory, "other-project");
+  await mkdir(otherCwd);
+  const cached = await f.run("", ["--apply", url, "local/test"], { cwd: otherCwd });
   assert.match(cached, /Reusing saved assessment/);
-  assert.ok(cached.includes(`Comment skipped: matching verdict review already exists: ${url}#pullrequestreview-100`));
+  assert.ok(cached.includes(`Comment skipped: matching verdict review recorded locally: ${url}#pullrequestreview-100`));
   assert.doesNotMatch(cached, /Verdict comment posted/);
   const chat = await f.run(`/audit --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
-  assert.match(chat, /Comment skipped: matching verdict review already exists/);
+  assert.match(chat, /Comment skipped: matching verdict review recorded locally/);
   assert.equal(calls, 1, "publishing or skipping output must not invalidate the assessment cache");
 
   const forced = await f.run("", ["--force", "--apply", url]);
-  assert.match(forced, /Comment skipped: matching verdict review already exists/);
+  assert.match(forced, /Comment skipped: matching verdict review recorded locally/);
   assert.equal(calls, 2, "--force refreshes the assessment, not an unchanged verdict review");
   assert.deepEqual(github.reviews, published, "matching reviews must not be posted again or edited");
   assert.equal(github.attempts.length, 1);
@@ -252,13 +248,13 @@ test("--apply skips duplicate verdict reviews across CLI, chat and forced refres
 
   github.state.login = "another-auditor";
   const otherAccount = await f.run("", ["--apply", url]);
-  assert.match(otherAccount, /Verdict comment posted/);
-  assert.equal(github.comments.length, 4, "another account's matching review must not suppress this account's review");
-  assert.equal(calls, 4, "changing the publishing account must not require a fresh assessment");
+  assert.match(otherAccount, /Comment skipped: matching verdict review recorded locally/);
+  assert.equal(github.comments.length, 3, "local review submission history is shared across GitHub accounts");
+  assert.equal(calls, 4, "changing the GitHub account must not require a fresh assessment");
   assert.deepEqual(github.issueComments, original, "earlier audit comments must not change and no issue comment is created");
 });
 
-test("dismissed approvals and later change requests do not suppress a new approval", { timeout: 20000 }, async (t) => {
+test("local approval history is not reconciled with GitHub dismissals, change requests or deletions", { timeout: 20000 }, async (t) => {
   const github = githubEvidence();
   let calls = 0;
   const f = await fixture(t, (body, response) => {
@@ -271,14 +267,37 @@ test("dismissed approvals and later change requests do not suppress a new approv
 
   github.reviews[0].state = "DISMISSED";
   const dismissed = await f.run("", args);
-  assert.match(dismissed, /PR approved/);
-  assert.equal(github.approvals.length, 2, "a dismissed review is no longer an active approval");
+  assert.match(dismissed, /Approval previously submitted/);
+  assert.equal(github.approvals.length, 1, "a remote dismissal does not remove the local receipt");
 
   github.reviews.push({ ...issueComment(200, auditBody), state: "CHANGES_REQUESTED", commit_id: sha });
   const requested = await f.run("", args);
-  assert.match(requested, /PR approved/);
-  assert.equal(github.approvals.length, 3, "a later request for changes supersedes the matching approval");
-  assert.equal(calls, 1, "publishing state changes must not invalidate the assessment cache");
+  assert.match(requested, /Approval previously submitted/);
+  assert.equal(github.approvals.length, 1, "local review submission history does not track later GitHub decisions");
+
+  github.reviews.length = 0;
+  const deleted = await f.run("", args);
+  assert.match(deleted, /Approval previously submitted/);
+  assert.equal(github.attempts.length, 1, "a deleted review is still recorded locally");
+  assert.equal(calls, 1);
+});
+
+test("a fresh local history does not adopt matching reviews from GitHub", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  let calls = 0;
+  const f = await fixture(t, (body, response) => {
+    calls++;
+    assess(body, response);
+  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  await f.run("", [url, "--apply"]);
+  assert.equal(github.comments.length, 1);
+
+  const fresh = await f.run("", [url, "--apply"], {
+    env: { PRONTO_STATE_DIR: join(f.directory, "fresh-state") },
+  });
+  assert.match(fresh, /Verdict comment posted/);
+  assert.equal(github.comments.length, 2, "GitHub reviews alone do not count as local review submission history");
+  assert.equal(calls, 2, "a fresh state directory has neither an assessment nor a submission receipt");
 });
 
 test("terminal reports number each finding and verdict comments keep open findings visible with collapsed context", { timeout: 20000 }, async (t) => {
@@ -444,7 +463,7 @@ for (const awaiting of [undefined, "invented-person"]) {
   });
 }
 
-test("retrying an accepted review after a lost response skips the duplicate using GitHub state", { timeout: 20000 }, async (t) => {
+test("a lost response leaves no local submission receipt, so retrying can duplicate an accepted review", { timeout: 20000 }, async (t) => {
   const github = githubEvidence();
   github.state.loseResponse = true;
   let calls = 0;
@@ -459,41 +478,34 @@ test("retrying an accepted review after a lost response skips the duplicate usin
   assert.match(failed.stderr, /GitHub request failed \(502\)/);
   assert.equal(github.comments.length, 1, "the server accepted the review despite the failed response");
 
+  github.state.loseResponse = false;
   const retry = await f.run("", [url, "--apply"]);
   assert.match(retry, /Reusing saved assessment/);
-  assert.match(retry, /Comment skipped: matching verdict review already exists/);
+  assert.match(retry, /Verdict comment posted/);
   assert.equal(calls, 1);
-  assert.equal(github.attempts.length, 1, "no second POST is made even without a successful local publication receipt");
+  assert.equal(github.attempts.length, 2, "without a local receipt, GitHub's earlier acceptance is unknown");
+
+  const repeated = await f.run("", [url, "--apply"]);
+  assert.match(repeated, /Comment skipped: matching verdict review recorded locally/);
+  assert.equal(github.attempts.length, 2, "the successful retry saved a receipt for later invocations");
 });
 
-test("a failed duplicate lookup posts nothing and retains the completed assessment for retry", { timeout: 20000 }, async (t) => {
+test("submitting an audit review does not require a separate GitHub duplicate lookup after assessment", { timeout: 20000 }, async (t) => {
   const github = githubEvidence();
-  let failLookup = false;
-  let calls = 0;
+  let assessed = false;
   const f = await fixture(t, (body, response) => {
-    calls++;
-    failLookup = true; // Fail the final lookup, after evidence has been fetched and assessed.
+    assessed = true;
     assess(body, response);
   }, { entrypoint: resolve("audit.ts"), github: (request, response) => {
-    if (failLookup && request.method === "GET" && request.url?.includes("/reviews")) {
+    if (assessed && request.method === "GET" && request.url?.includes("/reviews")) {
       response.writeHead(503).end("Review lookup unavailable");
       return;
     }
     return github.handler(request, response);
   } });
-  const { child, done } = f.start([url, "--apply"]);
-  child.stdin.end();
-  const failed = await done;
-  assert.equal(failed.code, 1);
-  assert.match(failed.stderr, /GitHub request failed \(503\)/);
-  assert.equal(github.attempts.length, 0, "a failed duplicate check must not fall through to posting");
-
-  failLookup = false;
-  const retry = await f.run("", [url, "--apply"]);
-  assert.match(retry, /Reusing saved assessment/);
-  assert.match(retry, /Verdict comment posted/);
-  assert.equal(github.comments.length, 1);
-  assert.equal(calls, 1);
+  const output = await f.run("", [url, "--apply"]);
+  assert.match(output, /Verdict comment posted/);
+  assert.equal(github.comments.length, 1, "only local history is needed to decide whether to post");
 });
 
 for (const action of ["comment", "approve"] as const) {
@@ -517,6 +529,7 @@ for (const action of ["comment", "approve"] as const) {
 
     const cached = await f.run("", [url]);
     assert.match(cached, /Reusing saved assessment/);
+    assert.match(cached, /Comment would be posted/, "a failed write must not create a submission receipt");
     assert.equal(calls, 1, "a failed write must not invalidate the completed assessment");
     assert.equal(github.attempts.length, 1, "approval intent must not persist");
   });
@@ -578,7 +591,7 @@ for (const { statuses, migrationStatus } of [
 
     const fresh = await f.run("", ["--force", "--apply", ...flags, url]);
     assert.match(fresh, verdict);
-    assert.match(fresh, /Comment skipped: matching verdict review already exists/);
+    assert.match(fresh, /Comment skipped: matching verdict review recorded locally/);
     assert.match(fresh, /Approval skipped: database migration/);
     assert.equal(calls, 2);
     assert.equal(github.comments.length, 1);

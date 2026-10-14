@@ -10,7 +10,7 @@ import {
 import { openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { compileExclusions } from "./exclusions.ts";
-import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findApproval, isAuditComment, parseReviewTarget, postAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findApproval, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -51,6 +51,13 @@ const AuditRuns = defineDocFamily<{
 }, null>({
   kind: "app.review-audit-runs", version: 1, scope: "session", family: true,
   initial: () => ({ active: null, controllerTask: null, complete: true, restartModel: null, latestSuccess: null }),
+});
+// Locally recorded submitted audit reviews, shared across audit attempts and entry points for this PR.
+const SubmittedAuditReviews = defineDocFamily<{
+  reviews: Record<string, { headSha: string; event: "COMMENT" | "APPROVE"; url: string; recordedAt: string }>;
+}, null>({
+  kind: "app.submitted-audit-reviews", version: 1, scope: "session", family: true,
+  initial: () => ({ reviews: {} }),
 });
 // Legacy conversations have no identity: retain their reports, but never guess which policy produced them.
 const AuditIdentity = defineDoc<{ fingerprint: string | null; policy: string | null }>({
@@ -530,9 +537,9 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
   return stripControlCharacters(sections.join("\n\n"));
 }
 
-async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined, options: {
+async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined, options: {
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
-}, log: (message: string) => void, signal?: AbortSignal): Promise<void> {
+}, log: (message: string) => void, context: Context): Promise<void> {
   const approvalBlock = options.approveMigrations ? null : migrationApprovalBlock(databaseMigration);
   log(`\n${formatReport(snapshot, assessments, approvalBlock)}\n`);
   const body = formatComment(snapshot, assessments, approvalBlock);
@@ -547,19 +554,37 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
     else if (approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding)) approve = true;
     else skipped = "outstanding or uncertain findings remain.";
   }
+  const event = approve ? "APPROVE" : "COMMENT";
+  // Fetch times describe collection, not a change to the verdict. Keep all other content in the match.
+  const fingerprint = digest({ headSha: snapshot.headSha, event,
+    body: body.trimEnd().replace(/^(- audited head: `[a-f\d]{40}`\n)- evidence fetched: .*\n/im, "$1"),
+  });
+  const prKey = String(snapshot.target.pr);
+  const history = await harness.snapshot(SubmittedAuditReviews, prKey, context);
+  const existing = history?.reviews[fingerprint];
   // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const review = await postAuditReview(snapshot, body, { approve, apply: options.apply, signal });
-  const existing = review?.posted === false;
+  const url = await submitAuditReview(snapshot, body, { approve, apply: !!options.apply && !existing, signal: context.abortSignal });
+  if (url) {
+    try {
+      // Finish the receipt even if cancellation arrives after GitHub's successful response.
+      await harness.commit(async (tx) => {
+        const submittedReviews = await tx.doc(SubmittedAuditReviews, prKey, null);
+        submittedReviews.reviews[fingerprint] = { headSha: snapshot.headSha, event, url, recordedAt: new Date().toISOString() };
+      }, BACKGROUND_CONTEXT);
+    } catch (error) {
+      throw new Error(stripControlCharacters(`Verdict review was submitted at ${url}, but local review submission history could not be saved. Check the PR before retrying.`), { cause: error });
+    }
+  }
   if (existing) {
-    log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Comment would be skipped" : "[audit] Comment skipped"}: matching verdict review already exists: ${review.url}`));
+    log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Comment would be skipped" : "[audit] Comment skipped"}: matching verdict review recorded locally: ${existing.url}`));
   } else {
     log(dryRun ? `[audit:dry-run] Comment would be posted${approve ? " with the approval review" : ""}.`
-      : stripControlCharacters(`[audit] Verdict comment posted to the PR${approve ? " with the approval review" : ""}: ${review!.url}`));
+      : stripControlCharacters(`[audit] Verdict comment posted to the PR${approve ? " with the approval review" : ""}: ${url}`));
   }
   if (skipped) {
     log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${skipped}`));
   } else if (approve) {
-    log(existing ? `${dryRun ? "[audit:dry-run]" : "[audit]"} Approval already exists at ${snapshot.headSha}`
+    log(existing ? `${dryRun ? "[audit:dry-run]" : "[audit]"} Approval previously submitted at ${snapshot.headSha}`
       : dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}` : `[audit] PR approved at ${snapshot.headSha}`);
   }
 }
@@ -788,7 +813,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           }, context);
           log(`[audit] Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`);
           outputSnapshotExclusions(snapshot, options.exclude, log);
-          await outputReport(saved.snapshot, saved.report, saved.databaseMigration, options, log, context.abortSignal);
+          await outputReport(harness, saved.snapshot, saved.report, saved.databaseMigration, options, log, context);
           return;
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
@@ -863,7 +888,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       }
       throw new Error(stripControlCharacters(`Agent finished without a complete assessment.${reason} No verdict was produced.`));
     }
-    await outputReport(snapshot, saved.report, saved.databaseMigration, options, log, context.abortSignal);
+    await outputReport(harness, snapshot, saved.report, saved.databaseMigration, options, log, context);
   } finally {
     await stream?.stop();
   }

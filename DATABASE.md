@@ -66,6 +66,7 @@ The table stores the document's identity, owner and history policy, not its actu
 | `app.review-audit` | Saved evidence, accepted assessment and inspected file URLs |
 | `app.review-audit-identity` | Evidence-and-policy fingerprint and policy hash |
 | `app.review-audit-runs` | One family member per PR: current attempt, controller task, restart intent and cache pointer |
+| `app.submitted-audit-reviews` | One family member per PR: submitted audit reviews used to skip duplicate writes |
 
 #### `document_revisions`
 
@@ -235,6 +236,13 @@ The application stores these logical documents, not separate tables for each kin
 | `app.review-audit` | Conversation | `snapshot`: PR details, pinned commits, comments, replies, thread states, changed files and patches. `report`: accepted findings assessments, initially `null`. `databaseMigration`: model classification (`migration`, `not-migration` or `uncertain`) and reason, initially `null` and absent in older reports. `inspected`: URLs of remote file ranges read by tools. |
 | `app.review-audit-identity` | Conversation | `fingerprint`: evidence and policy hash. `policy`: model and auditor configuration hash. Older conversations may not have this document. |
 | `app.review-audit-runs` | Session family, keyed by PR number as a string | `active`: latest admitted conversation ID. `controllerTask`: its durable controller task ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
+| `app.submitted-audit-reviews` | Session family, keyed by PR number as a string | `reviews`: receipts for submitted audit reviews, keyed by verdict/head/review-type fingerprint. Each receipt contains `headSha`, `event`, `url` and `recordedAt`. |
+
+The session-scoped `app.submitted-audit-reviews` family is also keyed by PR number as a string. Its `reviews` map holds one receipt per submitted-review fingerprint. Each receipt stores `headSha`, review `event` (`COMMENT` or `APPROVE`), GitHub review `url` and `recordedAt`. The fingerprint is a SHA-256 hash of the head, review event and rendered verdict body, ignoring evidence-fetch times and trailing whitespace. It is separate from the assessment cache fingerprint.
+
+`recordedAt` is the local receipt timestamp, not GitHub's `submitted_at` value. Earlier experimental receipt schemas are not migrated; an existing GitHub review without a receipt in this document can be submitted again.
+
+Review submission receipts are the source of truth for duplicate prevention. They are shared across audit attempts, working directories, CLI, chat and GitHub accounts using this repository database. They are created only after an acknowledged GitHub review submission, never for a preview or failed request. They are not reconstructed from GitHub, so external edits, deletions, dismissals and later review decisions do not change them. GitHub's write and the receipt commit are not atomic: a lost response or interruption before the commit can leave a posted review without a local receipt. That review can be posted again on retry.
 
 See [How findings are stored](#how-findings-are-stored) for the report structure, finding fields and relationship between sources and finding counts.
 
@@ -249,6 +257,9 @@ Expect these changes across invocations:
 | Reuse an unchanged assessment | No new conversation, submission or assessment. Append an `app.review-audit-recheck` entry to the cached conversation and update `lastCheckedAt`. The receipt records the fingerprint, new check's snapshot ID and fetch window, not another full snapshot. Original evidence and report remain unchanged. |
 | Force a restart | Save restart intent, cancel that PR's unfinished work if present, then create a new conversation when fresh evidence is admitted. Keep the cancelled conversation's existing evidence and transcript. |
 | Failed attempt | Keep any admitted conversation and its partial history. The report may remain `null`; the previous successful cache is not replaced. |
+| Post a verdict with `--apply` | After GitHub acknowledges the review, add its fingerprint and receipt to that PR's `app.submitted-audit-reviews` document. The completed assessment is unchanged. |
+| Skip a locally recorded verdict | No new review submission receipt. A normal cache recheck can still append its own evidence-check receipt and update `lastCheckedAt`. |
+| Preview or failed GitHub request | No review submission receipt is created. The assessment and its cache can still be saved normally. |
 
 A report can be saved before its submission finishes. Its presence alone does not establish a successful audit. Before the initial evidence is admitted, an interrupted fetch leaves no new conversation or snapshot, although a force-restart intent may already be saved.
 
