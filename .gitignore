@@ -2,3 +2,4 @@ node_modules/
 .pi-durable/
 # roborev snapshots
 /.roborev/
+.envrc
