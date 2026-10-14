@@ -2,11 +2,15 @@
 import { runAudits } from "./auditor.ts";
 import { createModelRuntime } from "./model.ts";
 import { AUDIT_CLI_USAGE, parseAuditOptions, resolveAuditUrl } from "./audit-options.ts";
+import { runServe } from "./serve-command.ts";
 
 async function main() {
   const args = process.argv.slice(2);
+  // A branch named serve is still selectable with --pr serve.
+  if (args[0] === "serve") return runServe(args.slice(1));
   if (args.includes("--help") || args.includes("-h")) {
     console.log(AUDIT_CLI_USAGE);
+    console.log("pronto serve [options] starts a webhook server that audits a PR when you are asked to review it; see pronto serve --help.");
     console.log("--pr <target> adds a PR to a concurrent batch. Repeat for multiple targets; flags and the optional model apply to every PR.");
     console.log("Without a target, selects the current branch's PR using gh pr view. Branch and number selection require gh; explicit URLs need no checkout.");
     console.log("--skip <label> skips the audit if the PR has that label (case-insensitive). Repeat for multiple labels; any match skips, even with --force or --apply.");

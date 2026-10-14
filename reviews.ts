@@ -174,6 +174,14 @@ export async function findApproval(target: ReviewTarget, headSha: string, signal
   return approval?.user?.login ?? null;
 }
 
+/** Login of the account the token belongs to: the one that receives review requests and submits audit reviews. */
+export async function fetchViewerLogin(signal?: AbortSignal): Promise<string> {
+  const client = github(signal);
+  const viewer = await client.request<{ login?: unknown }>(`${client.base}/user`);
+  if (typeof viewer.login !== "string" || !viewer.login) throw new Error("GitHub did not report the token's user. Use a personal access token or gh login, not an app installation token.");
+  return viewer.login;
+}
+
 async function changedFiles(client: ReturnType<typeof github>, target: ReviewTarget, pr: PullRequest): Promise<ChangedFile[]> {
   const files = await client.pages<{ filename: string; previous_filename?: string; status: string; patch?: string;
     additions?: number; deletions?: number }>(`/repos/${target.owner}/${target.repo}/pulls/${target.pr}/files?per_page=100`);

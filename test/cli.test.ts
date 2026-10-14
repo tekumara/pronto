@@ -26,6 +26,7 @@ test("npm link exposes pronto from source outside the checkout", { timeout: 2000
   assert.match(stdout, /--skip-approved.*default: true/);
   assert.match(stdout, /--skip-drafts.*default: true/);
   assert.match(stdout, /--exclude <path>/);
+  assert.match(stdout, /pronto serve \[options\] starts a webhook server/);
   assert.match(stdout, /--approve-migrations.*default: false/);
 });
 

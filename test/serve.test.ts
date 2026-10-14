@@ -1,16 +1,10 @@
 import assert from "node:assert/strict";
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { request } from "node:http";
 import { test, type TestContext } from "node:test";
 import type { Enqueued } from "../audit-queue.ts";
 import { createWebhookServer, type WebhookServerOptions } from "../serve.ts";
-
-const secret = "It's a Secret to Everybody";
-const url = "https://github.com/owner/repo/pull/42";
-const sign = (body: string, key = secret) => `sha256=${createHmac("sha256", key).update(body).digest("hex")}`;
-const reviewRequested = (login = "me") => JSON.stringify({
-  action: "review_requested", requested_reviewer: { login }, pull_request: { html_url: url, requested_reviewers: [{ login }] },
-});
+import { deliver, pullUrl as url, reviewRequested, sign, webhookSecret as secret } from "./webhook-fixtures.ts";
 
 async function start(t: TestContext, overrides: Partial<WebhookServerOptions> = {}, outcome: Enqueued = "queued") {
   const logs: string[] = [];
@@ -22,17 +16,6 @@ async function start(t: TestContext, overrides: Partial<WebhookServerOptions> = 
   const { port } = await server.listen(0, "127.0.0.1");
   t.after(() => server.close());
   return { logs, enqueued, base: `http://127.0.0.1:${port}`, server };
-}
-
-function deliver(base: string, body: string, { event = "pull_request", id = randomUUID() as string | null, signature = sign(body) as string | null, path = "/webhook" } = {}) {
-  return fetch(`${base}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json", "X-GitHub-Event": event,
-      ...(id ? { "X-GitHub-Delivery": id } : {}), ...(signature ? { "X-Hub-Signature-256": signature } : {}),
-    },
-    body,
-  });
 }
 
 test("reports health", async (t) => {

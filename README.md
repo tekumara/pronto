@@ -109,7 +109,7 @@ pronto --pr 42 --pr 43 provider/model-id --apply
 
 Progress messages identify the repository and PR number. A failed PR does not stop the others. The CLI waits for all requests and exits 1 if any fail. Findings marked outstanding or uncertain are not operational failures.
 
-Separate CLI processes cannot share a repository database concurrently. There is no daemon: use one batch invocation, or a shared auditor in your own process.
+Separate CLI processes cannot share a repository database concurrently. Use one batch invocation, run [`pronto serve`](#serve-mode), or share an auditor in your own process.
 
 ### Embed concurrent audits
 
@@ -133,6 +133,51 @@ try {
 ```
 
 An overlapping request for the same PR is rejected, including a forced restart. Pass a Chord context as the third `audit()` argument to cancel a caller's fetch or wait. Cancelling a wait does not cancel admitted model work or close another PR's harness. `close()` shuts down the owner and preserves unfinished work for recovery.
+
+## Serve mode
+
+`pronto serve` starts a server for a GitHub webhook. When someone asks for your review on a PR, GitHub sends a delivery and Pronto runs the usual audit on that PR, with the same skips, cache and verdict as the CLI.
+
+```sh
+export PRONTO_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+pronto serve --apply --approve
+```
+
+To set it up:
+
+1. Run the server where GitHub can reach it. It listens on `127.0.0.1:8080` and speaks plain HTTP, so put HTTPS in front of it with a reverse proxy or a tunnel such as smee, cloudflared or ngrok. `--host 0.0.0.0` accepts outside connections.
+2. Add a webhook to the repository or organisation. Use the payload URL `https://<host>/webhook`, content type `application/json`, the same secret as `PRONTO_WEBHOOK_SECRET`, and the **Pull requests** event only.
+3. Authenticate as for the CLI. The token must belong to a user (a personal access token or `gh auth login`), not a GitHub App installation, because that user is who Pronto reviews as.
+
+The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub rejects, or with an unavailable model. It checks all three before listening.
+
+### What starts an audit
+
+- A review requested from the token's user. Logins match ignoring case. Requests for a team or another user are ignored, even if the user belongs to that team.
+- A draft that becomes ready for review while the user is already a requested reviewer. Drafts are skipped by default, so a request made on a draft would otherwise be lost.
+
+Every other delivery is acknowledged and logged with the reason it was ignored.
+
+### Options
+
+`--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup and apply to every audit, as described in the [quick start](#quick-start). Without `--apply`, the server only logs previews.
+
+`--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
+
+### How deliveries are handled
+
+- **Verification.** The server checks the `X-Hub-Signature-256` signature over the raw body, in constant time, before it reads the payload. Bodies over 5 MiB are refused. GitHub's signature has no timestamp, so a captured delivery can be replayed. A replay only repeats an audit that GitHub reported, and the cache and verdict history stop it posting again.
+- **Responses.** The server answers before any audit runs: `202` for an accepted or duplicate request, `204` for an ignored delivery, `401` for a bad signature, `413` for an oversized body and `503` while shutting down. GitHub shows `503` as a failed delivery, so you can redeliver it.
+- **Redeliveries.** A delivery ID seen among the last 1000 is dropped.
+- **One audit per PR.** A request for a PR that is waiting changes nothing. A request for a PR that is running queues one re-run behind the PRs already waiting, because its evidence may have changed. The re-run reuses the cached assessment when the evidence is unchanged and does not submit the same verdict review again.
+- **Concurrency.** At most `--concurrency` audits run at once. The rest wait in order. Each audit makes GitHub and model requests, so keep the limit within your rate limits.
+- **Failures.** A failed audit is logged as `[serve] Audit failed for <url>` and does not affect other PRs.
+
+### Stopping the server
+
+Ctrl+C or SIGTERM stops listening and interrupts running audits. Their saved work is kept: request the review again, or run `pronto <url>`, to resume. Requests that were accepted but had not started are not saved. The server lists them as it exits, and a crash loses them, so request those reviews again.
+
+While the server runs it holds the lock on each repository database it has opened, so a CLI run against the same repository fails with "Database is already in use". Stop the server first, or request the review instead.
 
 ## How the audit works
 
@@ -475,7 +520,7 @@ Each repository has one audit database, shared across working directories and bo
 
 No separate JSON or Markdown report file is written. Evidence is saved in a Durable document and as a submitted conversation input. Remote file reads become tool results. The structured assessment is also retained in the session.
 
-Each database has a separate `<filename>.lock` file. Pronto holds an exclusive SQLite lock there until the harness closes. The operating system releases ownership after a crash, so restarts need no stale-lock cleanup. Lock files remain on disk; do not delete them while Pronto is running. One process owns each repository database. PRs within it run concurrently through one harness; a second process targeting any PR in that repo is rejected. Different repository databases can be used by different processes.
+Each database has a separate `<filename>.lock` file. Pronto holds an exclusive SQLite lock there until the harness closes. The operating system releases ownership after a crash, so restarts need no stale-lock cleanup. Lock files remain on disk; do not delete them while Pronto is running. One process owns each repository database, including a running [`pronto serve`](#serve-mode). PRs within it run concurrently through one harness; a second process targeting any PR in that repo is rejected. Different repository databases can be used by different processes.
 
 Private review text and code are sent to your selected model provider and saved locally. New state directories use permissions `0700`; new database files use `0600`. Keep the state directory private and out of version control. SQLite protects against process crashes, but the newest commits can be lost on power failure.
 
@@ -540,7 +585,7 @@ npm run check
 npm test
 ```
 
-The tests verify that `npm link` exposes the source-backed `pronto` command from another directory. They use simulated model providers and local GitHub endpoints with temporary credentials. Audit tests cover both entry points, paginated evidence, fork-head code reads, blocked shell calls, report coverage and citations, inconsistent evidence, and restart recovery. They also cover opt-in verdict comments and approvals, a new review on every `--apply` with the verdict merged into the approval, default dry-run previews and per-invocation `--apply` consent for GitHub writes, skipped approvals, commit changes before approval, posting failures, cache reuse and invalidation, no expiry, failed reassessment, forced restarts, crashes during fetching and before printing, and retaining old per-PR databases without importing them. Concurrent audit tests cover CLI and chat batches, per-PR cache isolation, same-PR admission, caller cancellation, batch failures, asynchronous proxy transport, forced restart isolation, repo-wide process locks, deferred job recovery, and recovery after SIGKILL and SIGTERM. Chat tests exercise all 4 coding tools, streamed output, saved history, and recovery after SIGKILL and SIGTERM. Storage tests cover path precedence, private permissions, shared audit history, isolated chats, process locks and ignoring directory-local databases. Tests use temporary state directories and do not contact a real model provider or GitHub. Supplied model verdicts test report rendering, validation and action rules, not the model's ability to judge whether a scope explanation is adequate.
+The tests verify that `npm link` exposes the source-backed `pronto` command from another directory. They use simulated model providers and local GitHub endpoints with temporary credentials. Audit tests cover both entry points, paginated evidence, fork-head code reads, blocked shell calls, report coverage and citations, inconsistent evidence, and restart recovery. They also cover opt-in verdict comments and approvals, a new review on every `--apply` with the verdict merged into the approval, default dry-run previews and per-invocation `--apply` consent for GitHub writes, skipped approvals, commit changes before approval, posting failures, cache reuse and invalidation, no expiry, failed reassessment, forced restarts, crashes during fetching and before printing, and retaining old per-PR databases without importing them. Concurrent audit tests cover CLI and chat batches, per-PR cache isolation, same-PR admission, caller cancellation, batch failures, asynchronous proxy transport, forced restart isolation, repo-wide process locks, deferred job recovery, and recovery after SIGKILL and SIGTERM. Serve tests cover signature verification, delivery filtering, redelivery handling, per-PR queueing and the concurrency cap, option validation, and a real server process that audits a requested review, submits its verdict once, ignores other requests and stops on SIGTERM while keeping interrupted work. Chat tests exercise all 4 coding tools, streamed output, saved history, and recovery after SIGKILL and SIGTERM. Storage tests cover path precedence, private permissions, shared audit history, isolated chats, process locks and ignoring directory-local databases. Tests use temporary state directories and do not contact a real model provider or GitHub. Supplied model verdicts test report rendering, validation and action rules, not the model's ability to judge whether a scope explanation is adequate.
 
 Pi Durable is experimental. Pi packages are pinned to 1.0.3, with `package-lock.json` included alongside the code.
 
