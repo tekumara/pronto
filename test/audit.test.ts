@@ -151,6 +151,53 @@ for (const { name, entrypoint, input, args, label } of [
   });
 }
 
+for (const { name, entrypoint, input, args } of [
+  { name: "CLI", entrypoint: resolve("audit.ts"), input: "", args: [prUrl, "--force", "--apply", "--approve"] },
+  { name: "chat", entrypoint: resolve("agent.ts"), input: `/audit --force --apply --approve ${prUrl}\n/quit\n`, args: [] },
+]) {
+  test(`${name} skips a PR changing more than 10000 lines without fetching evidence or writing to GitHub`, { timeout: 20000 }, async (t) => {
+    let reads = 0;
+    const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), {
+      entrypoint,
+      github: (request, response) => {
+        reads++;
+        assert.equal(request.method, "GET", "Oversized PRs must not mutate GitHub");
+        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Oversized PRs need no review or code evidence");
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+          merged: false, additions: 6_000, deletions: 4_001, changed_files: 40,
+          head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: null },
+        }));
+      },
+    });
+    const output = await f.run(input, args);
+    assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR changes 10001 lines, more than the 10000 line limit.`));
+    assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
+    assert.equal(reads, 1);
+  });
+}
+
+test("CLI audit does not skip a PR changing exactly 10000 lines", { timeout: 20000 }, async (t) => {
+  const requests: string[] = [];
+  const f = await fixture(t, () => assert.fail("The audit stops at the first failed evidence request"), {
+    entrypoint: resolve("audit.ts"),
+    github: (request, response) => {
+      requests.push(request.url!);
+      if (request.url === "/github/repos/acme/demo/pulls/7") {
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+          merged: false, additions: 6_000, deletions: 4_000, changed_files: 40,
+          head: { sha: headSha, repo: { full_name: "acme/demo" } }, base: { sha: baseSha, repo: { full_name: "acme/demo" } },
+        }));
+      } else response.writeHead(500).end("Evidence unavailable");
+    },
+  });
+  const { child, done } = f.start([prUrl]);
+  child.stdin.end();
+  const { stdout } = await done;
+  assert.doesNotMatch(stdout, /Skipping/);
+  assert.match(stdout, /\[audit\] Fetching /);
+  assert.ok(requests.length > 1, "evidence must be requested after the PR itself");
+});
+
 test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects unsafe calls and incomplete or uncited reports", { timeout: 20000 }, async (t) => {
   const github = githubEvidence({ state: "closed" });
   let turn = 0;

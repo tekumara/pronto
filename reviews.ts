@@ -35,6 +35,7 @@ export type ReviewSnapshot = {
 type PullRequest = {
   labels?: { name: string }[];
   merged: boolean; title: string; body: string | null; user?: { login: string } | null; changed_files: number;
+  additions?: number; deletions?: number;
   head: { sha: string; repo: { full_name: string } | null };
   base: { sha: string; repo: { full_name: string } | null };
 };

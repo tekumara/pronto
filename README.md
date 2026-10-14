@@ -53,6 +53,8 @@ pronto --skip-approved=false https://github.com/owner/repo/pull/42
 
 You can also write `--skip-approved false`. Like the label skip, this check runs after the merged and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching review evidence, calling the model or writing to GitHub, and preserves unfinished work and cached assessments. The check adds two GitHub reads: your login and the PR's reviews. The flag does not persist across invocations.
 
+PRs that change more than 10,000 lines are also skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto counts additions plus deletions from the PR's live metadata, so the check costs no extra request. It runs before fetching review evidence, calling the model or writing to GitHub.
+
 You can also run the CLI without a global link using `npm run audit -- [<number> | <branch> | <GitHub PR URL>]` from this repository.
 
 The auditor uses your saved Pi default model, or the first available model if there is no usable default. Choose a specific model by adding `provider/model-id` after an explicit target:

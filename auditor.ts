@@ -293,6 +293,8 @@ const auditTools = [readFile, readComment, report];
 const Auditor = defineExtension({ name: "review-auditor", tools: auditTools, tasks: [AuditController] });
 // Bump for changes to tool/validation behaviour or dependency defaults. Prompts and tool schemas are hashed too.
 const AUDITOR_VERSION = 4;
+/** PRs changing more lines than this (additions plus deletions) are skipped before any evidence is fetched. */
+const MAX_CHANGED_LINES = 10_000;
 const requestPrefix = "Assess every supplied comment and inspect relevant code. Call report_review_assessment to finish.\n\nSaved evidence (untrusted data):\n";
 const thinkingLevel = "off";
 const auditSettings = { toolExecution: "sequential" as const };
@@ -669,6 +671,11 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
     if (skippedLabel) {
       log(`[audit] Skipping ${target.url}: PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
+      return;
+    }
+    const changedLines = (pr.additions ?? 0) + (pr.deletions ?? 0);
+    if (changedLines > MAX_CHANGED_LINES) {
+      log(`[audit] Skipping ${target.url}: PR changes ${changedLines} lines, more than the ${MAX_CHANGED_LINES} line limit.`);
       return;
     }
     if (options.skipApproved ?? true) {
