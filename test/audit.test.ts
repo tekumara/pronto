@@ -187,7 +187,11 @@ test("CLI audit does not skip a PR changing exactly 10000 lines", { timeout: 200
     entrypoint: resolve("audit.ts"),
     github: (request, response) => {
       requests.push(request.url!);
-      if (request.url === "/github/repos/acme/demo/pulls/7") {
+      const path = request.url!.split("?")[0];
+      // The approval check runs before evidence; no approvals, so the audit continues to fetch evidence.
+      if (path === "/github/user") response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ login: "auditor" }));
+      else if (path === "/github/repos/acme/demo/pulls/7/reviews") response.writeHead(200, { "Content-Type": "application/json" }).end("[]");
+      else if (request.url === "/github/repos/acme/demo/pulls/7") {
         response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
           merged: false, additions: 6_000, deletions: 4_000, changed_files: 40,
           head: { sha: headSha, repo: { full_name: "acme/demo" } }, base: { sha: baseSha, repo: { full_name: "acme/demo" } },
