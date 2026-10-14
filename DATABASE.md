@@ -1,6 +1,6 @@
 # Database data model
 
-Both `chats/<cwd-hash>.sqlite` and `repos/<repo-hash>.sqlite` under Pronto's state directory use this schema. Each database is one Durable session. A repository session holds independent audit conversations for several PRs. Old per-PR databases in `audits/` remain untouched and are not imported.
+Both `chats/<cwd-hash>.sqlite` and `repos/<github-host>/<owner>~<repo>.sqlite` under Pronto's state directory use this schema. Each database is one Durable session. A repository session holds independent audit conversations for several PRs. Earlier hash-named repository databases in `repos/` and old per-PR databases in `audits/` remain untouched and are not imported.
 
 The default state directory is `~/.local/state/pronto`. `PRONTO_STATE_DIR` overrides it; otherwise an absolute `XDG_STATE_HOME` selects `$XDG_STATE_HOME/pronto`. See [Credentials and audit storage](README.md#credentials-and-audit-storage) for path selection and locking. The adjacent `.lock` files hold ownership locks, not conversation data.
 
@@ -222,7 +222,7 @@ The audit document definitions are in [`auditor.ts`](auditor.ts).
 
 ## Audit database contents
 
-Each repository has one database at `<state-directory>/repos/<repo-hash>.sqlite`, shared by the CLI and chat command across working directories. Its key includes the GitHub origin and lower-case owner and repository names. One process owns the database; its shared harness can run independent PR audits concurrently. The coding conversation remains separate in `<state-directory>/chats/<cwd-hash>.sqlite`.
+Each repository has one database at `<state-directory>/repos/<github-host>/<owner>~<repo>.sqlite`, shared by the CLI and chat command across working directories. The host directory is the percent-encoded, lower-case GitHub hostname; the filename uses the lower-case base-repository owner and name, separated by `~`. The host and repo components distinguish origins and repositories, while excluding PR numbers and fork head names. One process owns the database; its shared harness can run independent PR audits concurrently. Earlier hash-named repository databases in the root of `repos/` are left untouched and are not imported. The first audit using a readable name starts a fresh database. The coding conversation remains separate in `<state-directory>/chats/<cwd-hash>.sqlite`.
 
 Each newly admitted audit attempt creates an independent conversation. Its evidence, identity, controller task and PR controller pointer are saved together, before submitting work to the model. Restored model requests and remote file reads wait until their PR is selected and passes live merge-status and label checks. Deferred-provider jobs keep their opaque handles in generation-task poll checkpoints. The execution gate resolves each handle's owning conversation from those saved checkpoints before polling it; unselected jobs are neither polled nor resubmitted.
 
@@ -254,11 +254,11 @@ A report can be saved before its submission finishes. Its presence alone does no
 
 In SQLite, `conversations` identifies attempts, `entries` holds transcript and recheck records, `submissions` holds request IDs and status, and `tasks` holds execution state. Tool memos support recovery while a task is live; they are removed when its outcome is decided. `documents` identifies application and built-in `pi.*` documents. Their JSON values are stored in `document_revisions` as bases or deltas. Use Durable's snapshot API to read a materialised value rather than treating the latest delta as the whole document.
 
-For read-only inspection with Node's built-in SQLite, replace `<repo-hash>` with the hash in the database filename:
+For read-only inspection with Node's built-in SQLite, use the hostname directory and readable database filename:
 
 ```sh
 STATE_DIR="${PRONTO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pronto}"
-DB="$STATE_DIR/repos/<repo-hash>.sqlite" node --input-type=module <<'JS'
+DB="$STATE_DIR/repos/<github-host>/<owner>~<repo>.sqlite" node --input-type=module <<'JS'
 import { DatabaseSync } from 'node:sqlite';
 const db = new DatabaseSync(process.env.DB, { readOnly: true });
 try {

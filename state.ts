@@ -7,7 +7,7 @@ import type { Context } from "@earendil-works/chord";
 import { Harness, type HarnessOptions } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
-type StateTarget = { kind: "chat"; cwd: string } | { kind: "repo"; key: string };
+type StateTarget = { kind: "chat"; cwd: string } | { kind: "repo"; host: string; name: string };
 
 function stateDirectory(): string {
   const override = process.env.PRONTO_STATE_DIR;
@@ -45,9 +45,13 @@ async function lockDatabase(path: string): Promise<() => void> {
 
 /** Open private user state. Closing the harness releases ownership. */
 export async function openStateHarness(target: StateTarget, options: HarnessOptions, context: Context): Promise<Harness> {
-  const key = target.kind === "repo" ? target.key
-    : createHash("sha256").update(await realpath(target.cwd)).digest("hex").slice(0, 20);
-  const path = join(stateDirectory(), target.kind === "repo" ? "repos" : "chats", `${key}.sqlite`);
+  const root = stateDirectory();
+  const key = target.kind === "chat"
+    ? createHash("sha256").update(await realpath(target.cwd)).digest("hex").slice(0, 20)
+    : undefined;
+  const path = target.kind === "repo"
+    ? join(root, "repos", target.host, `${target.name}.sqlite`)
+    : join(root, "chats", `${key}.sqlite`);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const release = await lockDatabase(path);
   let storage: Awaited<ReturnType<typeof openNodeSqliteStorage>> | undefined;

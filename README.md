@@ -433,14 +433,16 @@ The state directory contains:
 ```text
 pronto/
 ├── repos/
-│   └── <repo-hash>.sqlite
+│   ├── <github-host>/
+│   │   └── <owner>~<repo>.sqlite
+│   └── <old-repo-hash>.sqlite  # earlier hash-named databases, if present
 ├── audits/                      # old per-PR databases, if present
 │   └── <target-hash>.sqlite
 └── chats/
     └── <cwd-hash>.sqlite
 ```
 
-Each repository has one audit database, shared across working directories and both entry points. Its key includes the GitHub origin and lower-case owner and repository names, not the PR number or fork head repository. Each PR has a separate controller document keyed by its PR number. Each assessment attempt still has an independent conversation. Chat databases are separate, keyed by the canonical absolute working directory. Symlink aliases share a chat; different worktrees do not. Both filenames use the first 20 hexadecimal characters of a SHA-256 hash.
+Each repository has one audit database, shared across working directories and both entry points. Its path uses the lower-case GitHub hostname as a directory and the lower-case base-repository owner and name separated by `~`, not the PR number or fork head repository. The hostname is percent-encoded for use as a path component. Each PR has a separate controller document keyed by its PR number. Each assessment attempt still has an independent conversation. Chat databases are separate, keyed by the canonical absolute working directory; symlink aliases share a chat, while different worktrees do not. Chat database filenames use the first 20 hexadecimal characters of a SHA-256 hash.
 
 No separate JSON or Markdown report file is written. Evidence is saved in a Durable document and as a submitted conversation input. Remote file reads become tool results. The structured assessment is also retained in the session.
 
@@ -450,7 +452,7 @@ Private review text and code are sent to your selected model provider and saved 
 
 See [Audit database contents](DATABASE.md#audit-database-contents) for the saved evidence, reports, execution state and read-only inspection commands.
 
-Pronto leaves old user-state `audits/` databases and directory-local `.pi-durable/` databases untouched. It does not migrate their records into `repos/`; the first audit in the new model fetches fresh evidence and creates a new assessment. Only the configured state directory supplies history and recovery state. If no database exists there, Pronto starts a new session. Keep any old `.pi-durable/` directory out of version control.
+Earlier hash-named repository databases in the root of `repos/`, old per-PR databases in `audits/`, and directory-local `.pi-durable/` databases are left untouched and are not imported. The first audit using the readable repository name starts a fresh database; old databases remain on disk as historical records. Only the configured state directory supplies history and recovery state. If no database exists there, Pronto starts a new session. Keep any old `.pi-durable/` directory out of version control.
 
 ## Optional interactive chat
 

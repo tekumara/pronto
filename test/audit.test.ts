@@ -223,7 +223,7 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.ok(output.includes(`[2] addressed: Null check\n    Source: inline:102 · human\n    ${commentUrl(102)}\n    GitHub thread: open, outdated`));
   assert.equal(turn, 5);
   await assert.rejects(readFile(join(f.cwd, "audit-should-not-write")), { code: "ENOENT" });
-  const files = await readdir(join(f.stateDir, "repos"));
+  const files = await readdir(join(f.stateDir, "repos", "github.com"));
   await assert.rejects(readdir(join(f.cwd, ".pi-durable")), { code: "ENOENT" });
   assert.equal(files.filter((file) => file.endsWith(".sqlite")).length, 1);
   assert.ok(files.every((file) => !/\.(json|md)$/.test(file)), "no separate report file");

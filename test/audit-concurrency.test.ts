@@ -82,10 +82,13 @@ test("CLI batches overlap PR assessments in one repo database and keep their cac
   assert.match(output, /\[acme\/demo#43\]/);
   assert.match(output, /Assessment for PR 42/);
   assert.match(output, /Assessment for PR 43/);
-  const databases = (await readdir(join(f.stateDir, "repos"))).filter((file) => file.endsWith(".sqlite"));
-  assert.equal(databases.length, 1);
-  assert.equal((await stat(join(f.stateDir, "repos", databases[0]))).mode & 0o777, 0o600);
-  assert.equal((await stat(join(f.stateDir, "repos"))).mode & 0o777, 0o700);
+  const repoRoot = join(f.stateDir, "repos");
+  const repoDirectory = join(repoRoot, "github.com");
+  const databases = (await readdir(repoDirectory)).filter((file) => file.endsWith(".sqlite"));
+  assert.deepEqual(databases, ["acme~demo.sqlite"]);
+  assert.equal((await stat(join(repoDirectory, databases[0]))).mode & 0o777, 0o600);
+  assert.equal((await stat(repoRoot)).mode & 0o777, 0o700);
+  assert.equal((await stat(repoDirectory)).mode & 0o777, 0o700);
   await assert.rejects(readdir(join(f.stateDir, "audits")), { code: "ENOENT" });
 
   github.bodies.set(42, "New concern for PR 42");
@@ -506,7 +509,7 @@ test("batch targets in different repositories have separate databases even when 
   const other = "https://github.com/acme/other/pull/42";
   await f.run("", ["--pr", urls[0], "--pr", other, "local/test"]);
   assert.deepEqual([...calls].sort(), ["demo", "other"]);
-  assert.equal((await readdir(join(f.stateDir, "repos"))).filter((file) => file.endsWith(".sqlite")).length, 2);
+  assert.deepEqual((await readdir(join(f.stateDir, "repos", "github.com"))).filter((file) => file.endsWith(".sqlite")).sort(), ["acme~demo.sqlite", "acme~other.sqlite"]);
   const cached = await f.run("", ["--pr", other, "--pr", urls[0]]);
   assert.equal((cached.match(/Reusing saved assessment/g) ?? []).length, 2);
   assert.equal(calls.length, 2);

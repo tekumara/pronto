@@ -108,7 +108,7 @@ async function setMaxTokens(agentDir: string, maxTokens: number) {
 }
 
 async function storagePath(stateDir: string) {
-  const directory = join(stateDir, "repos");
+  const directory = join(stateDir, "repos", "github.com");
   const files = (await readdir(directory)).filter((name) => name.endsWith(".sqlite"));
   assert.equal(files.length, 1);
   return join(directory, files[0]);

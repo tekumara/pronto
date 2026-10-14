@@ -572,8 +572,11 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
               return readFile.execute(...args);
             },
           }, readComment, report] }));
-          const key = createHash("sha256").update(repository).digest("hex").slice(0, 20);
-          opened = openStateHarness({ kind: "repo", key }, {
+          const repositoryUrl = new URL(target.url);
+          const owner = target.owner.toLowerCase();
+          const name = `${owner}~${target.repo.toLowerCase()}`;
+          const host = encodeURIComponent(repositoryUrl.hostname.toLowerCase());
+          opened = openStateHarness({ kind: "repo", host, name }, {
             models: gate.models, registry, settings: auditSettings, onReport: (error) => console.error(error),
             // No execution environment or coding tools: audits cannot access local files.
           }, BACKGROUND_CONTEXT).then((harness) => {
