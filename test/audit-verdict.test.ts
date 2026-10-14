@@ -47,8 +47,8 @@ function githubEvidence(options: {
   const attempts: { body: string; event: string; commit_id: string }[] = [];
   const issueComments = options.issueComments ?? (options.issueComment ? [issueComment(3, "Which roles should have access?", "human")] : []);
   const approvals: { body: string; event: string; commit_id: string }[] = [];
-  const reviews: (IssueComment & { state: string })[] = [];
-  const state = { headSha: sha, baseSha: sha };
+  const reviews: (IssueComment & { state: string; commit_id: string })[] = [];
+  const state = { headSha: sha, baseSha: sha, login: "auditor", loseResponse: false };
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     const requestUrl = new URL(request.url!, "http://fixture");
     const path = requestUrl.pathname;
@@ -68,13 +68,22 @@ function githubEvidence(options: {
         comments.push(body.body);
         posted.push(body);
         if (approving) approvals.push(body);
-        reviews.push({ ...issueComment(id, body.body), html_url: `${url}#pullrequestreview-${id}`, state: approving ? "APPROVED" : "COMMENTED" });
+        reviews.push({ ...issueComment(id, body.body, state.login), html_url: `${url}#pullrequestreview-${id}`,
+          state: approving ? "APPROVED" : "COMMENTED", commit_id: body.commit_id });
       }
+      if (state.loseResponse) response.statusCode = 502; // GitHub accepted the review, but its response was lost.
       json({ state: approving ? "APPROVED" : "COMMENTED", commit_id: body.commit_id, html_url: `${url}#pullrequestreview-${100 + reviews.length - 1}` });
       return;
     }
     assert.equal(request.method, path === "/github/graphql" ? "POST" : "GET");
     if (path === "/github/graphql") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const { query } = JSON.parse(Buffer.concat(chunks).toString());
+      if (/\bviewer\s*\{/.test(query)) {
+        json({ data: { viewer: { login: state.login } } });
+        return;
+      }
       json({ data: { repository: { pullRequest: { reviewThreads: {
         pageInfo: { hasNextPage: false, endCursor: null },
         nodes: options.empty ? [] : [{ isResolved: false, isOutdated: false, comments: { nodes: [{ fullDatabaseId: "1" }] } }],
@@ -92,7 +101,11 @@ function githubEvidence(options: {
         `<http://${request.headers.host}${path}?page=${page + 1}>; rel="next"`);
       json(issueComments.slice((page - 1) * size, page * size));
     } else if (path.endsWith("/pulls/8/reviews")) {
-      json(reviews);
+      const page = Number(requestUrl.searchParams.get("page") ?? 1);
+      const size = options.pageSize ?? 100;
+      if (page * size < reviews.length) response.setHeader("Link",
+        `<http://${request.headers.host}${path}?page=${page + 1}>; rel="next"`);
+      json(reviews.slice((page - 1) * size, page * size));
     } else {
       assert.ok(path.endsWith("/pulls/8/files"));
       json(options.files ?? []);
@@ -141,7 +154,7 @@ for (const status of ["addressed", "uncertain"] as const) {
       : await f.run(`/audit --approve --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
     assert.match(posted, verdict);
     assert.match(posted, /Verdict comment posted/);
-    assert.equal(github.comments.length, status === "addressed" ? 2 : 1, "every --apply posts a new review, even for a reused assessment");
+    assert.equal(github.comments.length, status === "addressed" ? 2 : 1, "selecting approval can publish a different review type from the same assessment");
     const latestComment = github.comments.at(-1)!;
     assert.match(latestComment, commentHeadline);
     assert.ok(latestComment.includes(`audited head: \`${sha}\``));
@@ -159,8 +172,12 @@ for (const status of ["addressed", "uncertain"] as const) {
       assert.equal(github.approvals[0].body, latestComment, "the approval review carries the verdict");
       assert.doesNotMatch(latestComment, /Reasoning and evidence|The reply explains the intentional behaviour/);
       assert.match(posted, /PR approved/);
-      const rechecked = await f.run("", [url]);
+      const rechecked = await f.run("", [url, "--skip-approved=false", "--approve", "--apply"]);
       assert.match(rechecked, /Reusing saved assessment/);
+      assert.match(rechecked, /Comment skipped: matching verdict review already exists/);
+      assert.match(rechecked, /Approval already exists/);
+      assert.doesNotMatch(rechecked, /Verdict comment posted|PR approved/);
+      assert.equal(github.approvals.length, 1, "repeating approval must not submit another review");
       assert.equal(calls, 1, "an approval review carrying the verdict must not invalidate the cache either");
     } else {
       assert.doesNotMatch(posted, /Reusing saved assessment/);
@@ -172,18 +189,17 @@ for (const status of ["addressed", "uncertain"] as const) {
   });
 }
 
-test("every --apply posts a new comment review and never touches earlier audit comments, in CLI and chat", { timeout: 20000 }, async (t) => {
-  const marker = auditMarker;
+test("--apply skips duplicate verdict reviews across CLI, chat and forced refreshes without touching earlier comments", { timeout: 20000 }, async (t) => {
   // Audit comments left by earlier versions are neither edited nor assessed as evidence.
   const seeds = [
     { ...issueComment(10, auditBody), updated_at: "2026-06-01T00:00:00Z" },
     issueComment(11, auditBody),
     issueComment(12, `PR review audit · ${url}\n\nHead: ${sha}\n\nAn unmarked report from the same account.`),
-    issueComment(13, `Someone else's report\n\n${marker}`, "another-auditor"),
-    issueComment(14, marker, null),
+    issueComment(13, `Someone else's report\n\n${auditMarker}`, "another-auditor"),
+    issueComment(14, auditMarker, null),
   ];
   const original = structuredClone(seeds);
-  const github = githubEvidence({ issueComments: seeds, pageSize: 2 });
+  const github = githubEvidence({ issueComments: seeds, pageSize: 1 });
   let status: Status = "uncertain";
   let calls = 0;
   const f = await fixture(t, (body, response) => {
@@ -196,35 +212,73 @@ test("every --apply posts a new comment review and never touches earlier audit c
   assert.equal(github.comments.length, 0);
   assert.deepEqual(github.issueComments, original, "dry-run must not change existing comments");
 
+  const first = await f.run("", ["--apply", url]);
+  assert.match(first, /Reusing saved assessment/);
+  assert.ok(first.includes(`[audit] Verdict comment posted to the PR: ${url}#pullrequestreview-100`));
+  assert.equal(github.comments.length, 1, "an assessment first run as a preview can still be published");
+
+  // The matching review must be found beyond the first REST page.
+  github.reviews.unshift({ ...issueComment(90, auditBody), state: "COMMENTED", commit_id: sha });
+  const published = structuredClone(github.reviews);
   const cachedPreview = await f.run("", [url]);
-  assert.match(cachedPreview, /Reusing saved assessment/);
-  assert.match(cachedPreview, /Comment would be posted/);
-  const cached = await f.run("", ["--apply", url]);
+  assert.match(cachedPreview, /Comment would be skipped: matching verdict review already exists/);
+  const cached = await f.run("", ["--apply", url, "local/test"]);
   assert.match(cached, /Reusing saved assessment/);
-  assert.ok(cached.includes(`[audit] Verdict comment posted to the PR: ${url}#pullrequestreview-100`));
-  assert.equal(github.reviews.length, 1, "a reused assessment still posts a new review");
-  assert.equal(calls, 1);
+  assert.ok(cached.includes(`Comment skipped: matching verdict review already exists: ${url}#pullrequestreview-100`));
+  assert.doesNotMatch(cached, /Verdict comment posted/);
+  const chat = await f.run(`/audit --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
+  assert.match(chat, /Comment skipped: matching verdict review already exists/);
+  assert.equal(calls, 1, "publishing or skipping output must not invalidate the assessment cache");
 
   const forced = await f.run("", ["--force", "--apply", url]);
-  assert.ok(forced.includes(`[audit] Verdict comment posted to the PR: ${url}#pullrequestreview-101`));
-  assert.equal(github.reviews.length, 2);
-  assert.match(github.reviews[1].body, /## Review audit · Verification needed/);
-  assert.ok(github.reviews[1].body.endsWith(marker));
-  assert.equal(calls, 2, "only the forced refresh should make another model request");
+  assert.match(forced, /Comment skipped: matching verdict review already exists/);
+  assert.equal(calls, 2, "--force refreshes the assessment, not an unchanged verdict review");
+  assert.deepEqual(github.reviews, published, "matching reviews must not be posted again or edited");
+  assert.equal(github.attempts.length, 1);
 
-  const cliPosted = await f.run("", ["--apply", url, "local/test"]);
-  assert.equal(github.reviews.length, 3);
-  assert.ok(cliPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#pullrequestreview-102`));
   status = "addressed";
-  const chatPosted = await f.run(`/audit --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
-  assert.equal(github.reviews.length, 4, "chat must also post a new review");
-  assert.ok(chatPosted.includes(`[audit] Verdict comment posted to the PR: ${url}#pullrequestreview-103`));
-  assert.match(github.reviews[3].body, /## Review audit · All actionable findings addressed/);
-  assert.match(github.reviews[2].body, /## Review audit · Verification needed/, "the previous verdict stays as posted");
+  const changed = await f.run(`/audit --force --apply ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
+  assert.match(changed, /Verdict comment posted/);
+  assert.equal(github.comments.length, 2, "a changed verdict still posts a new review");
+  assert.match(github.comments[1], /## Review audit · All actionable findings addressed/);
+  assert.deepEqual(github.reviews.slice(0, published.length), published, "earlier reviews stay as posted");
 
-  assert.deepEqual(github.posted.map((review) => [review.event, review.commit_id]), Array(4).fill(["COMMENT", sha]),
-    "without --approve every verdict is a comment review pinned to the audited head");
+  github.state.headSha = "b".repeat(40);
+  const newHead = await f.run("", ["--apply", url]);
+  assert.match(newHead, /Verdict comment posted/);
+  assert.equal(github.comments.length, 3, "the same verdict for a different head is a new review");
+  assert.deepEqual(github.posted.map((review) => [review.event, review.commit_id]),
+    [["COMMENT", sha], ["COMMENT", sha], ["COMMENT", github.state.headSha]]);
+
+  github.state.login = "another-auditor";
+  const otherAccount = await f.run("", ["--apply", url]);
+  assert.match(otherAccount, /Verdict comment posted/);
+  assert.equal(github.comments.length, 4, "another account's matching review must not suppress this account's review");
+  assert.equal(calls, 4, "changing the publishing account must not require a fresh assessment");
   assert.deepEqual(github.issueComments, original, "earlier audit comments must not change and no issue comment is created");
+});
+
+test("dismissed approvals and later change requests do not suppress a new approval", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  let calls = 0;
+  const f = await fixture(t, (body, response) => {
+    calls++;
+    assess(body, response);
+  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  const args = [url, "--skip-approved=false", "--approve", "--apply"];
+  await f.run("", args);
+  assert.equal(github.approvals.length, 1);
+
+  github.reviews[0].state = "DISMISSED";
+  const dismissed = await f.run("", args);
+  assert.match(dismissed, /PR approved/);
+  assert.equal(github.approvals.length, 2, "a dismissed review is no longer an active approval");
+
+  github.reviews.push({ ...issueComment(200, auditBody), state: "CHANGES_REQUESTED", commit_id: sha });
+  const requested = await f.run("", args);
+  assert.match(requested, /PR approved/);
+  assert.equal(github.approvals.length, 3, "a later request for changes supersedes the matching approval");
+  assert.equal(calls, 1, "publishing state changes must not invalidate the assessment cache");
 });
 
 test("terminal reports number each finding and verdict comments keep open findings visible with collapsed context", { timeout: 20000 }, async (t) => {
@@ -390,6 +444,58 @@ for (const awaiting of [undefined, "invented-person"]) {
   });
 }
 
+test("retrying an accepted review after a lost response skips the duplicate using GitHub state", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  github.state.loseResponse = true;
+  let calls = 0;
+  const f = await fixture(t, (body, response) => {
+    calls++;
+    assess(body, response);
+  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  const { child, done } = f.start([url, "--apply"]);
+  child.stdin.end();
+  const failed = await done;
+  assert.equal(failed.code, 1);
+  assert.match(failed.stderr, /GitHub request failed \(502\)/);
+  assert.equal(github.comments.length, 1, "the server accepted the review despite the failed response");
+
+  const retry = await f.run("", [url, "--apply"]);
+  assert.match(retry, /Reusing saved assessment/);
+  assert.match(retry, /Comment skipped: matching verdict review already exists/);
+  assert.equal(calls, 1);
+  assert.equal(github.attempts.length, 1, "no second POST is made even without a successful local publication receipt");
+});
+
+test("a failed duplicate lookup posts nothing and retains the completed assessment for retry", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  let failLookup = false;
+  let calls = 0;
+  const f = await fixture(t, (body, response) => {
+    calls++;
+    failLookup = true; // Fail the final lookup, after evidence has been fetched and assessed.
+    assess(body, response);
+  }, { entrypoint: resolve("audit.ts"), github: (request, response) => {
+    if (failLookup && request.method === "GET" && request.url?.includes("/reviews")) {
+      response.writeHead(503).end("Review lookup unavailable");
+      return;
+    }
+    return github.handler(request, response);
+  } });
+  const { child, done } = f.start([url, "--apply"]);
+  child.stdin.end();
+  const failed = await done;
+  assert.equal(failed.code, 1);
+  assert.match(failed.stderr, /GitHub request failed \(503\)/);
+  assert.equal(github.attempts.length, 0, "a failed duplicate check must not fall through to posting");
+
+  failLookup = false;
+  const retry = await f.run("", [url, "--apply"]);
+  assert.match(retry, /Reusing saved assessment/);
+  assert.match(retry, /Verdict comment posted/);
+  assert.equal(github.comments.length, 1);
+  assert.equal(calls, 1);
+});
+
 for (const action of ["comment", "approve"] as const) {
   test(`a failed ${action} request exits nonzero without retrying or losing the completed assessment`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence({ commentStatus: action === "approve" ? undefined : 403, approvalStatus: 403 });
@@ -472,10 +578,10 @@ for (const { statuses, migrationStatus } of [
 
     const fresh = await f.run("", ["--force", "--apply", ...flags, url]);
     assert.match(fresh, verdict);
-    assert.match(fresh, /Verdict comment posted/);
+    assert.match(fresh, /Comment skipped: matching verdict review already exists/);
     assert.match(fresh, /Approval skipped: database migration/);
     assert.equal(calls, 2);
-    assert.equal(github.comments.length, 2);
+    assert.equal(github.comments.length, 1);
     assert.equal(github.approvals.length, 0, "neither --force nor --allow-uncertain may override the migration guard");
 
     const withoutApproval = await f.run("", ["--apply", "--approve-migrations", url]);
@@ -494,7 +600,7 @@ for (const { statuses, migrationStatus } of [
     assert.doesNotMatch(allowedApply, /Approval blocked:|Approval skipped/);
     assert.equal(github.approvals.length, 1);
 
-    const guardedAgain = await f.run("", [...flags, url]);
+    const guardedAgain = await f.run("", [...flags, "--skip-approved=false", url]);
     assert.match(guardedAgain, /Approval would be skipped: database migration/);
     assert.equal(github.approvals.length, 1, "allowing migrations must not persist to later invocations");
     assert.equal(calls, 2, "allowing migration approval must not invalidate the assessment cache");
@@ -535,7 +641,7 @@ for (const { statuses, approve, chat, allowUncertain, approveMigrations } of [
     const output = chat
       ? await f.run(`/audit ${flags.join(" ")} ${url}\n/quit\n`, [], { entrypoint: resolve("agent.ts") })
       : await f.run("", [...flags, url]);
-    assert.equal(github.comments.length, noActionable ? 2 : 1, "every --apply posts a new verdict comment, even for a reused assessment");
+    assert.equal(github.comments.length, noActionable ? 2 : 1, "a matching comment review must not suppress a later approval review");
     assert.match(github.comments[0], /## Review audit ·/);
     assert.equal(github.approvals.length, approve ? 1 : 0);
     assert.deepEqual([github.posted.at(-1)!.event, github.posted.at(-1)!.commit_id], [approve ? "APPROVE" : "COMMENT", sha]);

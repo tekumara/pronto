@@ -260,27 +260,52 @@ export function isAuditComment(body: string | null | undefined): boolean {
   return body?.trimEnd().split("\n").at(-1) === AUDIT_COMMENT_MARKER;
 }
 
+// Fetch times describe collection, not a change to the verdict. Keep all other content in the comparison.
+function comparableAuditBody(body: string): string {
+  return body.trimEnd().replace(/^(- audited head: `[a-f\d]{40}`\n)- evidence fetched: .*\n/im, "$1");
+}
+
 /**
- * Submits the verdict as one new PR review, pinned to the audited head; earlier reviews are never edited.
- * With `approve` the review is the approval itself, otherwise a plain comment review. Returns null unless applied.
+ * Reuses a matching review by the current account, otherwise posts one pinned to the audited head.
+ * Earlier reviews are never edited. Returns null for a preview with no matching review.
  */
 export async function postAuditReview(snapshot: ReviewSnapshot, body: string, {
   approve = false, apply = false, signal,
-}: { approve?: boolean; apply?: boolean; signal?: AbortSignal } = {}): Promise<string | null> {
+}: { approve?: boolean; apply?: boolean; signal?: AbortSignal } = {}): Promise<{ url: string; posted: boolean } | null> {
   const client = github(signal);
   const { owner, repo, pr } = snapshot.target;
   const path = `${client.base}/repos/${owner}/${repo}/pulls/${pr}`;
+  const reviews = await client.pages<RawComment>(`/repos/${owner}/${repo}/pulls/${pr}/reviews?per_page=100`);
+  const expectedState = approve ? "APPROVED" : "COMMENTED";
+  const comparable = comparableAuditBody(body);
+  const matches = reviews.filter((review) => review.state === expectedState && review.commit_id === snapshot.headSha
+    && isAuditComment(review.body) && comparableAuditBody(review.body!) === comparable);
+  let existing: RawComment | undefined;
+  if (matches.length) {
+    // GraphQL viewer also supports GitHub App installation tokens, unlike REST /user.
+    const viewer = await client.request<{ data?: { viewer?: { login: string } }; errors?: unknown[] }>(client.graphql,
+      { query: "query { viewer { login } }" });
+    const login = viewer.data?.viewer?.login;
+    if (!login || viewer.errors?.length) throw new Error("GitHub authenticated reviewer is unavailable; nothing was submitted.");
+    const ownReviews = reviews.filter((review) => review.user?.login.toLowerCase() === login.toLowerCase());
+    // A later request for changes or dismissal must not suppress a new approval.
+    const candidate = approve
+      ? ownReviews.findLast((review) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state ?? ""))
+      : ownReviews.findLast((review) => matches.includes(review));
+    if (candidate && matches.includes(candidate)) existing = candidate;
+  }
   if (approve) {
     const latest = await client.request<PullRequest>(path);
     if (latest.head.sha !== snapshot.headSha || latest.base.sha !== snapshot.baseSha) {
       throw new Error("PR commits changed since the audit snapshot. Nothing was submitted; run the audit again.");
     }
   }
+  if (existing) return { url: existing.html_url, posted: false };
   if (!apply) return null;
   // Pin the review even if the head changes between the check and the write.
   const review = await client.request<{ html_url: string }>(`${path}/reviews`,
     { event: approve ? "APPROVE" : "COMMENT", commit_id: snapshot.headSha, body });
-  return review.html_url;
+  return { url: review.html_url, posted: true };
 }
 
 export async function readGithubFile(snapshot: ReviewSnapshot, path: string, revision: "head" | "base", offset: number, limit: number, signal?: AbortSignal) {

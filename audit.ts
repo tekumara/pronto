@@ -16,7 +16,7 @@ async function main() {
     console.log("--approve selects approval when no outstanding or uncertain findings remain; requires --apply to submit (default: false).");
     console.log("--allow-uncertain allows --approve with uncertain findings and no outstanding findings (default: false).");
     console.log("--approve-migrations allows --approve for database migrations or uncertain/missing migration status; the audit always runs (default: false).");
-    console.log("--apply posts a new verdict comment and any selected approval to GitHub (default: false; otherwise previews only).");
+    console.log("--apply posts the verdict and any selected approval to GitHub unless a matching review already exists (default: false; otherwise previews only).");
     return;
   }
   const { selectors, requested, skipLabels, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");

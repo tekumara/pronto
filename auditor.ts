@@ -548,14 +548,19 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
     else skipped = "outstanding or uncertain findings remain.";
   }
   // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const url = await postAuditReview(snapshot, body, { approve, apply: options.apply, signal });
-  log(dryRun ? `[audit:dry-run] Comment would be posted${approve ? " with the approval review" : ""}.`
-    : stripControlCharacters(`[audit] Verdict comment posted to the PR${approve ? " with the approval review" : ""}: ${url}`));
+  const review = await postAuditReview(snapshot, body, { approve, apply: options.apply, signal });
+  const existing = review?.posted === false;
+  if (existing) {
+    log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Comment would be skipped" : "[audit] Comment skipped"}: matching verdict review already exists: ${review.url}`));
+  } else {
+    log(dryRun ? `[audit:dry-run] Comment would be posted${approve ? " with the approval review" : ""}.`
+      : stripControlCharacters(`[audit] Verdict comment posted to the PR${approve ? " with the approval review" : ""}: ${review!.url}`));
+  }
   if (skipped) {
     log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${skipped}`));
   } else if (approve) {
-    log(dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}`
-      : `[audit] PR approved at ${snapshot.headSha}`);
+    log(existing ? `${dryRun ? "[audit:dry-run]" : "[audit]"} Approval already exists at ${snapshot.headSha}`
+      : dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}` : `[audit] PR approved at ${snapshot.headSha}`);
   }
 }
 

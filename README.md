@@ -275,13 +275,17 @@ The headline is “Changes needed” when findings remain outstanding, or “Ver
 
 Outstanding findings appear before uncertain findings. Their reasoning and evidence appear in the first collapsed section. When a database migration blocks approval, its explanation appears there under “Database migration assessment”. The visible approval-block line stays short. The section is omitted when there are no pending findings or migration explanations. Audit context remains available, including the audited head, fetch window, thread-resolution counts, non-actionable count and meaning of `addressed`. In the posted comment, only the person who acts next is written as `@login`, and only on the `Awaiting` line, so GitHub notifies them once. The next step is a short imperative saying what to do. The person who raised the finding is never tagged on that basis, bots (`[bot]` accounts and Copilot) are never mentioned, and the terminal report stays plain. Each shows `Raised by` (the comment author, taken from the evidence) and `Awaiting` (the person who must act next). The auditor chooses `Awaiting` from the thread order: the PR author when a reply is missing or does not do what was asked, or when a bot raised the finding; the reviewer who opened the thread when the author's reply hands a decision back. The login must appear in the PR evidence or be `unknown`, and a report without it is rejected. Saved assessments without a specific next step or `Awaiting` use a generic action and `unknown`. The terminal report retains explanations and evidence for all findings.
 
-The verdict comment is previewed by default. With `--apply`, Pronto posts it. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to submit PR reviews.
+The verdict comment is previewed by default. With `--apply`, Pronto posts it unless a matching review already exists. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to submit PR reviews.
 
-Every `--apply` submits a new review whose body is the verdict. It is a `COMMENT` review, or an `APPROVE` review when approval is selected and eligible (see [Approve clean audits](#approve-clean-audits)). The review is pinned to the audited head commit. Pronto never edits or replaces an earlier audit review or comment, so each run leaves its own entry in the PR history. This includes a reused assessment: a cache hit posts the saved verdict again. Audit reviews include a hidden marker on their final line. Pronto uses it to exclude its own output from the evidence it assesses, so it does not invalidate the cache. Audit comments posted by earlier versions as plain PR comments are left as they are. The former `--sticky` flag has been removed; Pronto rejects it as an unknown option.
+`--apply` checks GitHub before posting. If your account has already published the same verdict body, review type and audited head, Pronto skips the write and prints the existing review's URL. Evidence-fetch times do not affect the match. This applies to cached assessments and forced refreshes. A preview followed by `--apply` still posts if no matching review exists. Changed verdict content or a different head can produce a new review.
+
+The review is a `COMMENT` review, or an `APPROVE` review when approval is selected and eligible (see [Approve clean audits](#approve-clean-audits)). A matching comment review does not prevent a later approval review. An approval is reused only while it remains your latest approval decision; a dismissal or later request for changes allows a new approval. PRs already approved at their current head are still skipped by default; use `--skip-approved=false` to audit them anyway.
+
+Reviews are pinned to the audited head commit. Pronto never edits or replaces an earlier audit review or comment. Audit reviews include a hidden marker on their final line. Pronto uses it to exclude its own output from the evidence it assesses, so it does not invalidate the cache. Audit comments posted by earlier versions as plain PR comments are left as they are. The former `--sticky` flag has been removed; Pronto rejects it as an unknown option.
 
 With `--apply`, the host posts reviews only after a complete, validated assessment. A cache hit can post a review, such as for an assessment first run as a preview. The model remains read-only. Marked Pronto comments and reviews do not invalidate the evidence cache. Changes to other PR discussion still do.
 
-GitHub writes are not replayed by Durable, and the flags do not persist across invocations. If a write fails, the CLI exits 1 but retains the completed assessment. After an interruption or ambiguous network failure, check the PR before retrying. A retry after an ambiguous failure can post a duplicate review.
+GitHub writes are not replayed by Durable, and the flags do not persist across invocations. If a write fails, the CLI exits 1 but retains the completed assessment. A retry checks GitHub and skips a matching review even if the earlier response was lost. If the duplicate check fails, Pronto stops without posting. The check and write are not atomic: concurrent runs or delayed visibility on GitHub can still produce duplicates. Check the PR after an interruption or ambiguous network failure.
 
 ### Approve clean audits
 
@@ -295,7 +299,7 @@ pronto --apply --approve https://github.com/owner/repo/pull/42
 
 Pronto does not approve database-migration PRs by default. The model classifies the PR using its title, description, changed files and patches, inspecting pinned code as needed. Database schema or data migrations, backfills and database cutovers block approval by default, even when the PR also contains unrelated changes. Migration-framework maintenance, documentation or test fixtures alone do not count as a database migration.
 
-The audit still runs and saves its assessment. With `--apply`, it still posts the verdict as a `COMMENT` review. The terminal report and comment explain why approval is blocked. Finding statuses and the audit verdict remain unchanged. Neither `--allow-uncertain` nor `--force` overrides this approval block.
+The audit still runs and saves its assessment. With `--apply`, it posts the verdict as a `COMMENT` review unless a matching review already exists. The terminal report and comment explain why approval is blocked. Finding statuses and the audit verdict remain unchanged. Neither `--allow-uncertain` nor `--force` overrides this approval block.
 
 Approval is also blocked if migration status is `uncertain`, or an older saved report has no migration classification. Use `--force` to request a fresh assessment when classification is missing. Completed assessments from the previous policy are refreshed automatically.
 
@@ -307,7 +311,7 @@ pronto --apply --approve --approve-migrations https://github.com/owner/repo/pull
 
 `--approve-migrations` defaults to false and does not persist across invocations. It bypasses the migration approval block, including uncertain or missing migration classifications. It still requires `--approve`, and `--apply` to submit a review. Outstanding findings always prevent approval. Uncertain findings still require `--allow-uncertain`.
 
-The model always saves a migration classification. This flag only changes approval eligibility, not the classification, findings or cache. A cache hit posts a new comment with the saved verdict, even if the current approval options differ.
+The model always saves a migration classification. This flag only changes approval eligibility, not the classification, findings or cache. A cache hit uses the saved findings with the current approval options. With `--apply`, it posts only if the resulting verdict body and review type do not already match a review by your account at that head.
 
 Supported explanations, scope decisions, explicit future-work deferrals and specific reported testing can count as `addressed`. Approval does not imply every requested code change was implemented or CI was independently checked. A skipped approval is not an operational failure.
 
@@ -321,7 +325,7 @@ pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA. Its body is the verdict comment, so the verdict and the approval appear as one review rather than a comment plus a body-less approval. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
-With `--apply --approve`, the host decides eligibility first. An eligible audit submits one `APPROVE` review carrying the verdict. Otherwise it posts the verdict as a `COMMENT` review, and the terminal explains why approval was skipped. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
+With `--apply --approve`, the host decides eligibility first. An eligible audit selects one `APPROVE` review carrying the verdict. Otherwise it selects a `COMMENT` review, and the terminal explains why approval was skipped. Either review is posted only if no matching review already exists. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
 
 Approvals are not replayed by Durable, and the flag does not persist across invocations. Approval errors exit 1 but retain the completed assessment. Because the verdict is the approval review's body, nothing is posted if that request fails or if the head or base SHA changed. GitHub rejects approval of your own PR, for example. Rerun without `--approve` to post the verdict as a `COMMENT` review. Check the PR before retrying after an interruption or ambiguous network failure.
 
@@ -333,7 +337,7 @@ Audits run in dry-run mode by default. They show the exact comment body without 
 pronto --approve https://github.com/owner/repo/pull/42
 ```
 
-The normal report is followed by a labelled comment preview and the planned actions. The preview does not contact GitHub about existing comments. For an addressed verdict, the action preview looks like this:
+The normal report is followed by a labelled comment preview and the planned actions. The preview checks GitHub for matching reviews and says when posting would be skipped. For an addressed verdict with no matching approval, the action preview looks like this:
 
 ```text
 [audit:dry-run] Comment would be posted with the approval review.
@@ -348,7 +352,7 @@ To perform the selected actions, add `--apply`:
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--apply` defaults to false. When supplied, it posts a new review with the verdict; with `--approve`, that review is an approval if eligible. Without `--apply`, no comments or reviews are created. The flag does not persist across invocations; every invocation that writes must include it.
+`--apply` defaults to false. When supplied, it posts the verdict unless a matching review already exists; with `--approve`, that review is an approval if eligible. Without `--apply`, no comments or reviews are created. The flag does not persist across invocations; every invocation that writes must include it.
 
 With no action flags, the default preview shows the rendered comment body and the planned comment action. A preview does not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed; omit `--apply` to preview.
 
