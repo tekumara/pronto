@@ -155,20 +155,22 @@ export async function fetchPullRequest(target: ReviewTarget, signal?: AbortSigna
 }
 
 /**
- * Returns the authenticated user's login when their latest approve, request-changes or dismiss review
- * approves the PR's current head. Comment-only reviews do not change an approval, as in GitHub's own decision.
+ * Returns an approver's login when any reviewer's latest approve, request-changes or dismiss review
+ * approves the PR's current head. Comment-only reviews do not change an approval.
  * An approval of an older head does not count: later commits are unreviewed.
  */
-export async function findViewerApproval(target: ReviewTarget, headSha: string, signal?: AbortSignal): Promise<string | null> {
+export async function findApproval(target: ReviewTarget, headSha: string, signal?: AbortSignal): Promise<string | null> {
   const client = github(signal);
-  const [viewer, reviews] = await Promise.all([
-    client.request<{ login: string }>(`${client.base}/user`),
-    // GitHub lists reviews chronologically.
-    client.pages<RawComment>(`/repos/${target.owner}/${target.repo}/pulls/${target.pr}/reviews?per_page=100`),
-  ]);
-  const latest = reviews.filter((review) => review.user?.login.toLowerCase() === viewer.login.toLowerCase()
-    && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state ?? "")).at(-1);
-  return latest?.state === "APPROVED" && latest.commit_id === headSha ? viewer.login : null;
+  // GitHub lists reviews chronologically.
+  const reviews = await client.pages<RawComment>(`/repos/${target.owner}/${target.repo}/pulls/${target.pr}/reviews?per_page=100`);
+  const latestByReviewer = new Map<string, RawComment>();
+  for (const review of reviews) {
+    if (review.user?.login && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state ?? "")) {
+      latestByReviewer.set(review.user.login.toLowerCase(), review);
+    }
+  }
+  const approval = [...latestByReviewer.values()].find((review) => review.state === "APPROVED" && review.commit_id === headSha);
+  return approval?.user?.login ?? null;
 }
 
 async function changedFiles(client: ReturnType<typeof github>, target: ReviewTarget, pr: PullRequest): Promise<ChangedFile[]> {

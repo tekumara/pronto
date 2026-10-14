@@ -74,9 +74,7 @@ function githubEvidence(options: {
       return;
     }
     assert.equal(request.method, path === "/github/graphql" ? "POST" : "GET");
-    if (path === "/github/user") {
-      json({ login: "auditor" });
-    } else if (path === "/github/graphql") {
+    if (path === "/github/graphql") {
       json({ data: { repository: { pullRequest: { reviewThreads: {
         pageInfo: { hasNextPage: false, endCursor: null },
         nodes: options.empty ? [] : [{ isResolved: false, isOutdated: false, comments: { nodes: [{ fullDatabaseId: "1" }] } }],

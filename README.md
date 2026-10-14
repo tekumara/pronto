@@ -45,13 +45,13 @@ You can also write `--skip=skip-audit`. Labels match by full name, ignoring case
 
 Pronto checks live labels before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence, call the model or write to GitHub when a label matches. Skipping preserves unfinished work and cached assessments.
 
-PRs you have already approved are skipped by default (`--skip-approved=true`). A PR counts as approved when your latest approving, change-requesting or dismissed review, ignoring comment-only reviews, is an approval of the PR's current head commit. An approval of an earlier commit does not count, so a PR with new commits is audited again. Approvals by other reviewers do not count. Your latest review being a dismissal or a request for changes means the PR is not approved.
+PRs already approved by any reviewer are skipped by default (`--skip-approved=true`). Pronto checks each reviewer's latest approval, request for changes or dismissal, ignoring comment-only reviews. The PR counts as approved if at least one reviewer's latest decision approves its current head commit. An approval of an earlier commit does not count, so a PR with new commits is audited again. A dismissal or request for changes replaces that reviewer's approval, but does not cancel another reviewer's approval.
 
 ```sh
 pronto --skip-approved=false https://github.com/owner/repo/pull/42
 ```
 
-You can also write `--skip-approved false`. Like the label skip, this check runs after the merged and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching review evidence, calling the model or writing to GitHub, and preserves unfinished work and cached assessments. The check adds two GitHub reads: your login and the PR's reviews. The flag does not persist across invocations.
+You can also write `--skip-approved false`. Like the label skip, this check runs after the merged and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching review evidence, calling the model or writing to GitHub, and preserves unfinished work and cached assessments. The check reads the PR's reviews, following pagination. It does not fetch your GitHub login. The flag does not persist across invocations.
 
 PRs that change more than 10,000 lines are also skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto counts additions plus deletions from the PR's live metadata, so the check costs no extra request. It runs before fetching review evidence, calling the model or writing to GitHub.
 

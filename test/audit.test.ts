@@ -47,9 +47,7 @@ function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; m
       return;
     }
     assert.equal(request.method, "GET", "auditor must never mutate GitHub");
-    if (url.pathname === "/github/user") {
-      json({ login: "auditor" });
-    } else if (url.pathname === "/github/repos/acme/demo/pulls/7") {
+    if (url.pathname === "/github/repos/acme/demo/pulls/7") {
       json({ title: "Access checks", body: "Review this change", merged: options.merged ?? false,
         labels: (options.labels ?? []).map((name) => ({ name })),
         state: options.state ?? (options.merged ? "closed" : "open"), changed_files: options.incompleteFiles ? 3 : 2,
@@ -189,8 +187,7 @@ test("CLI audit does not skip a PR changing exactly 10000 lines", { timeout: 200
       requests.push(request.url!);
       const path = request.url!.split("?")[0];
       // The approval check runs before evidence; no approvals, so the audit continues to fetch evidence.
-      if (path === "/github/user") response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ login: "auditor" }));
-      else if (path === "/github/repos/acme/demo/pulls/7/reviews") response.writeHead(200, { "Content-Type": "application/json" }).end("[]");
+      if (path === "/github/repos/acme/demo/pulls/7/reviews") response.writeHead(200, { "Content-Type": "application/json" }).end("[]");
       else if (request.url === "/github/repos/acme/demo/pulls/7") {
         response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
           merged: false, additions: 6_000, deletions: 4_000, changed_files: 40,
@@ -492,7 +489,6 @@ test("restart checks live merge status and skip labels but preserves saved evide
           "/github/repos/acme/demo/pulls/7", // Merged skip.
           "/github/repos/acme/demo/pulls/7", // Resume status check.
           "/github/repos/acme/demo/pulls/7/reviews?per_page=100", // Approval check, which runs only for the resume.
-          "/github/user",
         ], "only live PR metadata and the approval check must be fetched before resuming saved evidence");
         tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
         break;

@@ -44,9 +44,7 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
       assert.equal(request.method, request.url === "/github/graphql" ? "POST" : "GET");
       const path = request.url!.split("?")[0];
       let data: unknown;
-      if (path === "/github/user") {
-        data = { login: "auditor" };
-      } else if (path === "/github/repos/acme/demo/pulls/7") {
+      if (path === "/github/repos/acme/demo/pulls/7") {
         data = { title: "Selected PR", body: "", merged: false, labels: labels.map((name) => ({ name })), changed_files: 0,
           head: { sha: "a".repeat(40), repo: { full_name: "acme/demo" } },
           base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } };
@@ -110,27 +108,34 @@ for (const { name, labels, args } of [
   });
 }
 
-for (const { name, reviews, args, skipped } of [
-  { name: "the user's approval of the current head", reviews: [review("auditor", "APPROVED")], args: [], skipped: true },
-  { name: "the user's approval of the current head, even with --force --apply --approve", reviews: [review("auditor", "APPROVED")],
-    args: ["--force", "--apply", "--approve"], skipped: true },
-  { name: "an approval whose login differs only by case", reviews: [review("Auditor", "APPROVED")], args: [], skipped: true },
-  { name: "an approval followed by a comment-only review", reviews: [review("auditor", "APPROVED"), review("auditor", "COMMENTED")],
-    args: ["--skip-approved=true"], skipped: true },
-  { name: "an approval with --skip-approved=false", reviews: [review("auditor", "APPROVED")], args: ["--skip-approved=false"], skipped: false },
-  { name: "an approval with --skip-approved false", reviews: [review("auditor", "APPROVED")], args: ["--skip-approved", "false"], skipped: false },
-  { name: "another reviewer's approval", reviews: [review("someone-else", "APPROVED")], args: [], skipped: false },
-  { name: "the user's approval of an earlier head", reviews: [review("auditor", "APPROVED", "c".repeat(40))], args: [], skipped: false },
-  { name: "an approval followed by requested changes", reviews: [review("auditor", "APPROVED"), review("auditor", "CHANGES_REQUESTED")],
-    args: [], skipped: false },
-  { name: "a dismissed approval", reviews: [review("auditor", "DISMISSED")], args: [], skipped: false },
-  { name: "no reviews", reviews: [], args: [], skipped: false },
+for (const { name, reviews, args, approver } of [
+  { name: "an approval of the current head", reviews: [review("auditor", "APPROVED")], args: [], approver: "auditor" },
+  { name: "another reviewer's approval, even with --force --apply --approve", reviews: [review("someone-else", "APPROVED")],
+    args: ["--force", "--apply", "--approve"], approver: "someone-else" },
+  { name: "an approval followed by a comment-only review", reviews: [review("someone-else", "APPROVED"), review("someone-else", "COMMENTED")],
+    args: ["--skip-approved=true"], approver: "someone-else" },
+  { name: "an approval with --skip-approved=false", reviews: [review("someone-else", "APPROVED")], args: ["--skip-approved=false"], approver: null },
+  { name: "an approval with --skip-approved false", reviews: [review("someone-else", "APPROVED")], args: ["--skip-approved", "false"], approver: null },
+  { name: "another reviewer's approval", reviews: [review("someone-else", "APPROVED")], args: [], approver: "someone-else" },
+  { name: "an approval of an earlier head", reviews: [review("someone-else", "APPROVED", "c".repeat(40))], args: [], approver: null },
+  { name: "an approval followed by requested changes", reviews: [review("someone-else", "APPROVED"), review("someone-else", "CHANGES_REQUESTED")],
+    args: [], approver: null },
+  { name: "requested changes from the approver with different login casing", reviews: [review("reviewer", "APPROVED"), review("Reviewer", "CHANGES_REQUESTED")],
+    args: [], approver: null },
+  { name: "a dismissed approval", reviews: [review("someone-else", "APPROVED"), review("someone-else", "DISMISSED")], args: [], approver: null },
+  { name: "an approval and another reviewer's requested changes", reviews: [review("someone-else", "APPROVED"), review("auditor", "CHANGES_REQUESTED")],
+    args: [], approver: "someone-else" },
+  { name: "one active approval after another reviewer withdraws theirs", reviews: [review("someone-else", "APPROVED"), review("auditor", "APPROVED"),
+    review("auditor", "DISMISSED")], args: [], approver: "someone-else" },
+  { name: "all approvals withdrawn", reviews: [review("someone-else", "APPROVED"), review("auditor", "APPROVED"),
+    review("someone-else", "CHANGES_REQUESTED"), review("auditor", "DISMISSED")], args: [], approver: null },
+  { name: "no reviews", reviews: [], args: [], approver: null },
 ]) {
-  test(`CLI ${skipped ? "skips" : "audits"} a PR with ${name}`, { timeout: 20_000 }, async (t) => {
+  test(`CLI ${approver ? "skips" : "audits"} a PR with ${name}`, { timeout: 20_000 }, async (t) => {
     const f = await selectionFixture(t, [], reviews);
     const output = await f.run("", [prUrl, "local/test", ...args], { env: { PATH: f.cwd } });
-    if (skipped) {
-      assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR is already approved by auditor at ${headSha}.`));
+    if (approver) {
+      assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR is already approved by ${approver} at ${headSha}.`));
       assert.doesNotMatch(output, /PR title:|Verdict:/, "an approved PR must not fetch evidence or reach the model");
     } else {
       assert.match(output, /Verdict:/);

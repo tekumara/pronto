@@ -10,7 +10,7 @@ import {
 import { openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { compileExclusions } from "./exclusions.ts";
-import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findViewerApproval, isAuditComment, parseReviewTarget, postAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findApproval, isAuditComment, parseReviewTarget, postAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -719,7 +719,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       return;
     }
     if (options.skipApproved ?? true) {
-      const approver = await findViewerApproval(target, pr.head.sha, context.abortSignal);
+      const approver = await findApproval(target, pr.head.sha, context.abortSignal);
       if (approver) {
         log(`[audit] Skipping ${target.url}: PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`);
         return;

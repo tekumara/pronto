@@ -38,7 +38,6 @@ function evidence(extra: { inline?: object[]; comments?: object[]; reviews?: obj
     });
     let data: unknown;
     switch (path) {
-      case "/github/user": data = { login: "auditor" }; break;
       case "/github/repos/acme/project/pulls/9":
         data = { title: state.title, body: state.description, html_url: url, changed_files: state.files.length,
           head: { sha: state.headSha, repo: { full_name: "acme/project" } },

@@ -10,7 +10,7 @@ async function main() {
     console.log("--pr <target> adds a PR to a concurrent batch. Repeat for multiple targets; flags and the optional model apply to every PR.");
     console.log("Without a target, selects the current branch's PR using gh pr view. Branch and number selection require gh; explicit URLs need no checkout.");
     console.log("--skip <label> skips the audit if the PR has that label (case-insensitive). Repeat for multiple labels; any match skips, even with --force or --apply.");
-    console.log("--skip-approved skips the audit if you already approved the PR's current head commit (default: true; --skip-approved=false audits anyway). Applies even with --force.");
+    console.log("--skip-approved skips the audit if any reviewer has already approved the PR's current head commit (default: true; --skip-approved=false audits anyway). Applies even with --force.");
     console.log("--exclude <path> leaves matching changed files out of the size limit and the audit; their patches are withheld and they are listed in the output. Repeat for multiple paths. Paths are repository-relative: * and ? stay within a directory, ** crosses directories, and a directory excludes everything under it.");
     console.log("--force bypasses the assessment cache and restarts any unfinished audit.");
     console.log("--approve selects approval when no outstanding or uncertain findings remain; requires --apply to submit (default: false).");

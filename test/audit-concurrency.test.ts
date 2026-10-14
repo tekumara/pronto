@@ -23,8 +23,6 @@ function evidence() {
       data = { data: { repository: { pullRequest: { reviewThreads: {
         nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
       } } } } };
-    } else if (path === "/github/user") {
-      data = { login: "auditor" };
     } else {
       const match = path.match(/^\/github\/repos\/acme\/(demo|other)\/(pulls|issues)\/(42|43)(.*)$/);
       assert.ok(match, `Unexpected GitHub request: ${path}`);
