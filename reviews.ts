@@ -258,27 +258,27 @@ export function isAuditComment(body: string | null | undefined): boolean {
   return body?.trimEnd().split("\n").at(-1) === AUDIT_COMMENT_MARKER;
 }
 
-/** Posts a new PR comment every time; earlier audit comments are never edited. Returns null unless applied. */
-export async function postAuditComment(target: ReviewTarget, body: string, {
-  apply = false, signal,
-}: { apply?: boolean; signal?: AbortSignal } = {}): Promise<string | null> {
-  if (!apply) return null;
-  const client = github(signal);
-  const comment = await client.request<{ html_url: string }>(
-    `${client.base}/repos/${target.owner}/${target.repo}/issues/${target.pr}/comments`, { body });
-  return comment.html_url;
-}
-
-export async function approveReview(snapshot: ReviewSnapshot, apply = false, signal?: AbortSignal): Promise<void> {
+/**
+ * Submits the verdict as one new PR review, pinned to the audited head; earlier reviews are never edited.
+ * With `approve` the review is the approval itself, otherwise a plain comment review. Returns null unless applied.
+ */
+export async function postAuditReview(snapshot: ReviewSnapshot, body: string, {
+  approve = false, apply = false, signal,
+}: { approve?: boolean; apply?: boolean; signal?: AbortSignal } = {}): Promise<string | null> {
   const client = github(signal);
   const { owner, repo, pr } = snapshot.target;
   const path = `${client.base}/repos/${owner}/${repo}/pulls/${pr}`;
-  const latest = await client.request<PullRequest>(path);
-  if (latest.head.sha !== snapshot.headSha || latest.base.sha !== snapshot.baseSha) {
-    throw new Error("PR commits changed since the audit snapshot. No approval was submitted; run the audit again.");
+  if (approve) {
+    const latest = await client.request<PullRequest>(path);
+    if (latest.head.sha !== snapshot.headSha || latest.base.sha !== snapshot.baseSha) {
+      throw new Error("PR commits changed since the audit snapshot. Nothing was submitted; run the audit again.");
+    }
   }
-  // Pin the approval even if the head changes between the check and the write.
-  if (apply) await client.request(`${path}/reviews`, { event: "APPROVE", commit_id: snapshot.headSha });
+  if (!apply) return null;
+  // Pin the review even if the head changes between the check and the write.
+  const review = await client.request<{ html_url: string }>(`${path}/reviews`,
+    { event: approve ? "APPROVE" : "COMMENT", commit_id: snapshot.headSha, body });
+  return review.html_url;
 }
 
 export async function readGithubFile(snapshot: ReviewSnapshot, path: string, revision: "head" | "base", offset: number, limit: number, signal?: AbortSignal) {

@@ -10,7 +10,7 @@ import {
 import { openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { compileExclusions } from "./exclusions.ts";
-import { AUDIT_COMMENT_MARKER, approveReview, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findViewerApproval, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findViewerApproval, isAuditComment, parseReviewTarget, postAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -538,23 +538,22 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
   const body = formatComment(snapshot, assessments, approvalBlock);
   const dryRun = !options.apply;
   if (dryRun) log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
-  // Host-only side effects: never expose writes to the model or replay them through Durable.
-  const url = await postAuditComment(snapshot.target, body, { apply: options.apply, signal });
-  log(dryRun ? "[audit:dry-run] Comment would be posted."
-    : stripControlCharacters(`[audit] Verdict comment posted to the PR: ${url}`));
+  // Decide approval first: an approval carries the verdict in one review, otherwise it is a comment review.
+  let approve = false;
+  let skipped: string | null = null;
   if (options.approve) {
-    if (approvalBlock) {
-      console.log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${approvalBlock.message}`));
-      return;
-    }
     const { counts, approvable } = summarizeFindings(assessments);
-    const canApprove = approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding);
-    if (!canApprove) {
-      log(dryRun ? "[audit:dry-run] Approval would be skipped: outstanding or uncertain findings remain."
-        : "[audit] Approval skipped: outstanding or uncertain findings remain.");
-      return;
-    }
-    await approveReview(snapshot, options.apply, signal);
+    if (approvalBlock) skipped = approvalBlock.message;
+    else if (approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding)) approve = true;
+    else skipped = "outstanding or uncertain findings remain.";
+  }
+  // Host-only side effects: never expose writes to the model or replay them through Durable.
+  const url = await postAuditReview(snapshot, body, { approve, apply: options.apply, signal });
+  log(dryRun ? `[audit:dry-run] Comment would be posted${approve ? " with the approval review" : ""}.`
+    : stripControlCharacters(`[audit] Verdict comment posted to the PR${approve ? " with the approval review" : ""}: ${url}`));
+  if (skipped) {
+    log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${skipped}`));
+  } else if (approve) {
     log(dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}`
       : `[audit] PR approved at ${snapshot.headSha}`);
   }
