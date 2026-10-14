@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { compileExclusions } from "./exclusions.ts";
 import { parseReviewTarget } from "./reviews.ts";
 
 const exec = promisify(execFile);
 
-export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-approved[=true|false]] [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
+export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "chat") {
-  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--skip <label>]... [--skip-approved[=true|false]] [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <GitHub PR URL> | --pr <GitHub PR URL>...";
+  const usage = source === "cli" ? AUDIT_CLI_USAGE : "Usage: /audit [--skip <label>]... [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--sticky[=true|false]] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <GitHub PR URL> | --pr <GitHub PR URL>...";
   // Boolean flags default to true and take an optional true|false value.
   const booleanFlags = ["--sticky", "--skip-approved"];
   const flags = ["--force", ...booleanFlags, "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];
@@ -15,6 +16,7 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat") {
   const positional: string[] = [];
   const targets: string[] = [];
   const skipLabels: string[] = [];
+  const exclude: string[] = [];
   const booleans = { "--sticky": true, "--skip-approved": true };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -31,6 +33,17 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat") {
         throw new Error(`--skip requires a non-empty label\n${usage}`);
       }
       skipLabels.push(label);
+      continue;
+    }
+    if (arg === "--exclude" || arg.startsWith("--exclude=")) {
+      const path = arg === "--exclude" ? args[++i] : arg.slice("--exclude=".length);
+      if (!path?.trim() || (arg === "--exclude" && path.startsWith("-"))) {
+        throw new Error(`--exclude requires a non-empty path\n${usage}`);
+      }
+      try { compileExclusions([path]); } catch (error) {
+        throw new Error(`${(error as Error).message}\n${usage}`, { cause: error });
+      }
+      exclude.push(path);
       continue;
     }
     const flag = booleanFlags.find((name) => arg.startsWith(`${name}=`)) ?? arg;
@@ -53,7 +66,7 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat") {
   }
   // Chat still requires URLs. Validate every explicit URL before credentials, storage or network access.
   for (const selector of selectors) if (source === "chat" || selector.includes("://")) parseReviewTarget(selector);
-  return { selectors, requested, skipLabels, skipApproved: booleans["--skip-approved"], force: supplied.has("--force"), sticky: booleans["--sticky"],
+  return { selectors, requested, skipLabels, skipApproved: booleans["--skip-approved"], exclude, force: supplied.has("--force"), sticky: booleans["--sticky"],
     approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"),
     approveMigrations: supplied.has("--approve-migrations"), apply: supplied.has("--apply") };
 }

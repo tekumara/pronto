@@ -55,6 +55,19 @@ You can also write `--skip-approved false`. Like the label skip, this check runs
 
 PRs that change more than 10,000 lines are also skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto counts additions plus deletions from the PR's live metadata, so the check costs no extra request. It runs before fetching review evidence, calling the model or writing to GitHub.
 
+Use `--exclude <path>` to leave generated or vendored files out of both the size limit and the audit. Repeat the flag for multiple paths, or write `--exclude=<path>`:
+
+```sh
+pronto --exclude package-lock.json --exclude 'dist/**' --exclude '**/*.snap' https://github.com/owner/repo/pull/42
+```
+
+Paths are relative to the repository root and match case-sensitively. `*` and `?` stay within one directory, `**` crosses directories (`**/*.snap` also matches a root-level `a.snap`), and a path that matches a directory excludes everything under it. So `package-lock.json` matches only the root lockfile; use `**/package-lock.json` for lockfiles at any depth. A renamed file is excluded only if both its old and new paths match, because a move across the boundary still changes reviewable code.
+
+- **Size limit.** The PR's own line totals include excluded files, so when a PR is over the limit and you pass `--exclude`, Pronto reads the per-file line counts and subtracts the excluded files. This costs extra requests only for PRs that are over the limit.
+- **Audit.** Excluded files stay in the evidence by path and status, with their patches withheld and an `excluded` marker. The model can therefore still see that a file such as a migration changed, and can read it if it needs to. Review comments are never excluded, including comments on excluded files.
+- **Output.** Pronto lists the excluded files, up to 20 with a count of the rest, when it fetches evidence, reuses an assessment or skips the PR. It also says when a pattern matches no changed file. The verdict comment lists them under audit context, so reviewers can see what the audit did not read.
+- **Caching.** Exclusions are part of the evidence. Changing `--exclude` refreshes the assessment and the refresh reason names the affected files, while the same exclusions reuse it. Resuming an unfinished audit keeps the exclusions of its saved evidence, so use `--force` to apply different ones.
+
 You can also run the CLI without a global link using `npm run audit -- [<number> | <branch> | <GitHub PR URL>]` from this repository.
 
 The auditor uses your saved Pi default model, or the first available model if there is no usable default. Choose a specific model by adding `provider/model-id` after an explicit target:
@@ -489,7 +502,7 @@ You can invoke the same PR auditor from chat:
 /audit --pr https://github.com/owner/repo/pull/42 --pr https://github.com/owner/repo/pull/43
 ```
 
-Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-approved`, `--force`, `--sticky`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
+Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-approved`, `--exclude` (paths cannot contain spaces here), `--force`, `--sticky`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
 
 To use the coding chat in another project, run the script from that directory:
 

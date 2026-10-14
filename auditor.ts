@@ -9,7 +9,8 @@ import {
 } from "@earendil-works/pi-durable";
 import { openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
-import { AUDIT_COMMENT_MARKER, approveReview, fetchPullRequest, fetchReviewSnapshot, findViewerApproval, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+import { compileExclusions } from "./exclusions.ts";
+import { AUDIT_COMMENT_MARKER, approveReview, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findViewerApproval, isAuditComment, parseReviewTarget, postAuditComment, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -368,6 +369,21 @@ function evidenceChanges(previous: ReviewSnapshot, current: ReviewSnapshot): str
     ...collectionChanges(oldFiles, files, (file) => file.path, (path) => `file ${JSON.stringify(path)}`),
   ];
 }
+/** Excluded paths come from the repository, so cap the list and strip control characters. */
+const MAX_LISTED_FILES = 20;
+function excludedPaths(snapshot: ReviewSnapshot): string[] {
+  return snapshot.files.filter((file) => file.excluded).map((file) => file.path);
+}
+function outputExcludedFiles(paths: string[], log: (message: string) => void): void {
+  log(`[audit] Excluded ${paths.length} changed file${paths.length === 1 ? "" : "s"} (--exclude):`);
+  for (const path of paths.slice(0, MAX_LISTED_FILES)) log(stripControlCharacters(`[audit]   - ${path}`));
+  if (paths.length > MAX_LISTED_FILES) log(`[audit]   - ${paths.length - MAX_LISTED_FILES} more files`);
+}
+function outputSnapshotExclusions(snapshot: ReviewSnapshot, patterns: string[] | undefined, log: (message: string) => void): void {
+  const paths = excludedPaths(snapshot);
+  if (paths.length) outputExcludedFiles(paths, log);
+  else if (patterns?.length) log("[audit] --exclude matched no changed files.");
+}
 function outputRefreshReasons(conversationId: ConversationId, reasons: string[], log: (message: string) => void): void {
   log(`[audit] Refreshing audit ${conversationId}; reasons:`);
   for (const reason of reasons.slice(0, 10)) log(`[audit]   - ${reason}`);
@@ -489,6 +505,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
   if (details.length) sections.push([
     "<details>", "<summary>Reasoning and evidence</summary>", "", details.join("\n\n"), "", "</details>",
   ].join("\n"));
+  const excluded = excludedPaths(snapshot);
   const inline = snapshot.comments.filter((c) => c.kind === "inline");
   const resolved = inline.filter((c) => c.thread?.resolved).length;
   const unknown = inline.filter((c) => !c.thread).length;
@@ -498,7 +515,10 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
     `- audited head: \`${snapshot.headSha}\``,
     `- evidence fetched: ${snapshot.startedAt} to ${snapshot.fetchedAt}`,
     `- inline threads: ${resolved}/${inline.length} resolved (${unknown} unknown)`,
-    `- other findings: ${counts["not-actionable"]} not actionable`, "",
+    `- other findings: ${counts["not-actionable"]} not actionable`,
+    ...(excluded.length ? [`- excluded from review (patches withheld): ${excluded.length} of ${snapshot.files.length} changed files`,
+      ...excluded.slice(0, MAX_LISTED_FILES).map((path) => `  - \`${path}\``),
+      ...(excluded.length > MAX_LISTED_FILES ? [`  - ${excluded.length - MAX_LISTED_FILES} more files`] : [])] : []), "",
     "Addressed includes code fixes and supported explanations or scope decisions, not necessarily the requested code change.", "",
     "PR-level comments and review summaries have no thread-resolution state.", "",
     "This audit checks review findings, not overall PR correctness.", "", "</details>",
@@ -539,6 +559,8 @@ async function outputReport(snapshot: ReviewSnapshot, assessments: Assessment[],
 export type AuditOptions = {
   model: ModelRef; skipLabels?: string[]; skipApproved?: boolean; force?: boolean; sticky?: boolean;
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
+  /** Path patterns left out of the size limit and the audit; see compileExclusions. */
+  exclude?: string[];
 };
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
@@ -673,9 +695,19 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       log(`[audit] Skipping ${target.url}: PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
       return;
     }
-    const changedLines = (pr.additions ?? 0) + (pr.deletions ?? 0);
+    const isExcluded = compileExclusions(options.exclude ?? []);
+    let changedLines = (pr.additions ?? 0) + (pr.deletions ?? 0);
+    let excluded: ChangedFile[] = [];
+    let excludedLines = 0;
+    if (changedLines > MAX_CHANGED_LINES && options.exclude?.length) {
+      // The PR's totals include excluded files, so measure what remains from the per-file counts.
+      excluded = (await fetchChangedFiles(target, pr, context.abortSignal)).filter(isExcluded);
+      excludedLines = excluded.reduce((sum, file) => sum + file.lines, 0);
+      changedLines -= excludedLines;
+    }
     if (changedLines > MAX_CHANGED_LINES) {
-      log(`[audit] Skipping ${target.url}: PR changes ${changedLines} lines, more than the ${MAX_CHANGED_LINES} line limit.`);
+      log(`[audit] Skipping ${target.url}: PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`);
+      if (excluded.length) outputExcludedFiles(excluded.map((file) => file.path), log);
       return;
     }
     if (options.skipApproved ?? true) {
@@ -717,12 +749,15 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       conversation = existing;
       snapshot = saved.snapshot;
       log(`[audit] Resuming saved snapshot ${snapshot.id} at ${snapshot.headSha}`);
+      // The saved evidence keeps the exclusions it was fetched with; --force applies different ones.
+      outputSnapshotExclusions(snapshot, undefined, log);
     } else {
       const model = state?.restartModel ?? options.model;
       const policy = policyFingerprint(options.models, model);
       log(`[audit] Fetching ${target.url}`);
-      snapshot = await fetchReviewSnapshot(target, pr, startedAt, context.abortSignal);
+      snapshot = await fetchReviewSnapshot(target, pr, startedAt, context.abortSignal, isExcluded);
       log(`[audit] PR title: ${stripControlCharacters(snapshot.title)}`);
+      outputSnapshotExclusions(snapshot, options.exclude, log);
       const fingerprint = evidenceFingerprint(snapshot, policy);
       const cached = !state?.restartModel && state?.latestSuccess;
       const refreshReasons: string[] = [];
@@ -739,6 +774,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
             } });
           }, context);
           log(`[audit] Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`);
+          outputSnapshotExclusions(snapshot, options.exclude, log);
           await outputReport(saved.snapshot, saved.report, saved.databaseMigration, { ...options, reused: true }, log, context.abortSignal);
           return;
         }

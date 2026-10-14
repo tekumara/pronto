@@ -30,8 +30,11 @@ export type ReviewSnapshot = {
   id: string; target: ReviewTarget; startedAt: string; fetchedAt: string; title: string; description: string; author: string;
   headSha: string; headRepository: string; baseSha: string; baseRepository: string;
   comments: ReviewComment[];
-  files: { path: string; previousPath: string | null; status: string; patch: string | null }[];
+  files: ReviewFile[];
 };
+/** An excluded file keeps its path and status, so the model can still see what changed, but its patch is withheld. */
+export type ReviewFile = { path: string; previousPath: string | null; status: string; patch: string | null; excluded?: true };
+export type ChangedFile = ReviewFile & { lines: number };
 type PullRequest = {
   labels?: { name: string }[];
   merged: boolean; title: string; body: string | null; user?: { login: string } | null; changed_files: number;
@@ -168,7 +171,21 @@ export async function findViewerApproval(target: ReviewTarget, headSha: string, 
   return latest?.state === "APPROVED" && latest.commit_id === headSha ? viewer.login : null;
 }
 
-export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest, startedAt: string, signal?: AbortSignal): Promise<ReviewSnapshot> {
+async function changedFiles(client: ReturnType<typeof github>, target: ReviewTarget, pr: PullRequest): Promise<ChangedFile[]> {
+  const files = await client.pages<{ filename: string; previous_filename?: string; status: string; patch?: string;
+    additions?: number; deletions?: number }>(`/repos/${target.owner}/${target.repo}/pulls/${target.pr}/files?per_page=100`);
+  if (files.length !== pr.changed_files) throw new Error("GitHub did not return the complete changed-file list; audit stopped");
+  return files.map((f) => ({ path: f.filename, previousPath: f.previous_filename ?? null, status: f.status, patch: f.patch ?? null,
+    lines: (f.additions ?? 0) + (f.deletions ?? 0) }));
+}
+
+/** Per-file line counts. The PR's own totals include every file, so exclusions must be measured from these. */
+export async function fetchChangedFiles(target: ReviewTarget, pr: PullRequest, signal?: AbortSignal): Promise<ChangedFile[]> {
+  return changedFiles(github(signal), target, pr);
+}
+
+export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest, startedAt: string, signal?: AbortSignal,
+  isExcluded: (file: ReviewFile) => boolean = () => false): Promise<ReviewSnapshot> {
   const client = github(signal);
   const path = `/repos/${target.owner}/${target.repo}/pulls/${target.pr}`;
   if (!pr.head.repo || !pr.base.repo || !/^[a-f\d]{40}$/i.test(pr.head.sha) || !/^[a-f\d]{40}$/i.test(pr.base.sha)) {
@@ -176,9 +193,8 @@ export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest,
   }
   const [raw, files] = await Promise.all([
     fetchPRComments(target.owner, target.repo, target.pr, client.token, client.fetcher),
-    client.pages<{ filename: string; previous_filename?: string; status: string; patch?: string }>(`${path}/files?per_page=100`),
+    changedFiles(client, target, pr),
   ]);
-  if (files.length !== pr.changed_files) throw new Error("GitHub did not return the complete changed-file list; audit stopped");
 
   const threads = new Map<string, { resolved: boolean; outdated: boolean }>();
   let cursor: string | null = null;
@@ -230,7 +246,7 @@ export async function fetchReviewSnapshot(target: ReviewTarget, pr: PullRequest,
   return {
     id: randomUUID(), target, startedAt, fetchedAt: new Date().toISOString(), title: pr.title, description: pr.body ?? "", author: pr.user?.login ?? "unknown",
     headSha: pr.head.sha, headRepository: pr.head.repo.full_name, baseSha: pr.base.sha, baseRepository: pr.base.repo.full_name,
-    comments, files: files.map((f) => ({ path: f.filename, previousPath: f.previous_filename ?? null, status: f.status, patch: f.patch ?? null })),
+    comments, files: files.map(({ lines: _lines, ...file }): ReviewFile => isExcluded(file) ? { ...file, patch: null, excluded: true } : file),
   };
 }
 

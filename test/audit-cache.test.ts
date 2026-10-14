@@ -375,7 +375,8 @@ test("invalid audit flags are rejected before audit storage or network access in
     [url, "--approve-migrations", "--approve-migrations"], [url, "--approve-migrations=false"],
     [url, "--apply", "--apply"], [url, "--apply=false"], [url, "--dry-run"], [url, "--apply", "--dry-run"], [url, "local/test", "extra"],
     [url, "--sticky="], [url, "--sticky=maybe"], [url, "--sticky", "--sticky=false"],
-    [url, "--sticky=true", "--sticky", "false"]]) {
+    [url, "--sticky=true", "--sticky", "false"],
+    [url, "--exclude"], [url, "--exclude="], [url, "--exclude", "--apply"], [url, "--exclude", "/"], [url, "--exclude=./"]]) {
     const { child, done } = f.start(args);
     child.stdin.end();
     const result = await done;
@@ -383,7 +384,7 @@ test("invalid audit flags are rejected before audit storage or network access in
     assert.match(result.stderr, /Usage:/);
   }
   const { child, done } = f.start([], { entrypoint: chat });
-  child.stdin.end(`/audit ${url} --force --force\n/audit ${url} --comment\n/audit ${url} --approve --approve\n/audit ${url} --approve-migrations --approve-migrations\n/audit ${url} --apply --apply\n/audit ${url} --dry-run\n/audit ${url} --sticky --sticky=false\n/audit ${url} --sticky=maybe\n/audit ${url} --skip\n/audit ${url} --skip=\n/audit ${url} --skip --apply\n/quit\n`);
+  child.stdin.end(`/audit ${url} --force --force\n/audit ${url} --comment\n/audit ${url} --approve --approve\n/audit ${url} --approve-migrations --approve-migrations\n/audit ${url} --apply --apply\n/audit ${url} --dry-run\n/audit ${url} --sticky --sticky=false\n/audit ${url} --sticky=maybe\n/audit ${url} --skip\n/audit ${url} --skip=\n/audit ${url} --skip --apply\n/audit ${url} --exclude\n/audit ${url} --exclude=\n/audit ${url} --exclude --apply\n/audit ${url} --exclude /\n/quit\n`);
   const result = await done;
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stderr, /--force can be supplied only once/);
@@ -395,6 +396,8 @@ test("invalid audit flags are rejected before audit storage or network access in
   assert.match(result.stderr, /--sticky can be supplied only once/);
   assert.match(result.stderr, /--sticky must be true or false/);
   assert.match(result.stderr, /--skip requires a non-empty label/);
+  assert.match(result.stderr, /--exclude requires a non-empty path/);
+  assert.match(result.stderr, /Invalid --exclude path: "\/"/);
   assert.equal(github.reads(), 0);
   await assert.rejects(readdir(join(f.stateDir, "repos")), { code: "ENOENT" });
 });

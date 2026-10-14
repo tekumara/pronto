@@ -24,6 +24,7 @@ test("npm link exposes pronto from source outside the checkout", { timeout: 2000
   assert.match(stdout, /^Usage: pronto /m);
   assert.match(stdout, /--skip <label>/);
   assert.match(stdout, /--skip-approved.*default: true/);
+  assert.match(stdout, /--exclude <path>/);
   assert.match(stdout, /--approve-migrations.*default: false/);
 });
 

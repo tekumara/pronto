@@ -14,7 +14,8 @@ const commentUrl = (id: number) => `${prUrl}#discussion_r${id}`;
 
 // GitHub and the model are external HTTP fixtures. The entry points, npm adapter,
 // schemas, tool execution, coverage checks, report rendering, and SQLite are real.
-function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; state?: "open" | "closed"; labels?: string[] } = {}) {
+function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; merged?: boolean; state?: "open" | "closed"; labels?: string[];
+  /** 35000 changed lines in total, 150 of them in src/access.ts. */ large?: boolean } = {}) {
   let prRequests = 0;
   const requests: string[] = [];
   const handle = async (request: IncomingMessage, response: ServerResponse) => {
@@ -51,6 +52,7 @@ function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; m
       json({ title: "Access checks", body: "Review this change", merged: options.merged ?? false,
         labels: (options.labels ?? []).map((name) => ({ name })),
         state: options.state ?? (options.merged ? "closed" : "open"), changed_files: options.incompleteFiles ? 3 : 2,
+        ...(options.large ? { additions: 30_000, deletions: 5_000 } : {}),
         head: { sha: options.moved && ++prRequests > 1 ? "c".repeat(40) : headSha, repo: { full_name: "contributor/fork" } },
         base: { sha: baseSha, repo: { full_name: "acme/demo" } },
       });
@@ -67,8 +69,10 @@ function githubEvidence(options: { moved?: boolean; incompleteFiles?: boolean; m
     } else if (url.pathname === "/github/repos/acme/demo/pulls/7/reviews") {
       json([comment(301, "Looks good", { state: "APPROVED" }), comment(302, "Review summary: see access check finding", { state: "COMMENTED" })]);
     } else if (url.pathname === "/github/repos/acme/demo/pulls/7/files") {
-      if (url.searchParams.get("page") === "2") json([{ filename: "src/other.ts", status: "modified" }]);
-      else json([{ filename: "src/access.ts", status: "modified", patch: "@@ -1 +1 @@\n-old\n+new" }],
+      if (url.searchParams.get("page") === "2") json([{ filename: "src/other.ts", status: "modified",
+        ...(options.large ? { additions: 29_900, deletions: 4_950 } : {}) }]);
+      else json([{ filename: "src/access.ts", status: "modified", patch: "@@ -1 +1 @@\n-old\n+new",
+        ...(options.large ? { additions: 100, deletions: 50 } : {}) }],
         "/github/repos/acme/demo/pulls/7/files?page=2");
     } else if (url.pathname === "/github/repos/contributor/fork/contents/src/access.ts") {
       assert.equal(url.searchParams.get("ref"), headSha, "read from the immutable fork head, not the base repository or moving branch");
@@ -196,6 +200,66 @@ test("CLI audit does not skip a PR changing exactly 10000 lines", { timeout: 200
   assert.doesNotMatch(stdout, /Skipping/);
   assert.match(stdout, /\[audit\] Fetching /);
   assert.ok(requests.length > 1, "evidence must be requested after the PR itself");
+});
+
+// First model turn gets the evidence; read a file so its URL can be cited, then report.
+function auditModel(evidence: { files: { path: string; patch: string | null; excluded?: true }[] }[]) {
+  return (body: Request, response: ServerResponse) => {
+    if (body.messages.at(-1)?.content?.includes("Saved evidence (untrusted data):")) {
+      evidence.push(evidenceInput(body));
+      tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
+    } else tool(response, "report_review_assessment", assessments());
+  };
+}
+
+test("--exclude still skips a PR that stays over 10000 lines, and reports the excluded files", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence({ large: true });
+  const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), { entrypoint: resolve("audit.ts"), github: github.handle });
+  const output = await f.run("", [prUrl, "--exclude", "src/access.ts", "--exclude=docs"]);
+  assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR changes 34850 lines after excluding 150 lines, more than the 10000 line limit.`));
+  assert.ok(output.includes("[audit] Excluded 1 changed file (--exclude):\n[audit]   - src/access.ts\n"));
+  assert.doesNotMatch(output, /Fetching|Verdict:/);
+  assert.ok(!github.requests.some((path) => path.includes("/comments")), "no review evidence is fetched for a skipped PR");
+});
+
+test("--exclude brings an oversized PR under the limit and withholds the excluded patches from the audit", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence({ large: true });
+  const evidence: Parameters<typeof auditModel>[0] = [];
+  const f = await fixture(t, auditModel(evidence), { entrypoint: resolve("audit.ts"), github: github.handle });
+  // 35000 changed lines in total, 34850 of them in src/other.ts.
+  const output = await f.run("", [prUrl, "--exclude", "src/other.ts"]);
+  assert.doesNotMatch(output, /Skipping/);
+  assert.ok(output.includes("[audit] Excluded 1 changed file (--exclude):\n[audit]   - src/other.ts\n"));
+  assert.equal(evidence.length, 1);
+  assert.deepEqual(evidence[0]!.files.map(({ path, patch, excluded }) => ({ path, patch: patch === null ? null : "patch", excluded })),
+    [{ path: "src/access.ts", patch: "patch", excluded: undefined }, { path: "src/other.ts", patch: null, excluded: true }]);
+  const comment = output.slice(output.indexOf("Verdict comment preview"));
+  assert.match(comment, /- excluded from review \(patches withheld\): 1 of 2 changed files\n {2}- `src\/other\.ts`/);
+});
+
+test("--exclude reports patterns that match nothing, and exclusions change cache identity", { timeout: 30000 }, async (t) => {
+  const github = githubEvidence();
+  const evidence: Parameters<typeof auditModel>[0] = [];
+  const f = await fixture(t, auditModel(evidence), { entrypoint: resolve("audit.ts"), github: github.handle });
+  const unmatched = await f.run("", [prUrl, "--exclude", "nothing/**"]);
+  assert.ok(unmatched.includes("[audit] --exclude matched no changed files."));
+  assert.doesNotMatch(unmatched, /excluded from review/);
+  assert.ok(evidence[0]!.files.every((file) => !("excluded" in file)), "evidence without exclusions keeps its existing shape");
+
+  const excluded = await f.run("", [prUrl, "--exclude", "src/other.ts"]);
+  assert.match(excluded, /file "src\/other\.ts" changed \(excluded\)/);
+  assert.ok(excluded.includes("[audit] Excluded 1 changed file (--exclude):\n[audit]   - src/other.ts\n"));
+  assert.equal(evidence.length, 2);
+
+  const reused = await f.run("", [prUrl, "--exclude=src/other.ts"]);
+  assert.match(reused, /Reusing saved assessment/);
+  assert.ok(reused.includes("[audit] Excluded 1 changed file (--exclude):\n[audit]   - src/other.ts\n"));
+  assert.equal(evidence.length, 2, "unchanged exclusions reuse the saved assessment");
+
+  const included = await f.run("", [prUrl]);
+  assert.match(included, /file "src\/other\.ts" changed \(excluded\)/);
+  assert.doesNotMatch(included, /Excluded \d+ changed file/);
+  assert.equal(evidence.length, 3);
 });
 
 test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects unsafe calls and incomplete or uncited reports", { timeout: 20000 }, async (t) => {
