@@ -333,6 +333,11 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.match(policy, /Accept specific reports of external testing, deployment or operator verification/);
   assert.match(policy, /Do not mark a finding uncertain\s+solely because these external results cannot be independently inspected\./);
   assert.match(policy, /For reported testing, state that the results were not independently inspected\./);
+  assert.match(policy, /Accept a human author's or maintainer's relevant authoritative documentation\s+link as an explanation when offered in response to a finding\./);
+  assert.match(policy, /Do not require\s+excerpts or mark it uncertain solely because the link cannot be inspected\./);
+  assert.match(policy, /Mark it addressed unless available evidence contradicts the explanation,\s+an explicit requirement remains unmet, or a human objection remains unresolved\./);
+  assert.match(policy, /Cite the reply and disclose that the documentation was not independently\s+inspected; do not claim runtime verification\./);
+  assert.match(policy, /Bare acknowledgements,\s+unrelated links and re-review pings do not qualify\./);
   assert.match(policy, /Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient\./);
   assert.match(policy, /If available evidence contradicts the claimed outcome, keep the unresolved concern outstanding\./);
   assert.match(policy, /Accept an explicit author decision not to make the requested change because of effort,/);

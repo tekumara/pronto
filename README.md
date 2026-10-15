@@ -251,6 +251,8 @@ The auditor checks factual claims about explanations and claimed fixes against p
 
 For example, a setup PR for first-time users can explain that re-runs overwrite active configuration, preserve backups, and leave smart merging to follow-up work. If the code supports those claims and the scope rationale adequately addresses the concern, the finding can be `addressed` through explanation. This does not mean configuration now merges. The finding's reason must identify the explanation and describe the remaining limitation and deferred work.
 
+A relevant authoritative documentation link from a human author or maintainer counts as an explanation when offered in response to a finding. The auditor does not require excerpts or mark the finding `uncertain` solely because it cannot inspect the link. It marks the finding `addressed` unless available evidence contradicts the explanation, an explicit requirement remains unmet, or a human objection remains unresolved. The report cites the reply and states that the documentation was not independently inspected; it does not claim runtime verification. Bare acknowledgements, unrelated links and re-review pings do not qualify.
+
 Bare acknowledgements and dismissals without a rationale do not qualify. A contradicted claim about an explanation or current fix remains `outstanding`. So does an unmet mandatory requirement or a concern outside the explanation or deferral. For example, code showing that a failure can occur contradicts “this cannot happen”, but not “this is not worth fixing”. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
 
 ### Reported testing and deployment evidence

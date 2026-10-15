@@ -153,6 +153,14 @@ If available evidence contradicts the claimed outcome, keep the unresolved conce
 Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient.
 This acceptance applies only to external results, not claims about accessible code behaviour.
 Inspect available code to verify claimed code fixes; do not substitute a testing report for a fix.
+Accept a human author's or maintainer's relevant authoritative documentation
+link as an explanation when offered in response to a finding. Do not require
+excerpts or mark it uncertain solely because the link cannot be inspected.
+Mark it addressed unless available evidence contradicts the explanation,
+an explicit requirement remains unmet, or a human objection remains unresolved.
+Cite the reply and disclose that the documentation was not independently
+inspected; do not claim runtime verification. Bare acknowledgements,
+unrelated links and re-review pings do not qualify.
 Bare acknowledgements and dismissals without a rationale are not enough.
 A factual claim about the explanation or a claimed fix contradicted by evidence,
 an unmet mandatory requirement, or a concern not covered by the explanation or deferral stays outstanding.
