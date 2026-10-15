@@ -399,6 +399,56 @@ test("chat /audit uses isolated evidence and then continues the original coding 
   assert.equal(turn, 5);
 });
 
+test("audit logs connection causes and retry context before a successful recovery", { timeout: 20_000 }, async (t) => {
+  const github = githubEvidence();
+  let calls = 0;
+  const f = await fixture(t, (_body, response) => {
+    if (++calls === 1) response.destroy();
+    else {
+      const report = assessments();
+      for (const assessment of report.assessments) for (const finding of assessment.findings) finding.evidence = [prUrl];
+      tool(response, "report_review_assessment", report);
+    }
+  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  const { child, done } = f.start([prUrl]);
+  child.stdin.end();
+  const result = await done;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(calls, 2, "diagnostics must preserve normal retry and recovery behaviour");
+  assert.match(result.stdout, /Verdict:/);
+  assert.match(result.stderr, /Model transport error/);
+  assert.match(result.stderr, /UND_ERR_SOCKET/);
+  assert.match(result.stderr, /POST http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions/);
+  assert.match(result.stderr, /elapsedMs=\d+/);
+  assert.match(result.stderr, /conversation=\d+.*local\/test.*openai-completions/);
+  assert.match(result.stderr, /Audit retry 1: Connection error\..*retryAt=/);
+  assert.doesNotMatch(result.stderr, /test-key|github-key|Review this change|Saved evidence/);
+});
+
+test("audit logs HTTP failure metadata and retains the final model error without exposing credentials", { timeout: 20_000 }, async (t) => {
+  const github = githubEvidence();
+  const f = await fixture(t, (_body, response) => {
+    response.writeHead(401, {
+      "Content-Type": "application/json", "X-Request-Id": "model-request-123", "Retry-After": "17",
+      "Set-Cookie": "private-cookie=secret",
+    }).end(JSON.stringify({ error: { message: "Invalid credentials. Authorization: Bearer test-key; rejected credential test-key. "
+      + "See https://user:password@models.example.test/v1?token=private-query\u001b " + "x".repeat(6_000) + " END-OF-MODEL-BODY" } }));
+  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  const { child, done } = f.start([prUrl]);
+  child.stdin.end();
+  const result = await done;
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Model HTTP error.*status=401/);
+  assert.match(result.stderr, /x-request-id=model-request-123/);
+  assert.match(result.stderr, /retry-after=17/);
+  assert.match(result.stderr, /conversation=\d+.*local\/test.*openai-completions/);
+  assert.match(result.stderr, /"stopReason":"error"/);
+  assert.match(result.stderr, /Audit failed: model_error.*Invalid credentials/);
+  assert.match(result.stderr, /submission=\d+, model=local\/test/);
+  assert.doesNotMatch(result.stderr, /test-key|github-key|private-cookie|user:password|private-query|\u001b|Saved evidence|END-OF-MODEL-BODY/);
+  assert.doesNotMatch(result.stdout, /Verdict:/);
+});
+
 for (const { name, path, method, status, body, headers, details, omitted } of [
   {
     name: "PR metadata", path: "/github/repos/acme/demo/pulls/7", method: "GET", status: 403,

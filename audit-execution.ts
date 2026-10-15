@@ -1,8 +1,9 @@
 import type { Context } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
-import type { DeferredHandle, Models } from "@earendil-works/pi-ai";
+import type { Api, DeferredHandle, Model, Models, StreamOptions } from "@earendil-works/pi-ai";
 import { GenerationTask, ProviderDoc, type ConversationId, type GenerationCheckpoint, type Harness } from "@earendil-works/pi-durable";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
+import { modelDiagnosticOptions, type AuditDiagnostics } from "./audit-diagnostics.ts";
 
 /** Preserve the synchronous stream interface while waiting for permission to make a provider request. */
 class AdmittedStream extends AssistantMessageEventStream {
@@ -25,21 +26,22 @@ class AdmittedStream extends AssistantMessageEventStream {
 /** Durable resumes the whole session. Gate external work by each conversation's persisted provider identity. */
 export function createAuditExecutionGate(models: Models) {
   const attached = Promise.withResolvers<Harness>();
-  const allowed = new Set<string>();
+  const allowed = new Map<string, AuditDiagnostics>();
   const waiting = new Map<string, ReturnType<typeof Promise.withResolvers<void>>>();
-  async function wait(sessionId: string | undefined, context: Context): Promise<void> {
+  async function wait(sessionId: string | undefined, context: Context): Promise<string> {
     if (!sessionId) throw new Error("Audit provider session identity is missing");
-    if (allowed.has(sessionId)) return;
+    if (allowed.has(sessionId)) return sessionId;
     let pending = waiting.get(sessionId);
     if (!pending) {
       pending = Promise.withResolvers<void>();
       waiting.set(sessionId, pending);
     }
     await awaitWithContext(pending.promise, context);
+    return sessionId;
   }
   // Durable 1.0.3 polls omit sessionId. Resolve the owning conversation from saved
   // generation checkpoints without changing the provider's opaque deferred handle.
-  async function waitDeferred(handle: DeferredHandle, context: Context): Promise<void> {
+  async function waitDeferred(handle: DeferredHandle, context: Context): Promise<string> {
     const harness = await awaitWithContext(attached.promise, context);
     const owners = new Set<ConversationId>();
     for (const { record } of (await harness.inspect(context)).tasks) {
@@ -52,7 +54,7 @@ export function createAuditExecutionGate(models: Models) {
     }
     if (owners.size !== 1) throw new Error("Deferred audit response has no unique owning conversation");
     const provider = await harness.snapshot(ProviderDoc, [...owners][0]!, context);
-    await wait(provider?.sessionId, context);
+    return wait(provider?.sessionId, context);
   }
   // Generation uses streams, compaction uses completeSimple, and recovered deferred work uses fetchDeferred.
   // Other model/auth/config methods retain the original runtime and its receiver. Deferred cancellation
@@ -70,7 +72,10 @@ export function createAuditExecutionGate(models: Models) {
           const context = options?.signal ? withAbortSignal(options.signal, BACKGROUND_CONTEXT) : BACKGROUND_CONTEXT;
           const permission = deferred.has(property) && !options?.sessionId
             ? waitDeferred(args[1] as DeferredHandle, context) : wait(options?.sessionId, context);
-          const admitted = permission.then(() => Reflect.apply(value, target, args));
+          const admitted = permission.then((sessionId) => {
+            args[2] = modelDiagnosticOptions(args[0] as Model<Api>, args[2] as StreamOptions | undefined, allowed.get(sessionId)!);
+            return Reflect.apply(value, target, args);
+          });
           return streams.has(property) ? new AdmittedStream(admitted as Promise<AssistantMessageEventStream>) : admitted;
         };
       }
@@ -81,8 +86,8 @@ export function createAuditExecutionGate(models: Models) {
     models: gatedModels,
     attach(harness: Harness): void { attached.resolve(harness); },
     wait,
-    allow(sessionId: string): void {
-      allowed.add(sessionId);
+    allow(sessionId: string, diagnostics: AuditDiagnostics): void {
+      allowed.set(sessionId, diagnostics);
       waiting.get(sessionId)?.resolve();
       waiting.delete(sessionId);
     },

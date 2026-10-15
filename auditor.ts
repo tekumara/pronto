@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
+import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { compileExclusions } from "./exclusions.ts";
 import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findApproval, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
@@ -625,10 +626,10 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
       gate.attach(harness);
       return {
         harness,
-        allow: async (id: ConversationId, context: Context) => {
+        allow: async (id: ConversationId, diagnostics: AuditDiagnostics, context: Context) => {
           const provider = await harness.snapshot(ProviderDoc, id, context);
           if (!provider) throw new Error("Audit provider session identity is missing");
-          gate.allow(provider.sessionId);
+          gate.allow(provider.sessionId, { ...diagnostics, warn: (message) => diagnostics.warn(`[audit:model] conversation=${id} ${message}`) });
         },
       };
     });
@@ -644,7 +645,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
       requests.add(requestKey);
       const label = labelOutput ? `[${target.owner}/${target.repo}#${target.pr}] ` : "";
       const log = (message: string) => console.log(`${label}${message}`);
-      const warn = (message: string) => console.error(`${label}${message}`);
+      const diagnostics = createAuditDiagnostics((message) => console.error(`${label}${message}`));
       const context = withAbortSignal(shutdown.signal, callerContext);
       try {
         let opened = repositories.get(repository);
@@ -659,7 +660,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
           repositories.set(repository, opened);
         }
         const repositoryAudit = await awaitWithContext(opened, context);
-        await auditRequest(target, { ...options, models }, repositoryAudit, context, log, warn);
+        await auditRequest(target, { ...options, models }, repositoryAudit, context, log, diagnostics);
       } finally {
         requests.delete(requestKey);
       }
@@ -744,7 +745,7 @@ export async function runAudits(urls: string[], options: AuditOptions & { models
 
 type RepositoryAudit = {
   harness: Harness;
-  allow(id: ConversationId, context: Context): Promise<void>;
+  allow(id: ConversationId, diagnostics: AuditDiagnostics, context: Context): Promise<void>;
 };
 
 /** PRs whose audit controller is still live in this database. A blocked one cannot run, so resuming it would only wait. */
@@ -759,8 +760,9 @@ async function unfinishedAudits(harness: Harness, context: Context): Promise<Rev
 }
 
 async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime }, repository: RepositoryAudit,
-  context: Context, log: (message: string) => void, warn: (message: string) => void): Promise<void> {
+  context: Context, log: (message: string) => void, diagnostics: AuditDiagnostics): Promise<void> {
   const { harness } = repository;
+  const { warn, text: diagnosticText } = diagnostics;
   const prKey = String(target.pr);
   let stream: Awaited<ReturnType<typeof watchEvents>> | undefined;
   try {
@@ -904,14 +906,26 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     if (!options.models.getAvailableSnapshot().some((m) => m.provider === savedModel?.provider && m.id === savedModel.modelId)) {
       throw new Error("The saved audit model is unavailable. Restore its Pi credentials before resuming.");
     }
-    await repository.allow(conversation.id, context);
+    await repository.allow(conversation.id, diagnostics, context);
     stream = await watchEvents(harness, conversation.id, context);
     stream.start(async (events) => {
       for (const event of events) {
         if (event.type === "tool_execution_start") {
           const text = `[audit:${event.toolName}] ${event.args.path ?? event.args.commentKey ?? ""}`;
           log(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
-        } else if (event.type === "auto_retry_start") warn(`Audit retry ${event.attempt}: ${event.errorMessage}`);
+        } else if (event.type === "auto_retry_start") {
+          warn(`Audit retry ${event.attempt}: ${event.errorMessage} (conversation=${conversation.id}, model=${savedModel?.provider}/${savedModel?.modelId}, retryAt=${new Date(event.at).toISOString()}, delayMs=${Math.max(0, event.at - Date.now())})`);
+        } else if (event.type === "message_end") {
+          const message = event.entry.model?.[0];
+          if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted" || message.diagnostics?.length)) {
+            // Do not log message content: it can contain PR evidence and model reasoning.
+            warn(`[audit:model] conversation=${conversation.id} ${message.provider}/${message.model} api=${message.api} ${JSON.stringify({
+              stopReason: message.stopReason, rawStopReason: message.rawStopReason, responseId: message.responseId,
+              errorMessage: message.errorMessage, usage: message.usage,
+              diagnostics: message.diagnostics?.map(({ type, timestamp, error }) => ({ type, timestamp, error })),
+            })}`);
+          }
+        }
       }
     });
     if (controllerTask == null) throw new Error("Incomplete audit has no controller task");
@@ -926,7 +940,10 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     if (!submission) throw new Error("Audit submission is missing");
     const settled = await submission.wait(context);
     const saved = await harness.snapshot(AuditDocument, conversation.id, context);
-    if (settled.status === "unanswered") throw new Error(`Audit failed: ${settled.reason}`);
+    if (settled.status === "unanswered") {
+      const detail = settled.detail === undefined ? "" : `: ${diagnosticText(settled.detail)}`;
+      throw new Error(diagnosticText(`Audit failed: ${settled.reason} (conversation=${conversation.id}, submission=${settled.id}, model=${savedModel?.provider}/${savedModel?.modelId})${detail}`));
+    }
     if (!saved?.report) {
       const answer = settled.type === "input"
         ? await conversation.commit(async (tx) => (await tx.entry(AssistantEntry, settled.answer))?.model?.[0], context)
