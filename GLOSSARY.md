@@ -9,9 +9,9 @@ A GitHub pull request review that Pronto has successfully submitted, containing 
 _Avoid_: Review publication, posted audit review
 
 **Webhook delivery**:
-One signed request from GitHub reporting an event on a pull request. Only a delivery that requests a review from the reviewer account, or readies a draft that already awaits it, starts an audit.
+One signed request from GitHub reporting activity on a pull request, such as a review request or a comment mentioning the reviewer account.
 _Avoid_: webhook event, trigger
 
 **Reviewer account**:
-The GitHub user the token belongs to. It receives review requests, and Pronto submits audit reviews as it.
+The GitHub user the token belongs to. It receives review requests and mentions, and Pronto submits audit reviews as it.
 _Avoid_: bot, viewer

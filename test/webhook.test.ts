@@ -87,10 +87,81 @@ test("ignores pull request actions that do not request a review", () => {
   }
 });
 
-test("ignores events other than pull_request and ping", () => {
-  for (const event of ["issue_comment", "pull_request_review", "push", "", undefined]) {
+const commentEvents = ["issue_comment", "pull_request_review_comment", "pull_request_review"] as const;
+
+function commented(event: typeof commentEvents[number], text: unknown, extra: object = {}) {
+  return {
+    action: event === "pull_request_review" ? "submitted" : "created",
+    ...(event === "issue_comment" ? { issue: { html_url: url, pull_request: { html_url: url } } } : { pull_request: pull() }),
+    [event === "pull_request_review" ? "review" : "comment"]: { body: text, user: { login: "author" }, state: "commented" },
+    ...extra,
+  };
+}
+
+for (const event of commentEvents) {
+  test(`audits new and edited ${event} mentions`, () => {
+    for (const action of [event === "pull_request_review" ? "submitted" : "created", "edited"]) {
+      assert.deepEqual(classifyDelivery(event, commented(event, "Please review, @ME.", { action }), "Me"),
+        { kind: "audit", url, reason: "mentioned in a pull request comment" });
+    }
+  });
+
+  test(`ignores ${event} deletions and unrelated actions even with a mention`, () => {
+    for (const action of ["deleted", "dismissed", "pinned", "unpinned", undefined]) {
+      assert.equal(classifyDelivery(event, commented(event, "@me", { action }), "me").kind, "ignore", String(action));
+    }
+  });
+
+  test(`ignores malformed ${event} payloads without throwing`, () => {
+    for (const payload of [null, undefined, "text", [], {},
+      commented(event, "@me", { issue: null, pull_request: null }),
+      ...[null, "@me", [], { body: 42 }].map((value) => commented(event, "@me", { comment: value, review: value })),
+    ]) {
+      assert.equal(classifyDelivery(event, payload, "me").kind, "ignore");
+    }
+  });
+
+  test(`ignores Pronto audit output in ${event} even when it mentions the reviewer`, () => {
+    assert.equal(classifyDelivery(event, commented(event, "Awaiting @me\n\n<!-- pronto:review-audit -->\n"), "me").kind, "ignore");
+  });
+
+  test(`requires a supported GitHub PR URL for ${event} mentions`, () => {
+    for (const html_url of [undefined, 42, "https://example.com/owner/repo/pull/42", "https://github.com/owner/repo/issues/42"]) {
+      const target = event === "issue_comment" ? { issue: { html_url: url, pull_request: { html_url } } } : { pull_request: pull({ html_url }) };
+      assert.equal(classifyDelivery(event, commented(event, "@me", target), "me").kind, "ignore", String(html_url));
+    }
+  });
+}
+
+test("matches whole mentions, not other users, emails or team mentions", () => {
+  for (const text of ["@octo-cat", "Thanks, @OCTO-CAT!", "@other @octo-cat\nplease review", "(@octo-cat)"]) {
+    assert.equal(classifyDelivery("issue_comment", commented("issue_comment", text), "Octo-Cat").kind, "audit", text);
+  }
+  for (const text of ["", "octo-cat", "@other", "@octo-catfish", "@octo-cat-bot", "@octo-cat_name", "@org/octo-cat",
+    "@octo-cat/team", "mail@octo-cat.com", "@@octo-cat", null, undefined, 42]) {
+    assert.equal(classifyDelivery("issue_comment", commented("issue_comment", text), "Octo-Cat").kind, "ignore", String(text));
+  }
+});
+
+test("ignores mentions on ordinary issues, even if their URL resembles a PR", () => {
+  const payload = commented("issue_comment", "@me", { issue: { html_url: url } });
+  assert.equal(classifyDelivery("issue_comment", payload, "me").kind, "ignore");
+});
+
+test("audits mentions in inline replies", () => {
+  const payload = commented("pull_request_review_comment", "@me", { comment: { body: "@me", in_reply_to_id: 123 } });
+  assert.equal(classifyDelivery("pull_request_review_comment", payload, "me").kind, "audit");
+});
+
+test("ignores mentions in pending review summaries", () => {
+  const payload = commented("pull_request_review", "@me", { review: { body: "@me", state: "pending" }, action: "edited" });
+  assert.equal(classifyDelivery("pull_request_review", payload, "me").kind, "ignore");
+});
+
+test("ignores unsupported events", () => {
+  for (const event of ["pull_request_review_thread", "commit_comment", "issues", "push", "", undefined]) {
     assert.deepEqual(classifyDelivery(event, requested({ login: "me" }), "me"),
-      { kind: "ignore", reason: "not a pull_request event" });
+      { kind: "ignore", reason: "not a supported event" });
   }
 });
 

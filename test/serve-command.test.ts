@@ -65,7 +65,7 @@ function watchOutput(child: ChildProcessWithoutNullStreams, stream: "stdout" | "
   };
 }
 
-test("serve audits a requested review, submits one verdict, ignores other requests and stops cleanly", { timeout: 40_000 }, async (t) => {
+test("serve audits a mention, submits one verdict, handles review requests and stops cleanly", { timeout: 40_000 }, async (t) => {
   const gh = github();
   let modelCalls = 0;
   const f = await fixture(t, (_body, response) => { modelCalls++; assess(response); }, { entrypoint: resolve("audit.ts"), github: gh.handler });
@@ -76,7 +76,9 @@ test("serve audits a requested review, submits one verdict, ignores other reques
   assert.match(out.output, /Reviewing as Me with local\/test(?! · previews only)/);
 
   assert.equal((await deliver(base, "{}", { event: "ping" })).status, 200);
-  const accepted = await deliver(base, reviewRequested("me", prUrl));
+  const mention = JSON.stringify({ action: "created", comment: { body: "Ready for another look, @me?", user: { login: "author" } },
+    issue: { html_url: prUrl, pull_request: { html_url: prUrl } } });
+  const accepted = await deliver(base, mention, { event: "issue_comment" });
   assert.equal(accepted.status, 202);
   assert.equal(((await accepted.json()) as { status: string }).status, "queued");
   await out.until(/\[acme\/demo#7\] \[audit\] Verdict comment posted to the PR: /);

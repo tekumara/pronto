@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { parseReviewTarget } from "./reviews.ts";
+import { isAuditComment, parseReviewTarget } from "./reviews.ts";
 
 export type Delivery =
   | { kind: "pong" }
@@ -17,6 +17,14 @@ function loginOf(value: unknown): string | undefined {
   return typeof login === "string" ? login.toLowerCase() : undefined;
 }
 
+function mentionsLogin(body: string, login: string): boolean {
+  // Match a whole @login, not an email address, a longer login or an @org/team mention.
+  for (const [, mentioned] of body.matchAll(/(?:^|[^\w@])@([\w-]+)(?![\w/-])/g)) {
+    if (mentioned!.toLowerCase() === login) return true;
+  }
+  return false;
+}
+
 /** Checks GitHub's `X-Hub-Signature-256` header against the raw request body: parsed JSON would not reproduce the signed bytes. */
 export function verifySignature(secret: string, body: string | Uint8Array, header: string | undefined): boolean {
   // An empty secret makes every signature forgeable, so it is a configuration error rather than a failed check.
@@ -27,9 +35,9 @@ export function verifySignature(secret: string, body: string | Uint8Array, heade
 }
 
 /**
- * Decides what a verified delivery means for `login`, the GitHub user Pronto reviews as. Only a review request for that
- * user starts an audit: a request from them directly, or a draft they were already asked to review becoming ready.
- * Requests for a team or another user, and every other event, are ignored.
+ * Decides what a verified delivery means for `login`, the GitHub user Pronto reviews as. Audits start for review
+ * requests, requested drafts becoming ready, and new or edited PR comments mentioning that user.
+ * Marked audit output is ignored so Pronto does not start audits in response to its own verdicts.
  *
  * The event header is not covered by the signature and the payload is unbounded, so reasons are fixed strings.
  */
@@ -37,13 +45,23 @@ export function classifyDelivery(event: string | undefined, payload: unknown, lo
   if (!login) throw new Error("The reviewer login is required to classify deliveries.");
   const ignore = (reason: string): Delivery => ({ kind: "ignore", reason });
   if (event === "ping") return { kind: "pong" };
-  if (event !== "pull_request") return ignore("not a pull_request event");
+  const isComment = event === "issue_comment" || event === "pull_request_review_comment" || event === "pull_request_review";
+  if (event !== "pull_request" && !isComment) return ignore("not a supported event");
   const body = object(payload);
-  const pull = object(body?.pull_request);
-  if (!body || !pull) return ignore("malformed pull_request payload");
+  const pull = event === "issue_comment" ? object(object(body?.issue)?.pull_request) : object(body?.pull_request);
+  if (!body || !pull) return ignore(isComment ? "comment is not on a pull request" : "malformed pull_request payload");
   const me = login.toLowerCase();
   let reason: string;
-  if (body.action === "review_requested") {
+  if (isComment) {
+    const isReview = event === "pull_request_review";
+    if (body.action !== (isReview ? "submitted" : "created") && body.action !== "edited") return ignore("comment action does not request an audit");
+    const comment = object(isReview ? body.review : body.comment);
+    if (typeof comment?.body !== "string") return ignore("comment has no body");
+    if (isReview && comment.state === "pending") return ignore("review has not been submitted");
+    if (isAuditComment(comment.body)) return ignore("Pronto audit output");
+    if (!mentionsLogin(comment.body, me)) return ignore("comment does not mention this user");
+    reason = "mentioned in a pull request comment";
+  } else if (body.action === "review_requested") {
     // A team request has `requested_team` instead of `requested_reviewer`, so it never matches.
     if (loginOf(body.requested_reviewer) !== me) return ignore("review not requested from this user");
     reason = "review requested";

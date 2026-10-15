@@ -64,10 +64,10 @@ test("answers a ping and ignores events that do not ask for an audit", async (t)
   const other = await deliver(base, reviewRequested("someone-else"));
   assert.equal(other.status, 204);
   assert.equal(await other.text(), "");
-  assert.equal((await deliver(base, reviewRequested(), { event: "issue_comment" })).status, 204);
+  assert.equal((await deliver(base, reviewRequested(), { event: "push" })).status, 204);
   assert.deepEqual(enqueued, []);
   assert.match(logs.join("\n"), /ignored: review not requested from this user/);
-  assert.match(logs.join("\n"), /ignored: not a pull_request event/);
+  assert.match(logs.join("\n"), /ignored: not a supported event/);
 });
 
 test("accepts a review request for the reviewer and hands the PR to the queue", async (t) => {

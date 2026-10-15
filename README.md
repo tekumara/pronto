@@ -136,7 +136,7 @@ An overlapping request for the same PR is rejected, including a forced restart. 
 
 ## Serve mode
 
-`pronto serve` starts a server for a GitHub webhook. When someone asks for your review on a PR, GitHub sends a delivery and Pronto runs the usual audit on that PR, with the same skips, cache and verdict as the CLI.
+`pronto serve` starts a server for a GitHub webhook. When someone requests your review or mentions you in a PR comment, Pronto runs the usual audit on that PR. It uses the same skips, cache and verdict as the CLI.
 
 ```sh
 export PRONTO_WEBHOOK_SECRET="$(openssl rand -hex 32)"
@@ -146,7 +146,7 @@ pronto serve --apply --approve
 To set it up:
 
 1. Run the server where GitHub can reach it. It listens on `127.0.0.1:8080` and speaks plain HTTP, so put HTTPS in front of it with a reverse proxy or a tunnel such as smee, cloudflared or ngrok. `--host 0.0.0.0` accepts outside connections.
-2. Add a webhook to the repository or organisation. Use the payload URL `https://<host>/webhook`, content type `application/json`, the same secret as `PRONTO_WEBHOOK_SECRET`, and the **Pull requests** event only.
+2. Add a webhook to the repository or organisation. Use the payload URL `https://<host>/webhook`, content type `application/json`, and the same secret as `PRONTO_WEBHOOK_SECRET`. Select the **Pull requests**, **Issue comments**, **Pull request review comments** and **Pull request reviews** events.
 3. Authenticate as for the CLI. The token must belong to a user (a personal access token or `gh auth login`), not a GitHub App installation, because that user is who Pronto reviews as.
 
 The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub rejects, or with an unavailable model. It checks all three before listening.
@@ -155,8 +155,9 @@ The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub
 
 - A review requested from the token's user. Logins match ignoring case. Requests for a team or another user are ignored, even if the user belongs to that team.
 - A draft that becomes ready for review while the user is already a requested reviewer. Drafts are skipped by default, so a request made on a draft would otherwise be lost.
+- A new or edited PR comment, inline comment or reply that mentions the token's user as `@login`. Submitted or edited review summaries also count. Mentions match whole logins, ignoring case. Emails, longer logins and team mentions do not count.
 
-Every other delivery is acknowledged and logged with the reason it was ignored.
+Ordinary issue comments, pending reviews and Pronto's marked audit output do not start audits. Every other delivery is also acknowledged and logged with the reason it was ignored.
 
 ### Options
 

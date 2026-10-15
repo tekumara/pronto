@@ -11,7 +11,7 @@ const RECENT_DELIVERIES = 1000;
 export type WebhookServerOptions = {
   /** Shared secret configured on the GitHub webhook. */
   secret: string;
-  /** GitHub user Pronto reviews as: only requests for them start audits. */
+  /** GitHub user Pronto reviews as: review requests and PR comment mentions of them start audits. */
   login: string;
   /** Hands a verified PR URL to the audit queue. */
   enqueue: (url: string) => Enqueued;
