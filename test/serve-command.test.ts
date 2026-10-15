@@ -3,7 +3,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { test } from "node:test";
-import { fixture, noDatabaseMigration, tool } from "./fixtures.ts";
+import { fixture, noDatabaseMigration, reply, tool } from "./fixtures.ts";
 import { deliver, reviewRequested, webhookSecret } from "./webhook-fixtures.ts";
 
 const prUrl = "https://github.com/acme/demo/pull/7";
@@ -43,10 +43,10 @@ function github(user: (response: ServerResponse) => void = (response) => respons
 const assess = (response: ServerResponse) => tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
 
 /** Collects a child's output and resolves when a pattern appears in it. */
-function watchOutput(child: ChildProcessWithoutNullStreams) {
+function watchOutput(child: ChildProcessWithoutNullStreams, stream: "stdout" | "stderr" = "stdout") {
   let output = "";
   const waiters: { pattern: RegExp; resolve(match: RegExpMatchArray): void }[] = [];
-  child.stdout.on("data", (data) => {
+  child[stream].on("data", (data) => {
     output += data;
     for (const waiter of [...waiters]) {
       const match = output.match(waiter.pattern);
@@ -137,7 +137,7 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
 
     const second = f.start(["serve", "--port", "0", "--apply"], { env });
     const out = watchOutput(second.child);
-    await out.until(/\[serve\] Resuming unfinished audit: https:\/\/github\.com\/acme\/demo\/pull\/7/);
+    await out.until(/\[serve\] Recovering audit: https:\/\/github\.com\/acme\/demo\/pull\/7/);
     await out.until(/\[acme\/demo#7\] \[audit\] Resuming saved snapshot/);
     await out.until(/\[acme\/demo#7\] \[audit\] Verdict comment posted to the PR: /);
     assert.equal(gh.reviews.length, 1);
@@ -145,6 +145,54 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
     second.child.kill("SIGTERM");
     const result = await second.done;
     assert.equal(result.code, 0, result.stderr);
+  });
+}
+
+for (const failure of ["model error", "missing assessment"] as const) {
+  test(`serve retries the latest ${failure} once per startup without falling back to an older success`, { timeout: 40_000 }, async (t) => {
+    const gh = github();
+    let calls = 0;
+    const f = await fixture(t, (_body, response) => {
+      calls++;
+      if (calls === 1 || calls >= 4) assess(response);
+      else if (failure === "model error") {
+        response.writeHead(401, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: "Model unavailable" } }));
+      } else reply(response, [{ role: "assistant", content: "No structured report." }]);
+    }, { entrypoint: resolve("audit.ts"), github: gh.handler });
+    // Keep an older, reusable success: recovery must retry the latest failed attempt, not reuse it.
+    await f.run("", [prUrl]);
+    const failed = f.start(["--force", prUrl]);
+    failed.child.stdin.end();
+    assert.equal((await failed.done).code, 1);
+    assert.equal(calls, 2);
+
+    for (const expectedCalls of [3, 4]) {
+      const run = f.start(["serve", "--port", "0", "--apply"], { env });
+      const out = watchOutput(run.child);
+      const errors = watchOutput(run.child, "stderr");
+      const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+      assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
+      assert.match(out.output, /\[serve\] Recovering audit: https:\/\/github\.com\/acme\/demo\/pull\/7/);
+      if (expectedCalls === 3) await errors.until(/\[serve\] Audit failed for /);
+      else await out.until(/Verdict comment posted to the PR: /);
+      assert.equal(calls, expectedCalls, "each startup admits one fresh assessment, without another webhook");
+      assert.equal(gh.reviews.length, expectedCalls === 3 ? 0 : 1);
+      run.child.kill("SIGTERM");
+      assert.equal((await run.done).code, 0);
+    }
+    assert.equal(gh.requests.filter((path) => path === "GET /github/repos/acme/demo/pulls/7/comments").length, 4,
+      "failed assessments must fetch fresh evidence on recovery");
+
+    const run = f.start(["serve", "--port", "0", "--apply"], { env });
+    const out = watchOutput(run.child);
+    const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
+    assert.doesNotMatch(out.output, /Recovering audit/,
+      "successful and superseded failed attempts must not be recovered");
+    run.child.kill("SIGTERM");
+    assert.equal((await run.done).code, 0);
+    assert.equal(calls, 4);
+    assert.equal(gh.reviews.length, 1);
   });
 }
 
@@ -156,7 +204,7 @@ test("serve checks a resumed PR again, so one merged in the meantime is skipped"
   gh.state.merged = true;
   const second = f.start(["serve", "--port", "0", "--apply"], { env });
   const out = watchOutput(second.child);
-  await out.until(/\[serve\] Resuming unfinished audit: /);
+  await out.until(/\[serve\] Recovering audit: /);
   await out.until(/\[acme\/demo#7\] \[audit\] Skipping https:\/\/github\.com\/acme\/demo\/pull\/7: PR has already been merged\./);
   second.child.kill("SIGTERM");
   assert.equal((await second.done).code, 0);
@@ -172,7 +220,7 @@ test("serve does not hold repository databases that have nothing to resume", { t
   const run = f.start(["serve", "--port", "0"], { env });
   const out = watchOutput(run.child);
   await out.until(/Listening on /);
-  assert.doesNotMatch(out.output, /Resuming unfinished audit/);
+  assert.doesNotMatch(out.output, /Recovering audit/);
   const cli = await f.run("", [prUrl]);
   assert.match(cli, /Reusing saved assessment/, "the CLI must still be able to open the repository while the server runs");
   run.child.kill("SIGTERM");
@@ -194,7 +242,7 @@ test("serve starts and reports a repository database that another process holds"
   second.child.kill("SIGTERM");
   const result = await second.done;
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stderr, /\[serve\] Skipped github\.com\/acme~demo, so its unfinished audits are not resumed: .*Database is already in use/);
+  assert.match(result.stderr, /\[serve\] Skipped github\.com\/acme~demo, so its audits are not recovered: .*Database is already in use/);
   first.child.kill("SIGTERM");
   assert.equal((await first.done).code, 0);
 });

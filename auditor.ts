@@ -5,7 +5,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, watchEvents,
-  type Conversation, type ConversationId, type Harness, type ModelRef, type SubmissionId, type TaskId,
+  type Conversation, type ConversationId, type Cursor, type Harness, type ModelRef, type SubmissionId, type TaskId,
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
@@ -601,6 +601,7 @@ export type AuditOptions = {
 export function createAuditor(models: ModelRuntime, { labelOutput = true } = {}) {
   const repositories = new Map<string, Promise<RepositoryAudit>>();
   const requests = new Set<string>();
+  const failedRecoveries = new Set<string>();
   const shutdown = new AbortController();
   let closing: Promise<void> | undefined;
 
@@ -660,15 +661,16 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
           repositories.set(repository, opened);
         }
         const repositoryAudit = await awaitWithContext(opened, context);
-        await auditRequest(target, { ...options, models }, repositoryAudit, context, log, diagnostics);
+        const retryFailed = failedRecoveries.delete(requestKey);
+        await auditRequest(target, { ...options, force: options.force || retryFailed, models }, repositoryAudit, context, log, diagnostics);
       } finally {
         requests.delete(requestKey);
       }
     },
     /**
-     * Opens every saved repository database and returns the PR URLs of audits that were unfinished when it was last
-     * closed, for the caller to audit again. A database with none is closed at once, so it is not held. One that cannot
-     * be opened, such as a database another process holds, is skipped and reported.
+     * Opens saved repository databases and returns unfinished and latest failed assessments for the caller to audit.
+     * Failed assessments get one fresh attempt, bypassing any older cache. Interrupted work keeps its saved snapshot.
+     * Databases with nothing to recover are closed; ones that cannot be opened are skipped and reported.
      */
     async recover(context: Context = BACKGROUND_CONTEXT): Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> {
       const urls: string[] = [];
@@ -678,7 +680,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
         let repository: RepositoryAudit | undefined;
         try {
           repository = await openRepository(host, name);
-          const targets = await unfinishedAudits(repository.harness, context);
+          const unfinished = await unfinishedAudits(repository.harness, context);
+          const failed = await failedAudits(repository.harness, context);
+          const targets = [...unfinished, ...failed];
           if (closing || !targets.length) {
             await repository.harness.close(context);
             repository = undefined;
@@ -688,6 +692,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
           // Register under the key audit() computes from the same URL, so it reuses this harness rather than opening the database again.
           repositories.set(repositoryKey(targets[0]!), Promise.resolve(repository));
           repository = undefined;
+          for (const target of failed) failedRecoveries.add(`${repositoryKey(target)}#${target.pr}`);
           urls.push(...targets.map((target) => target.url));
         } catch (error) {
           if (closing) throw error;
@@ -757,6 +762,35 @@ async function unfinishedAudits(harness: Harness, context: Context): Promise<Rev
     if (target) targets.set(target.url, target);
   }
   return [...targets.values()];
+}
+
+/** Read existing receipts, including failures saved before startup recovery supported them. Never revive old or cancelled attempts. */
+async function failedAudits(harness: Harness, context: Context): Promise<ReviewTarget[]> {
+  const targets: ReviewTarget[] = [];
+  let cursor: Cursor | undefined;
+  do {
+    const page = await harness.commit((tx) => tx.scanTasks({
+      kind: AuditController.definition.name, status: "terminal",
+    }, 100, cursor), context);
+    for (const record of page.items) {
+      if (record.version !== AuditController.definition.version || record.state.status !== "terminal"
+        || record.state.outcome.status !== "completed") continue;
+      const { pr } = record.input as { pr: string };
+      const runs = await harness.snapshot(AuditRuns, pr, context);
+      if (runs?.active !== record.conversationId || runs.controllerTask !== record.id || !runs.complete) continue;
+      const saved = await harness.snapshot(AuditDocument, record.conversationId, context);
+      if (!saved?.snapshot || saved.report) continue;
+      // The controller completes its bookkeeping even when the model never produces an assessment.
+      const { submissionId } = record.state.outcome.result as AuditResult;
+      const submission = await harness.submission(submissionId, context);
+      const settled = await submission?.status(context);
+      if (settled?.status === "done" || (settled?.status === "unanswered" && settled.reason === "model_error")) {
+        targets.push(saved.snapshot.target);
+      }
+    }
+    cursor = page.next;
+  } while (cursor);
+  return targets;
 }
 
 async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime }, repository: RepositoryAudit,

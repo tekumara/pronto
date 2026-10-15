@@ -45,13 +45,13 @@ export async function runServe(args: string[]): Promise<void> {
   process.on("SIGTERM", stop);
   try {
     // Before listening, so a delivery cannot race recovery to open the same repository database.
-    const { urls: unfinished, skipped } = await auditor.recover();
-    for (const { database, error } of skipped) console.error(`[serve] Skipped ${database}, so its unfinished audits are not resumed: ${describe(error)}`);
+    const { urls: recoverable, skipped } = await auditor.recover();
+    for (const { database, error } of skipped) console.error(`[serve] Skipped ${database}, so its audits are not recovered: ${describe(error)}`);
     const address = await server.listen(port, host);
     console.log(`[serve] Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · previews only, add --apply to submit reviews"}`);
     console.log(`[serve] Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
-    for (const url of unfinished) {
-      console.log(`[serve] Resuming unfinished audit: ${url}`);
+    for (const url of recoverable) {
+      console.log(`[serve] Recovering audit: ${url}`);
       queue.enqueue(url);
     }
     const signal = await stopped.promise;
