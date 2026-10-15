@@ -17,6 +17,30 @@ function loginOf(value: unknown): string | undefined {
   return typeof login === "string" ? login.toLowerCase() : undefined;
 }
 
+/** Formats only bounded metadata for logs, never comment bodies or the full payload. */
+export function formatDeliveryContext(event: string | undefined, payload: unknown, login: string): string {
+  // The event header is unsigned. Payload strings also need bounds and a plain shape, including [bot] login suffixes.
+  const token = (value: unknown): string => typeof value === "string" && value.length > 0 && value.length <= 100
+    && !/[^\w[\]-]/.test(value) ? value : "-";
+  const body = object(payload);
+  const pull = event === "issue_comment" ? object(object(body?.issue)?.pull_request) : object(body?.pull_request);
+  let pr = "-";
+  if (typeof pull?.html_url === "string" && pull.html_url.length <= 512) {
+    try {
+      pr = parseReviewTarget(pull.html_url).url;
+    } catch {
+      // Do not log unsupported URLs, which could include credentials or other private text.
+    }
+  }
+  const fields = [
+    `event=${token(event)}`, `action=${token(body?.action)}`, `pr=${pr}`,
+    `sender=${token(object(body?.sender)?.login)}`, `reviewer=${token(login)}`,
+  ];
+  if (body?.requested_reviewer !== undefined) fields.push(`requested_reviewer=${token(object(body.requested_reviewer)?.login)}`);
+  if (body?.requested_team !== undefined) fields.push(`requested_team=${token(object(body.requested_team)?.slug)}`);
+  return fields.join(" ");
+}
+
 function mentionsLogin(body: string, login: string): boolean {
   // Match a whole @login, not an email address, a longer login or an @org/team mention.
   for (const [, mentioned] of body.matchAll(/(?:^|[^\w@])@([\w-]+)(?![\w/-])/g)) {

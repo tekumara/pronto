@@ -70,6 +70,62 @@ test("answers a ping and ignores events that do not ask for an audit", async (t)
   assert.match(logs.join("\n"), /ignored: not a supported event/);
 });
 
+test("logs the action, PR, sender and reviewer context for ignored deliveries", async (t) => {
+  const { base, enqueued, logs } = await start(t);
+  const pull_request = { html_url: url };
+  const sender = { login: "alice" };
+  const cases = [
+    {
+      event: "pull_request", payload: { action: "synchronize", pull_request, sender },
+      reason: "pull request action does not request a review",
+      context: `event=pull_request action=synchronize pr=${url} sender=alice reviewer=me`,
+    },
+    {
+      event: "pull_request", payload: { action: "review_requested", pull_request, sender, requested_reviewer: { login: "someone-else" } },
+      reason: "review not requested from this user",
+      context: `event=pull_request action=review_requested pr=${url} sender=alice reviewer=me requested_reviewer=someone-else`,
+    },
+    {
+      event: "pull_request", payload: { action: "review_requested", pull_request, sender, requested_team: { slug: "core" } },
+      reason: "review not requested from this user",
+      context: `event=pull_request action=review_requested pr=${url} sender=alice reviewer=me requested_team=core`,
+    },
+    {
+      event: "issue_comment", payload: { action: "created", issue: { pull_request }, sender: { login: "helper[bot]" }, comment: { body: "Private discussion without a mention." } },
+      reason: "comment does not mention this user",
+      context: `event=issue_comment action=created pr=${url} sender=helper[bot] reviewer=me`,
+    },
+  ];
+  for (const { event, payload, reason, context } of cases) {
+    const id = randomUUID();
+    assert.equal((await deliver(base, JSON.stringify(payload), { event, id })).status, 204);
+    assert.equal(logs.at(-1), `[webhook ${id}] ignored: ${reason} (${context})`);
+  }
+  assert.deepEqual(enqueued, []);
+});
+
+test("keeps ignored-delivery metadata bounded and safe, even for malformed payloads", async (t) => {
+  const { base, logs, enqueued } = await start(t);
+  const injected = "synchronize\n[webhook forged] injected=true\u001b[2J\u202e";
+  const oversized = "x".repeat(10_000);
+  for (const value of [injected, oversized]) {
+    const payload = {
+      action: value, sender: { login: value }, requested_reviewer: { login: value }, requested_team: { slug: value },
+      pull_request: { html_url: value === oversized ? `https://github.com/owner/${oversized}/pull/42` : `${url}?secret=private` },
+      comment: { body: "Private discussion." },
+    };
+    const id = randomUUID();
+    assert.equal((await deliver(base, JSON.stringify(payload), { event: "untrusted event=value", id })).status, 204);
+    assert.equal(logs.at(-1), `[webhook ${id}] ignored: not a supported event (event=- action=- pr=- sender=- reviewer=me requested_reviewer=- requested_team=-)`);
+  }
+  for (const payload of [null, [], { action: 42, pull_request: "malformed", sender: { login: {} } }]) {
+    const id = randomUUID();
+    assert.equal((await deliver(base, JSON.stringify(payload), { id })).status, 204);
+    assert.equal(logs.at(-1), `[webhook ${id}] ignored: malformed pull_request payload (event=pull_request action=- pr=- sender=- reviewer=me)`);
+  }
+  assert.deepEqual(enqueued, []);
+});
+
 test("accepts a review request for the reviewer and hands the PR to the queue", async (t) => {
   const { base, enqueued, logs } = await start(t);
   const id = randomUUID();

@@ -159,6 +159,8 @@ The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub
 
 Ordinary issue comments, pending reviews and Pronto's marked audit output do not start audits. Every other delivery is also acknowledged and logged with the reason it was ignored.
 
+Ignored-delivery logs include the event, action, PR URL, sender and reviewer account, plus the requested reviewer or team when present. Missing or unsafe values appear as `-`. Logged values have length limits, and logs omit comment bodies and the full payload.
+
 ### Options
 
 `--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup and apply to every audit, as described in the [quick start](#quick-start). Without `--apply`, the server only logs previews.

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Enqueued } from "./audit-queue.ts";
-import { classifyDelivery, verifySignature } from "./webhook.ts";
+import { classifyDelivery, formatDeliveryContext, verifySignature } from "./webhook.ts";
 
 export const DEFAULT_WEBHOOK_PATH = "/webhook";
 // GitHub caps payloads at 25 MB, but a pull_request event is a small fraction of that.
@@ -92,10 +92,11 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
       log(`${tag} rejected: payload is not JSON`);
       return send(res, 400, { error: "payload is not JSON; set the webhook content type to application/json" });
     }
-    const delivery = classifyDelivery(header(req, "x-github-event"), payload, login);
+    const event = header(req, "x-github-event");
+    const delivery = classifyDelivery(event, payload, login);
     if (delivery.kind === "pong") return send(res, 200, { status: "pong" });
     if (delivery.kind === "ignore") {
-      log(`${tag} ignored: ${delivery.reason}`);
+      log(`${tag} ignored: ${delivery.reason} (${formatDeliveryContext(event, payload, login)})`);
       return send(res, 204);
     }
     if (id && recent.has(id)) {
