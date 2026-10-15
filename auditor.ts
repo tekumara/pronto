@@ -662,7 +662,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
         }
         const repositoryAudit = await awaitWithContext(opened, context);
         const retryFailed = failedRecoveries.delete(requestKey);
-        await auditRequest(target, { ...options, force: options.force || retryFailed, models }, repositoryAudit, context, log, diagnostics);
+        await auditRequest(target, { ...options, retryFailed, models }, repositoryAudit, context, log, diagnostics);
       } finally {
         requests.delete(requestKey);
       }
@@ -793,7 +793,7 @@ async function failedAudits(harness: Harness, context: Context): Promise<ReviewT
   return targets;
 }
 
-async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime }, repository: RepositoryAudit,
+async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime; retryFailed: boolean }, repository: RepositoryAudit,
   context: Context, log: (message: string) => void, diagnostics: AuditDiagnostics): Promise<void> {
   const { harness } = repository;
   const { warn, text: diagnosticText } = diagnostics;
@@ -843,15 +843,17 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
         return;
       }
     }
-    // Persist force intent before cancellation/evidence fetching. A crash must not turn --force into a cache hit,
-    // or silently switch its selected model. Clear the intent only when the new snapshot is admitted.
-    if (options.force) await harness.commit(async (tx) => {
+    // Persist restart intent before cancellation/evidence fetching. A crash must not turn a requested restart into
+    // a cache hit or switch its selected model. Clear the intent only when the new snapshot is admitted.
+    if (options.force || options.retryFailed) await harness.commit(async (tx) => {
       (await tx.doc(AuditRuns, prKey, null)).restartModel = options.model;
     }, context);
     let state = await harness.snapshot(AuditRuns, prKey, context);
     const previousId = state?.latestSuccess?.conversationId ?? state?.active;
     if (state?.restartModel && previousId != null) {
-      outputRefreshReasons(state.active ?? previousId, [options.force ? "--force requested" : "saved --force restart intent"], log);
+      const reason = options.force ? "--force requested"
+        : options.retryFailed ? "retrying failed audit after startup recovery" : "saved restart intent";
+      outputRefreshReasons(state.active ?? previousId, [reason], log);
     }
     if (state?.restartModel && state.active !== null && !state.complete) {
       const existing = await harness.conversation(state.active, context);

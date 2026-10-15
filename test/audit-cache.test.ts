@@ -530,7 +530,7 @@ test("force-restart intent and model survive a crash during fresh evidence fetch
   const recovered = await f.run("", [url]);
   assert.deepEqual(models, ["test", "test", "other"]);
   assert.doesNotMatch(recovered, /Reusing.*assessment/);
-  assert.match(recovered, /saved --force restart intent/);
+  assert.match(recovered, /saved restart intent/);
   const cached = await f.run("", [url, "local/other"]);
   assert.match(cached, /Reusing.*assessment/);
   assert.equal(calls, 3);

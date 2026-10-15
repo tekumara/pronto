@@ -175,6 +175,8 @@ for (const failure of ["model error", "missing assessment"] as const) {
       assert.match(out.output, /\[serve\] Recovering audit: https:\/\/github\.com\/acme\/demo\/pull\/7/);
       if (expectedCalls === 3) await errors.until(/\[serve\] Audit failed for /);
       else await out.until(/Verdict comment posted to the PR: /);
+      assert.match(out.output, /retrying failed audit after startup recovery/);
+      assert.doesNotMatch(out.output, /--force requested/, "startup recovery must not claim a user requested --force");
       assert.equal(calls, expectedCalls, "each startup admits one fresh assessment, without another webhook");
       assert.equal(gh.reviews.length, expectedCalls === 3 ? 0 : 1);
       run.child.kill("SIGTERM");
