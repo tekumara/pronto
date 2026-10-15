@@ -442,7 +442,7 @@ test("audit logs HTTP failure metadata and retains the final model error without
   assert.match(result.stderr, /x-request-id=model-request-123/);
   assert.match(result.stderr, /retry-after=17/);
   assert.match(result.stderr, /conversation=\d+.*local\/test.*openai-completions/);
-  assert.match(result.stderr, /"stopReason":"error"/);
+  assert.doesNotMatch(result.stderr, /"stopReason"|"errorMessage"|"usage"/, "do not print duplicate model-message JSON");
   assert.match(result.stderr, /Audit failed: model_error.*Invalid credentials/);
   assert.match(result.stderr, /submission=\d+, model=local\/test/);
   assert.doesNotMatch(result.stderr, /test-key|github-key|private-cookie|user:password|private-query|\u001b|Saved evidence|END-OF-MODEL-BODY/);

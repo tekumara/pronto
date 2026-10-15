@@ -915,16 +915,6 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           log(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
         } else if (event.type === "auto_retry_start") {
           warn(`Audit retry ${event.attempt}: ${event.errorMessage} (conversation=${conversation.id}, model=${savedModel?.provider}/${savedModel?.modelId}, retryAt=${new Date(event.at).toISOString()}, delayMs=${Math.max(0, event.at - Date.now())})`);
-        } else if (event.type === "message_end") {
-          const message = event.entry.model?.[0];
-          if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted" || message.diagnostics?.length)) {
-            // Do not log message content: it can contain PR evidence and model reasoning.
-            warn(`[audit:model] conversation=${conversation.id} ${message.provider}/${message.model} api=${message.api} ${JSON.stringify({
-              stopReason: message.stopReason, rawStopReason: message.rawStopReason, responseId: message.responseId,
-              errorMessage: message.errorMessage, usage: message.usage,
-              diagnostics: message.diagnostics?.map(({ type, timestamp, error }) => ({ type, timestamp, error })),
-            })}`);
-          }
         }
       }
     });
