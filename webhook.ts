@@ -18,7 +18,7 @@ function loginOf(value: unknown): string | undefined {
 }
 
 /** Formats only bounded metadata for logs, never comment bodies or the full payload. */
-export function formatDeliveryContext(event: string | undefined, payload: unknown, login: string): string {
+export function formatDeliveryContext(event: string | undefined, payload: unknown): string {
   // The event header is unsigned. Payload strings also need bounds and a plain shape, including [bot] login suffixes.
   const token = (value: unknown): string => typeof value === "string" && value.length > 0 && value.length <= 100
     && !/[^\w[\]-]/.test(value) ? value : "-";
@@ -34,7 +34,7 @@ export function formatDeliveryContext(event: string | undefined, payload: unknow
   }
   const fields = [
     `event=${token(event)}`, `action=${token(body?.action)}`, `pr=${pr}`,
-    `sender=${token(object(body?.sender)?.login)}`, `reviewer=${token(login)}`,
+    `sender=${token(object(body?.sender)?.login)}`,
   ];
   if (body?.requested_reviewer !== undefined) fields.push(`requested_reviewer=${token(object(body.requested_reviewer)?.login)}`);
   if (body?.requested_team !== undefined) fields.push(`requested_team=${token(object(body.requested_team)?.slug)}`);

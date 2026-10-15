@@ -70,7 +70,7 @@ test("answers a ping and ignores events that do not ask for an audit", async (t)
   assert.match(logs.join("\n"), /ignored: not a supported event/);
 });
 
-test("logs the action, PR, sender and reviewer context for ignored deliveries", async (t) => {
+test("logs ignored delivery context without repeating the configured reviewer", async (t) => {
   const { base, enqueued, logs } = await start(t);
   const pull_request = { html_url: url };
   const sender = { login: "alice" };
@@ -78,22 +78,22 @@ test("logs the action, PR, sender and reviewer context for ignored deliveries", 
     {
       event: "pull_request", payload: { action: "synchronize", pull_request, sender },
       reason: "pull request action does not request a review",
-      context: `event=pull_request action=synchronize pr=${url} sender=alice reviewer=me`,
+      context: `event=pull_request action=synchronize pr=${url} sender=alice`,
     },
     {
       event: "pull_request", payload: { action: "review_requested", pull_request, sender, requested_reviewer: { login: "someone-else" } },
       reason: "review not requested from this user",
-      context: `event=pull_request action=review_requested pr=${url} sender=alice reviewer=me requested_reviewer=someone-else`,
+      context: `event=pull_request action=review_requested pr=${url} sender=alice requested_reviewer=someone-else`,
     },
     {
       event: "pull_request", payload: { action: "review_requested", pull_request, sender, requested_team: { slug: "core" } },
       reason: "review not requested from this user",
-      context: `event=pull_request action=review_requested pr=${url} sender=alice reviewer=me requested_team=core`,
+      context: `event=pull_request action=review_requested pr=${url} sender=alice requested_team=core`,
     },
     {
       event: "issue_comment", payload: { action: "created", issue: { pull_request }, sender: { login: "helper[bot]" }, comment: { body: "Private discussion without a mention." } },
       reason: "comment does not mention this user",
-      context: `event=issue_comment action=created pr=${url} sender=helper[bot] reviewer=me`,
+      context: `event=issue_comment action=created pr=${url} sender=helper[bot]`,
     },
   ];
   for (const { event, payload, reason, context } of cases) {
@@ -116,12 +116,12 @@ test("keeps ignored-delivery metadata bounded and safe, even for malformed paylo
     };
     const id = randomUUID();
     assert.equal((await deliver(base, JSON.stringify(payload), { event: "untrusted event=value", id })).status, 204);
-    assert.equal(logs.at(-1), `[webhook ${id}] ignored: not a supported event (event=- action=- pr=- sender=- reviewer=me requested_reviewer=- requested_team=-)`);
+    assert.equal(logs.at(-1), `[webhook ${id}] ignored: not a supported event (event=- action=- pr=- sender=- requested_reviewer=- requested_team=-)`);
   }
   for (const payload of [null, [], { action: 42, pull_request: "malformed", sender: { login: {} } }]) {
     const id = randomUUID();
     assert.equal((await deliver(base, JSON.stringify(payload), { id })).status, 204);
-    assert.equal(logs.at(-1), `[webhook ${id}] ignored: malformed pull_request payload (event=pull_request action=- pr=- sender=- reviewer=me)`);
+    assert.equal(logs.at(-1), `[webhook ${id}] ignored: malformed pull_request payload (event=pull_request action=- pr=- sender=-)`);
   }
   assert.deepEqual(enqueued, []);
 });

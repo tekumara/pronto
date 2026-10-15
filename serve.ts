@@ -96,7 +96,7 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
     const delivery = classifyDelivery(event, payload, login);
     if (delivery.kind === "pong") return send(res, 200, { status: "pong" });
     if (delivery.kind === "ignore") {
-      log(`${tag} ignored: ${delivery.reason} (${formatDeliveryContext(event, payload, login)})`);
+      log(`${tag} ignored: ${delivery.reason} (${formatDeliveryContext(event, payload)})`);
       return send(res, 204);
     }
     if (id && recent.has(id)) {
