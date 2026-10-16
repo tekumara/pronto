@@ -48,7 +48,7 @@ test("answers a ping without auditing", () => {
 
 test("audits a review request for the reviewer", () => {
   assert.deepEqual(classifyDelivery("pull_request", requested({ login: "me" }), "me"),
-    { kind: "audit", url, reason: "review requested" });
+    { kind: "audit", url, reason: "review requested", requester: "-" });
 });
 
 test("matches the reviewer's login case-insensitively", () => {
@@ -69,7 +69,7 @@ test("ignores a team review request, even if the reviewer is a member", () => {
 test("audits a draft that becomes ready while the reviewer is requested", () => {
   const ready = { action: "ready_for_review", pull_request: pull({ requested_reviewers: [{ login: "other" }, { login: "ME" }] }) };
   assert.deepEqual(classifyDelivery("pull_request", ready, "me"),
-    { kind: "audit", url, reason: "ready for review while requested" });
+    { kind: "audit", url, reason: "ready for review while requested", requester: "-" });
 });
 
 test("ignores a ready draft that is not waiting on the reviewer", () => {
@@ -102,7 +102,7 @@ for (const event of commentEvents) {
   test(`audits new and edited ${event} mentions`, () => {
     for (const action of [event === "pull_request_review" ? "submitted" : "created", "edited"]) {
       assert.deepEqual(classifyDelivery(event, commented(event, "Please review, @ME.", { action }), "Me"),
-        { kind: "audit", url, reason: "mentioned in a pull request comment" });
+        { kind: "audit", url, reason: "mentioned in a pull request comment", requester: "-" });
     }
   });
 
@@ -190,7 +190,7 @@ test("ignores a pull request without a usable GitHub PR URL", () => {
 
 test("normalises the audited URL like a CLI target", () => {
   const delivery = classifyDelivery("pull_request", requested({ login: "me" }, { html_url: `${url}/` }), "me");
-  assert.deepEqual(delivery, { kind: "audit", url, reason: "review requested" });
+  assert.deepEqual(delivery, { kind: "audit", url, reason: "review requested", requester: "-" });
 });
 
 test("requires a reviewer login", () => {

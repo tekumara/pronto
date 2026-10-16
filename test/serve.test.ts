@@ -130,11 +130,22 @@ test("keeps ignored-delivery metadata bounded and safe, even for malformed paylo
 test("accepts a review request for the reviewer and hands the PR to the queue", async (t) => {
   const { base, enqueued, logs } = await start(t);
   const id = randomUUID();
-  const response = await deliver(base, reviewRequested(), { id });
+  const response = await deliver(base, reviewRequested("me", url, "Alice"), { id });
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), { status: "queued" });
   assert.deepEqual(enqueued, [url]);
-  assert.deepEqual(logs, [{ level: "info", scope: "owner/repo#42", message: "Queued · review requested", detail: `delivery=${id}` }]);
+  assert.deepEqual(logs, [{ level: "info", scope: "owner/repo#42", message: "Queued · review requested · requester=Alice", detail: `delivery=${id}` }]);
+});
+
+test("keeps missing or unsafe requesters out of queued logs without rejecting the audit", async (t) => {
+  const { base, enqueued, logs } = await start(t);
+  for (const sender of [undefined, null, "alice", {}, { login: 42 }, { login: "" },
+    { login: "alice\nforged=true\u001b[2J\u202e" }, { login: "x".repeat(10_000) }]) {
+    const payload = { ...JSON.parse(reviewRequested()), sender };
+    assert.equal((await deliver(base, JSON.stringify(payload))).status, 202);
+    assert.equal(logs.at(-1)!.message, "Queued · review requested · requester=-");
+  }
+  assert.equal(enqueued.length, 8);
 });
 
 test("reports how the queue handled the request", async (t) => {

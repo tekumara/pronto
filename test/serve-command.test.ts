@@ -82,7 +82,7 @@ for (const verbose of [false, true]) {
     assert.equal((await deliver(base, "{}", { signature: null })).status, 401);
     await errors.until(/WARN\s+webhook\s+Rejected: missing or invalid signature/);
     assert.equal((await deliver(base, "{}", { event: "ping" })).status, 200);
-    const mention = JSON.stringify({ action: "created", comment: { body: "Ready for another look, @me?", user: { login: "author" } },
+    const mention = JSON.stringify({ action: "created", sender: { login: "maintainer" }, comment: { body: "Ready for another look, @me?", user: { login: "author" } },
       issue: { html_url: prUrl, pull_request: { html_url: prUrl } } });
     const accepted = await deliver(base, mention, { event: "issue_comment" });
     assert.equal(accepted.status, 202);
@@ -94,13 +94,14 @@ for (const verbose of [false, true]) {
     assert.match(gh.reviews[0]!.body, /Review audit/);
 
     // A repeat request reuses the assessment and does not post the same verdict again.
-    const repeat = await deliver(base, reviewRequested("me", prUrl));
+    const repeat = await deliver(base, reviewRequested("me", prUrl, "alice"));
     assert.equal(repeat.status, 202);
     await out.until(/INFO\s+acme\/demo#7\s+Reusing saved assessment/);
     await out.until(/INFO\s+acme\/demo#7\s+Already submitted/);
     assert.equal(gh.reviews.length, 1);
     assert.equal(modelCalls, 1);
-    assert.match(out.output, /INFO\s+acme\/demo#7\s+Queued · mentioned in a pull request comment/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Queued · mentioned in a pull request comment · requester=maintainer/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+(Queued|Re-run queued) · review requested · requester=alice/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Started · 0 comments/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Completed · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds/);
     if (verbose) {

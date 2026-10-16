@@ -5,8 +5,8 @@ export const pullUrl = "https://github.com/owner/repo/pull/42";
 export const sign = (body: string, key = webhookSecret) => `sha256=${createHmac("sha256", key).update(body).digest("hex")}`;
 
 /** A pull_request delivery body asking `login` to review `url`. */
-export const reviewRequested = (login = "me", url = pullUrl) => JSON.stringify({
-  action: "review_requested", requested_reviewer: { login }, pull_request: { html_url: url, requested_reviewers: [{ login }] },
+export const reviewRequested = (login = "me", url = pullUrl, requester = "author") => JSON.stringify({
+  action: "review_requested", sender: { login: requester }, requested_reviewer: { login }, pull_request: { html_url: url, requested_reviewers: [{ login }] },
 });
 
 /** Posts a delivery as GitHub would. A null id or signature leaves that header out. */

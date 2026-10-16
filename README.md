@@ -169,10 +169,10 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 
 ### Logs
 
-Serve mode logs a compact activity feed. Each line has a UTC timestamp, level and PR label (or `serve` or `webhook` for messages without a PR). Audit summaries show finding counts, elapsed time and the published review URL. Without `--apply`, they show `Preview only` and the intended verdict. Approval-blocking reasons remain visible.
+Serve mode logs a compact activity feed. Each line has a UTC timestamp, level and PR label (or `serve` or `webhook` for messages without a PR). Audit summaries show finding counts, elapsed time and the published review URL. Without `--apply`, they show `Preview only` and the intended verdict. Approval-blocking reasons remain visible. Queued deliveries include `requester=<login>`, taken from the webhook sender, including for comment mentions. Missing or unsafe logins appear as `-`.
 
 ```text
-2026-06-01T14:33:12.000Z INFO  acme/demo#7                  Queued · review requested
+2026-06-01T14:33:12.000Z INFO  acme/demo#7                  Queued · review requested · requester=alice
 2026-06-01T14:33:12.200Z INFO  acme/demo#7                  Started · 12 comments
 2026-06-01T14:34:06.000Z INFO  acme/demo#7                  Approved · 3 addressed · 0 outstanding · 0 uncertain · 9 not actionable · 54.0s
 2026-06-01T14:34:06.000Z INFO  acme/demo#7                  Review: https://github.com/acme/demo/pull/7#pullrequestreview-100

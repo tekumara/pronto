@@ -3,7 +3,7 @@ import { isAuditComment, parseReviewTarget } from "./reviews.ts";
 
 export type Delivery =
   | { kind: "pong" }
-  | { kind: "audit"; url: string; reason: string }
+  | { kind: "audit"; url: string; reason: string; requester: string }
   | { kind: "ignore"; reason: string };
 
 type Json = Record<string, unknown>;
@@ -17,11 +17,14 @@ function loginOf(value: unknown): string | undefined {
   return typeof login === "string" ? login.toLowerCase() : undefined;
 }
 
+/** Payload metadata needs bounds and a plain shape, including [bot] login suffixes. */
+function logToken(value: unknown): string {
+  return typeof value === "string" && value.length > 0 && value.length <= 100
+    && !/[^\w[\]-]/.test(value) ? value : "-";
+}
+
 /** Formats only bounded metadata for logs, never comment bodies or the full payload. */
 export function formatDeliveryContext(event: string | undefined, payload: unknown): string {
-  // The event header is unsigned. Payload strings also need bounds and a plain shape, including [bot] login suffixes.
-  const token = (value: unknown): string => typeof value === "string" && value.length > 0 && value.length <= 100
-    && !/[^\w[\]-]/.test(value) ? value : "-";
   const body = object(payload);
   const pull = event === "issue_comment" ? object(object(body?.issue)?.pull_request) : object(body?.pull_request);
   let pr = "-";
@@ -32,9 +35,9 @@ export function formatDeliveryContext(event: string | undefined, payload: unknow
       // Do not log unsupported URLs, which could include credentials or other private text.
     }
   }
-  const fields = [`pr=${pr}`, `sender=${token(object(body?.sender)?.login)}`];
-  if (body?.requested_reviewer !== undefined) fields.push(`requested_reviewer=${token(object(body.requested_reviewer)?.login)}`);
-  if (body?.requested_team !== undefined) fields.push(`requested_team=${token(object(body.requested_team)?.slug)}`);
+  const fields = [`pr=${pr}`, `sender=${logToken(object(body?.sender)?.login)}`];
+  if (body?.requested_reviewer !== undefined) fields.push(`requested_reviewer=${logToken(object(body.requested_reviewer)?.login)}`);
+  if (body?.requested_team !== undefined) fields.push(`requested_team=${logToken(object(body.requested_team)?.slug)}`);
   return fields.join(" ");
 }
 
@@ -96,7 +99,7 @@ export function classifyDelivery(event: string | undefined, payload: unknown, lo
   }
   if (typeof pull.html_url !== "string") return ignore("pull request has no URL");
   try {
-    return { kind: "audit", url: parseReviewTarget(pull.html_url).url, reason };
+    return { kind: "audit", url: parseReviewTarget(pull.html_url).url, reason, requester: logToken(object(body.sender)?.login) };
   } catch {
     return ignore("pull request URL is not a supported GitHub PR URL");
   }

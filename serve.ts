@@ -111,7 +111,7 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
     }
     if (id) remember(id);
     const status = { queued: "Queued", rerun: "Re-run queued", coalesced: "Coalesced" }[outcome];
-    log(outcome === "coalesced" ? "debug" : "info", auditLabel(delivery.url), `${status} · ${delivery.reason}`, detail);
+    log(outcome === "coalesced" ? "debug" : "info", auditLabel(delivery.url), `${status} · ${delivery.reason} · requester=${delivery.requester}`, detail);
     return send(res, 202, { status: outcome });
   }
 
