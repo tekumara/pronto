@@ -69,7 +69,16 @@ for (const verbose of [false, true]) {
   test(`serve ${verbose ? "verbose" : "compact"} logs track audits without changing delivery or verdict behaviour`, { timeout: 40_000 }, async (t) => {
     const gh = github();
     let modelCalls = 0;
-    const f = await fixture(t, (_body, response) => { modelCalls++; assess(response); }, { entrypoint: resolve("audit.ts"), github: gh.handler });
+    const preparationLogged = Promise.withResolvers<void>();
+    t.after(() => preparationLogged.resolve());
+    const f = await fixture(t, (_body, response) => { modelCalls++; assess(response); }, {
+      entrypoint: resolve("audit.ts"),
+      github: async (request, response) => {
+        // Hold the first GitHub fetch until preparation is visible, not just logged after the fetch.
+        if (request.url === "/github/repos/acme/demo/pulls/7") await preparationLogged.promise;
+        await gh.handler(request, response);
+      },
+    });
     const run = f.start(["serve", "--port", "0", "--apply", ...(verbose ? ["--verbose"] : [])], { env });
     const out = watchOutput(run.child);
     const errors = watchOutput(run.child, "stderr");
@@ -87,6 +96,11 @@ for (const verbose of [false, true]) {
     const accepted = await deliver(base, mention, { event: "issue_comment" });
     assert.equal(accepted.status, 202);
     assert.equal(((await accepted.json()) as { status: string }).status, "queued");
+    await out.until(/INFO\s+acme\/demo#7\s+Preparing · fetching GitHub evidence/);
+    assert.match(out.output, /Queued · mentioned in a pull request comment[^\n]*\n[^\n]*Preparing · fetching GitHub evidence/);
+    assert.doesNotMatch(out.output, /Started ·/);
+    assert.equal(modelCalls, 0);
+    preparationLogged.resolve();
     await out.until(/INFO\s+acme\/demo#7\s+Review: /);
     assert.equal(gh.reviews.length, 1);
     assert.equal(gh.reviews[0]!.event, "COMMENT");

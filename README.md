@@ -173,10 +173,13 @@ Serve mode logs a compact activity feed. Each line has a UTC timestamp, level an
 
 ```text
 2026-06-01T14:33:12.000Z INFO  acme/demo#7                  Queued · review requested · requester=alice
-2026-06-01T14:33:12.200Z INFO  acme/demo#7                  Started · 12 comments
+2026-06-01T14:33:12.010Z INFO  acme/demo#7                  Preparing · fetching GitHub evidence
+2026-06-01T14:33:16.200Z INFO  acme/demo#7                  Started · 12 comments
 2026-06-01T14:34:06.000Z INFO  acme/demo#7                  Approved · 3 addressed · 0 outstanding · 0 uncertain · 9 not actionable · 54.0s
 2026-06-01T14:34:06.000Z INFO  acme/demo#7                  Review: https://github.com/acme/demo/pull/7#pullrequestreview-100
 ```
+
+`Queued` means the delivery was accepted, even if an audit slot is available immediately. `Preparing` means the audit is making GitHub checks and fetching evidence. `Started` means the evidence is saved and ready for assessment. Preparation can instead end with a skip, a resumed snapshot or a reused assessment. The final elapsed time includes the GitHub checks and evidence fetch, not just model work.
 
 Add `--verbose` to include ignored deliveries, duplicates, coalesced requests, delivery IDs, tool calls, cache changes and full reports. Every line of a multiline report keeps its timestamp and PR label so concurrent audits remain identifiable. The regular CLI still prints its full report by default.
 

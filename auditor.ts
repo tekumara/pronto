@@ -829,6 +829,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
   let stream: Awaited<ReturnType<typeof watchEvents>> | undefined;
   try {
     const startedAt = new Date().toISOString();
+    log("info", "Preparing · fetching GitHub evidence", null);
     const pr = await fetchPullRequest(target, context.abortSignal);
     if (pr.merged) {
       skip("PR has already been merged.");
