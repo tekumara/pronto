@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { TestContext } from "node:test";
+import { promisify } from "node:util";
+
+const exec = promisify(execFile);
 
 export type Request = { model: string; messages: { role: string; content?: string; tool_calls?: unknown[] }[]; tools: { function: { name: string } }[] };
 export const noDatabaseMigration = { status: "not-migration", reason: "The PR changes application behaviour, not database schema or data." } as const;
@@ -97,6 +100,19 @@ export async function fixture(t: TestContext, respond: (body: Request, response:
     return result.stdout;
   };
   return { directory, cwd, agentDir, stateDir, start, run };
+}
+
+// Only git is on the child's PATH: discovery must not depend on an installed gh.
+export async function gitCheckout(cwd: string, commands: string[][] = []) {
+  const git = (await exec("which", ["git"])).stdout.trim();
+  await symlink(git, join(cwd, "git"));
+  const env = { ...process.env, GH_REPO: "", GH_HOST: "", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  for (const args of [
+    ["-c", "init.templateDir=", "init", "--initial-branch=feature/pr-inference"],
+    ["remote", "add", "origin", "git@github.com:acme/demo.git"],
+    ...commands,
+  ]) await exec(git, args, { cwd, env });
+  return { ...env, PATH: cwd };
 }
 
 export function reply(response: ServerResponse, deltas: object[], finish = "stop", usage?: { prompt_tokens: number; completion_tokens: number }) {

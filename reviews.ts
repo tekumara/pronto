@@ -150,6 +150,45 @@ function github(signal?: AbortSignal) {
   return { token, base, graphql, fetcher, request, pages };
 }
 
+/** Match gh pr view's non-interactive selection: prefer open PRs, then the newest matching closed PR. */
+export async function findPullRequestUrl(repository: { owner: string; repo: string }, selector: number | string): Promise<string> {
+  const client = github();
+  const { owner, repo } = repository;
+  if (typeof selector === "number") {
+    const pr = await client.request<{ html_url: string }>(`${client.base}/repos/${owner}/${repo}/pulls/${selector}`);
+    return parseReviewTarget(pr.html_url).url;
+  }
+  const parts = selector.split(":");
+  if (parts.length > 2 || !parts.at(-1) || (parts.length === 2 && !parts[0])) throw new Error("Expected a branch or owner:branch");
+  const headRefName = parts.at(-1)!;
+  type Candidate = { url: string; state: string; headRefName: string; isCrossRepository: boolean; headRepositoryOwner: { login: string } | null };
+  const result = await client.request<{
+    data?: { repository: { defaultBranchRef: { name: string } | null; pullRequests: { nodes: Candidate[] } } | null };
+    errors?: { message: string }[];
+  }>(client.graphql, {
+    query: `query PullRequestForBranch($owner:String!,$repo:String!,$headRefName:String!) {
+      repository(owner:$owner,name:$repo) {
+        defaultBranchRef { name }
+        pullRequests(headRefName:$headRefName,first:30,orderBy:{field:CREATED_AT,direction:DESC}) {
+          nodes { url state headRefName isCrossRepository headRepositoryOwner { login } }
+        }
+      }
+    }`,
+    variables: { owner, repo, headRefName },
+  });
+  if (result.errors?.length) throw new Error(`GitHub GraphQL: ${result.errors.map((error) => error.message).join("; ")}`);
+  const found = result.data?.repository;
+  if (!found) throw new Error("GitHub repository is unavailable");
+  // GitHub orders by creation date; stable sorting retains that order within each state.
+  const candidates = [...found.pullRequests.nodes].sort((a, b) => Number(b.state === "OPEN") - Number(a.state === "OPEN"));
+  const pr = candidates.find((candidate) => {
+    const head = candidate.isCrossRepository ? `${candidate.headRepositoryOwner?.login}:${candidate.headRefName}` : candidate.headRefName;
+    return head === selector && (candidate.state === "OPEN" || found.defaultBranchRef?.name !== selector);
+  });
+  if (!pr) throw new Error(`No pull requests found for branch "${selector}"`);
+  return parseReviewTarget(pr.url).url;
+}
+
 export async function fetchPullRequest(target: ReviewTarget, signal?: AbortSignal): Promise<PullRequest> {
   const client = github(signal);
   return client.request<PullRequest>(`${client.base}/repos/${target.owner}/${target.repo}/pulls/${target.pr}`);

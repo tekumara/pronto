@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
-import { parseArgs, promisify } from "node:util";
-import { fixture, noDatabaseMigration, tool } from "./fixtures.ts";
+import { promisify } from "node:util";
+import { fixture, gitCheckout, noDatabaseMigration, tool } from "./fixtures.ts";
 
 const exec = promisify(execFile);
 
@@ -37,25 +37,47 @@ const review = (login: string, state: string, commit = headSha) => ({
   id: Math.floor(Math.random() * 1e9), user: { login }, body: "", state, commit_id: commit, html_url: `${prUrl}#pullrequestreview-1`,
 });
 
-async function selectionFixture(t: TestContext, labels: string[] = [], reviews: object[] = [], draft = false) {
+async function selectionFixture(t: TestContext, labels: string[] = [], reviews: object[] = [], draft = false,
+  discovery?: { head: string; url?: string; status?: number; defaultBranch?: string; state?: string }) {
   return fixture(t, (_body, response) => {
     tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
   }, {
     entrypoint: resolve("audit.ts"),
-    github: (request, response) => {
+    github: async (request, response) => {
       assert.equal(request.method, request.url === "/github/graphql" ? "POST" : "GET");
       const path = request.url!.split("?")[0];
       let data: unknown;
-      if (path === "/github/repos/acme/demo/pulls/7") {
-        data = { title: "Selected PR", body: "", merged: false, draft, labels: labels.map((name) => ({ name })), changed_files: 0,
+      if (/^\/github\/repos\/acme\/demo\/pulls\/[678]$/.test(path)) {
+        data = { html_url: discovery?.url ?? `https://github.com/acme/demo/pull/${path.split("/").at(-1)}`, title: "Selected PR", body: "", merged: false, draft, labels: labels.map((name) => ({ name })), changed_files: 0,
           head: { sha: "a".repeat(40), repo: { full_name: "acme/demo" } },
           base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } };
       } else if (path === "/github/graphql") {
-        data = { data: { repository: { pullRequest: { reviewThreads: {
-          nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
-        } } } } };
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const { variables } = JSON.parse(Buffer.concat(chunks).toString());
+        if (variables.headRefName !== undefined) {
+          assert.ok(discovery, "Unexpected PR discovery request");
+          assert.equal(variables.owner, "acme");
+          assert.equal(variables.repo, "demo");
+          if (discovery.status) {
+            response.writeHead(discovery.status).end("Discovery unavailable");
+            return;
+          }
+          const [owner, branch] = discovery.head.includes(":") ? discovery.head.split(":") : [null, discovery.head];
+          const candidate = { url: discovery.url ?? prUrl, state: discovery.state ?? "OPEN", headRefName: branch,
+            isCrossRepository: !!owner, headRepositoryOwner: { login: owner ?? "acme" } };
+          data = { data: { repository: { defaultBranchRef: { name: discovery.defaultBranch ?? "main" }, pullRequests: { nodes: [
+            { ...candidate, url: "https://github.com/acme/demo/pull/6", state: "CLOSED" },
+            { ...candidate, url: "https://github.com/acme/demo/pull/8", isCrossRepository: true, headRepositoryOwner: { login: "someone-else" } },
+            candidate,
+          ].filter((pr) => pr.headRefName === variables.headRefName) } } } };
+        } else {
+          data = { data: { repository: { pullRequest: { reviewThreads: {
+            nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
+          } } } } };
+        }
       } else {
-        assert.match(path, /^\/github\/repos\/acme\/demo\/(?:pulls\/7\/(?:comments|reviews|files)|issues\/7\/comments)$/);
+        assert.match(path, /^\/github\/repos\/acme\/demo\/(?:pulls\/[678]\/(?:comments|reviews|files)|issues\/[678]\/comments)$/);
         data = path.endsWith("/reviews") ? reviews : [];
       }
       response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
@@ -63,32 +85,68 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
   });
 }
 
-for (const { name, args, selector } of [
-  { name: "current branch", args: [], selector: undefined },
-  { name: "current branch with flags only", args: ["--force", "--approve", "--approve-migrations"], selector: undefined },
-  { name: "explicit branch and model", args: ["feature/pr-inference", "local/test", "--force"], selector: "feature/pr-inference" },
-  { name: "fork branch", args: ["contributor:feature/pr-inference"], selector: "contributor:feature/pr-inference" },
-  { name: "branch containing shell metacharacters", args: ["feature/with;$value"], selector: "feature/with;$value" },
-  { name: "PR number", args: ["7"], selector: "7" },
-  { name: "prefixed PR number", args: ["#7"], selector: "#7" },
+
+for (const { name, args, head = "feature/pr-inference", commands = [], repository = "", checkout = true, state = "OPEN", expectedUrl = prUrl } of [
+  { name: "current branch", args: [] },
+  { name: "current branch with flags only", args: ["--force", "--approve", "--approve-migrations"] },
+  { name: "explicit branch and model", args: ["feature/pr-inference", "local/test", "--force"] },
+  { name: "fork branch", args: ["contributor:feature/pr-inference"], head: "contributor:feature/pr-inference" },
+  { name: "branch containing shell metacharacters", args: ["feature/with;$value"], head: "feature/with;$value" },
+  { name: "PR number", args: ["7"] },
+  { name: "prefixed PR number", args: ["#7"] },
+  { name: "PR tracking ref", args: [], head: "unrelated", commands: [["config", "branch.feature/pr-inference.merge", "refs/pull/7/head"]] },
+  { name: "renamed upstream branch", args: [], head: "remote-feature", commands: [
+    ["config", "branch.feature/pr-inference.remote", "origin"],
+    ["config", "branch.feature/pr-inference.merge", "refs/heads/remote-feature"], ["config", "push.default", "upstream"],
+  ] },
+  { name: "resolved push ref", args: [], head: "remote-feature", commands: [
+    ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Initial"],
+    ["update-ref", "refs/remotes/origin/remote-feature", "HEAD"],
+    ["config", "branch.feature/pr-inference.remote", "origin"],
+    ["config", "remote.origin.push", "refs/heads/feature/pr-inference:refs/heads/remote-feature"],
+  ] },
+  { name: "fork with an upstream base", args: [], head: "contributor:feature/pr-inference", commands: [
+    ["remote", "set-url", "origin", "https://github.com/contributor/demo.git"],
+    ["remote", "add", "upstream", "ssh://git@github.com/acme/demo.git"],
+    ["config", "branch.feature/pr-inference.remote", "origin"],
+  ] },
+  { name: "branch pushRemote before remote pushDefault", args: [], head: "contributor:feature/pr-inference", commands: [
+    ["remote", "add", "fork", "https://github.com/contributor/demo.git"],
+    ["config", "remote.pushDefault", "origin"], ["config", "branch.feature/pr-inference.pushRemote", "fork"],
+  ] },
+  { name: "remote pushDefault before tracking remote", args: [], head: "contributor:feature/pr-inference", commands: [
+    ["remote", "add", "fork", "https://github.com/contributor/demo.git"],
+    ["config", "branch.feature/pr-inference.remote", "origin"], ["config", "remote.pushDefault", "fork"],
+  ] },
+  { name: "local pushRemote falls back to the tracking remote", args: [], head: "contributor:feature/pr-inference", commands: [
+    ["remote", "add", "fork", "https://github.com/contributor/demo.git"],
+    ["config", "branch.feature/pr-inference.pushRemote", "."], ["config", "branch.feature/pr-inference.remote", "fork"],
+  ] },
+  { name: "URL-valued pushRemote", args: [], head: "contributor:feature/pr-inference", commands: [
+    ["config", "branch.feature/pr-inference.pushRemote", "git@github.com:contributor/demo.git"],
+  ] },
+  { name: "explicit branch without inheriting the current branch's fork owner", args: ["feature/pr-inference"], commands: [
+    ["remote", "add", "fork", "https://github.com/contributor/demo.git"], ["config", "branch.feature/pr-inference.pushRemote", "fork"],
+  ] },
+  { name: "github remote before origin", args: ["7"], commands: [
+    ["remote", "set-url", "origin", "https://github.com/contributor/demo.git"], ["remote", "add", "github", "https://github.com/acme/demo.git"],
+  ] },
+  { name: "newest matching closed PR without an open PR", args: ["feature/pr-inference"], state: "CLOSED", expectedUrl: "https://github.com/acme/demo/pull/6" },
+  { name: "configured default repository", args: ["7"], commands: [
+    ["remote", "add", "upstream", "https://github.com/someone-else/demo.git"], ["config", "remote.origin.gh-resolved", "base"],
+  ] },
+  { name: "configured repository without its own remote", args: ["7"], commands: [
+    ["remote", "set-url", "origin", "https://github.com/contributor/demo.git"], ["config", "remote.origin.gh-resolved", "acme/demo"],
+  ] },
+  { name: "GH_REPO number without a checkout", args: ["7"], repository: "acme/demo", checkout: false },
+  { name: "GH_REPO branch without a checkout", args: ["feature/pr-inference"], repository: "github.com/acme/demo", checkout: false },
 ]) {
-  test(`CLI resolves ${name} through gh`, { timeout: 20_000 }, async (t) => {
-    const f = await selectionFixture(t);
-    const receipt = join(f.cwd, "gh-call.json");
-    await writeFile(join(f.cwd, "gh"), `#!${process.execPath}\n
-      const { writeFileSync } = require("node:fs");
-      writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }));
-      process.stdout.write(${JSON.stringify(`${prUrl}\n`)});
-    `, { mode: 0o700 });
-    const output = await f.run("", args, { env: { PATH: `${f.cwd}${delimiter}${process.env.PATH}` } });
+  test(`CLI resolves ${name} without gh`, { timeout: 20_000 }, async (t) => {
+    const f = await selectionFixture(t, [], [], false, { head, state });
+    const env = checkout ? await gitCheckout(f.cwd, commands) : { PATH: f.cwd, GH_HOST: "" };
+    const output = await f.run("", args, { env: { ...env, GH_REPO: repository } });
     assert.match(output, /PR title: Selected PR/);
-    assert.ok(output.includes(prUrl), "the report must audit the URL selected by gh");
-    const call = JSON.parse(await readFile(receipt, "utf8"));
-    assert.equal(await realpath(call.cwd), await realpath(f.cwd), "selection must use the caller's checkout, not Pronto's source checkout");
-    const { positionals } = parseArgs({ args: call.args, allowPositionals: true,
-      options: { json: { type: "string" }, jq: { type: "string" } } });
-    assert.deepEqual(positionals, ["pr", "view", ...(selector ? [selector] : [])],
-      "omitted selectors must stay omitted so gh can use branch tracking and push configuration");
+    assert.ok(output.includes(expectedUrl), "the report must audit the selected PR");
   });
 }
 
@@ -152,33 +210,54 @@ for (const { name, reviews, args, approver } of [
   });
 }
 
-for (const { name, args, gh, message } of [
-  { name: "no matching PR", args: [], gh: 'process.stderr.write("no pull requests found for branch \\"feature\\"\\n"); process.exit(1);', message: /no pull requests found for branch "feature"/ },
-  { name: "detached HEAD", args: [], gh: 'process.stderr.write("could not determine current branch: not on any branch\\n"); process.exit(1);', message: /not on any branch/ },
-  { name: "missing gh", args: [], gh: undefined, message: /gh.*required.*GitHub PR URL/ },
-  { name: "invalid gh result", args: [], gh: 'process.stdout.write("https://github.com/acme/demo/issues/7\\n");', message: /Expected a GitHub PR URL/ },
-  { name: "malformed explicit URL", args: ["https://github.com/acme/demo/issues/7"], gh: 'process.stderr.write("unexpected gh invocation"); process.exit(1);', message: /Expected a GitHub PR URL/ },
-  { name: "missing skip label", args: [prUrl, "--skip"], gh: undefined, message: /--skip requires a non-empty label/ },
-  { name: "empty skip label", args: [prUrl, "--skip", ""], gh: undefined, message: /--skip requires a non-empty label/ },
-  { name: "blank inline skip label", args: [prUrl, "--skip=  "], gh: undefined, message: /--skip requires a non-empty label/ },
-  { name: "an option instead of a skip label", args: [prUrl, "--skip", "--force"], gh: undefined, message: /--skip requires a non-empty label/ },
-  { name: "an invalid --skip-approved value", args: [prUrl, "--skip-approved=maybe"], gh: undefined, message: /--skip-approved must be true or false/ },
-  { name: "a repeated --skip-approved", args: [prUrl, "--skip-approved", "--skip-approved=false"], gh: undefined, message: /--skip-approved can be supplied only once/ },
-  { name: "an invalid --skip-drafts value", args: [prUrl, "--skip-drafts=maybe"], gh: undefined, message: /--skip-drafts must be true or false/ },
-  { name: "a repeated --skip-drafts", args: [prUrl, "--skip-drafts", "--skip-drafts=false"], gh: undefined, message: /--skip-drafts can be supplied only once/ },
-  { name: "missing batch target", args: ["--pr"], gh: undefined, message: /--pr requires a non-empty target/ },
-  { name: "blank batch target", args: ["--pr=  "], gh: undefined, message: /--pr requires a non-empty target/ },
-  { name: "an option instead of a batch target", args: ["--pr", "--force"], gh: undefined, message: /--pr requires a non-empty target/ },
-  { name: "a malformed URL later in a batch", args: ["--pr", prUrl, "--pr", "https://github.com/acme/demo/issues/8"], gh: undefined, message: /Expected a GitHub PR URL/ },
-  { name: "mixed positional and batch PR targets", args: ["--pr", prUrl, "8"], gh: undefined, message: /Use --pr for every target/ },
-  { name: "duplicate canonical PR targets", args: ["--pr", prUrl, "--pr", "https://github.com/ACME/demo/pull/7/"], gh: undefined, message: /Duplicate PR target/ },
+for (const { name, args = [] as string[], head = "unrelated", commands = [], discovery = {}, message } of [
+  { name: "no matching PR", message: /No pull requests found for branch "feature\/pr-inference"/ },
+  { name: "closed PR on the default branch", args: ["main"], head: "main", discovery: { state: "CLOSED" }, message: /No pull requests found for branch "main"/ },
+  { name: "detached HEAD", commands: [
+    ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Initial"],
+    ["checkout", "--detach"],
+  ], message: /not on any branch.*detached HEAD/ },
+  { name: "no GitHub remotes", commands: [["remote", "remove", "origin"]], message: /No GitHub remote found/ },
+  { name: "unsupported remote host", commands: [["remote", "set-url", "origin", "https://gitlab.com/acme/demo.git"]], message: /No GitHub remote found/ },
+  { name: "GitHub lookup failure", head: "feature/pr-inference", discovery: { status: 401 }, message: /GitHub request failed \(401\)/ },
+  { name: "invalid URL returned by GitHub", head: "feature/pr-inference", discovery: { url: "https://github.com/acme/demo/issues/7" }, message: /Expected a GitHub PR URL/ },
+  { name: "unsafe PR number", args: ["9007199254740992"], message: /positive, safe PR number/ },
+]) {
+  test(`CLI stops before model or audit storage for ${name}`, { timeout: 20_000 }, async (t) => {
+    const f = await selectionFixture(t, [], [], false, { head, ...discovery });
+    const env = await gitCheckout(f.cwd, commands);
+    const { child, done } = f.start(args, { env });
+    child.stdin.end();
+    const result = await done;
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, message);
+    await assert.rejects(readdir(f.stateDir), { code: "ENOENT" });
+  });
+}
+
+for (const { name, args, message } of [
+  { name: "missing git", args: [], message: /Git is required.*GitHub PR URL/ },
+  { name: "malformed explicit URL", args: ["https://github.com/acme/demo/issues/7"], message: /Expected a GitHub PR URL/ },
+  { name: "missing skip label", args: [prUrl, "--skip"], message: /--skip requires a non-empty label/ },
+  { name: "empty skip label", args: [prUrl, "--skip", ""], message: /--skip requires a non-empty label/ },
+  { name: "blank inline skip label", args: [prUrl, "--skip=  "], message: /--skip requires a non-empty label/ },
+  { name: "an option instead of a skip label", args: [prUrl, "--skip", "--force"], message: /--skip requires a non-empty label/ },
+  { name: "an invalid --skip-approved value", args: [prUrl, "--skip-approved=maybe"], message: /--skip-approved must be true or false/ },
+  { name: "a repeated --skip-approved", args: [prUrl, "--skip-approved", "--skip-approved=false"], message: /--skip-approved can be supplied only once/ },
+  { name: "an invalid --skip-drafts value", args: [prUrl, "--skip-drafts=maybe"], message: /--skip-drafts must be true or false/ },
+  { name: "a repeated --skip-drafts", args: [prUrl, "--skip-drafts", "--skip-drafts=false"], message: /--skip-drafts can be supplied only once/ },
+  { name: "missing batch target", args: ["--pr"], message: /--pr requires a non-empty target/ },
+  { name: "blank batch target", args: ["--pr=  "], message: /--pr requires a non-empty target/ },
+  { name: "an option instead of a batch target", args: ["--pr", "--force"], message: /--pr requires a non-empty target/ },
+  { name: "a malformed URL later in a batch", args: ["--pr", prUrl, "--pr", "https://github.com/acme/demo/issues/8"], message: /Expected a GitHub PR URL/ },
+  { name: "mixed positional and batch PR targets", args: ["--pr", prUrl, "8"], message: /Use --pr for every target/ },
+  { name: "duplicate canonical PR targets", args: ["--pr", prUrl, "--pr", "https://github.com/ACME/demo/pull/7/"], message: /Duplicate PR target/ },
 ]) {
   test(`CLI stops before model or audit storage for ${name}`, { timeout: 20_000 }, async (t) => {
     const f = await fixture(t, () => assert.fail("Selection failures must not reach the model"), {
       entrypoint: resolve("audit.ts"),
       github: () => assert.fail("Selection failures must not fetch audit evidence"),
     });
-    if (gh) await writeFile(join(f.cwd, "gh"), `#!${process.execPath}\n${gh}\n`, { mode: 0o700 });
     const { child, done } = f.start(args, { env: { PATH: f.cwd } });
     child.stdin.end();
     const result = await done;

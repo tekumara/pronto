@@ -31,7 +31,11 @@ pronto feature/my-change
 pronto 42
 ```
 
-These forms require the GitHub CLI (`gh`). Pronto runs `gh pr view` in your current directory, using the same repository, PR tracking ref, push configuration and fork selection rules as [gh's PR finder](https://github.com/cli/cli/blob/v2.100.0/pkg/cmd/pr/shared/finder.go). If selection fails, the command exits before starting an audit. An explicit PR URL does not require `gh` when you provide a token.
+Pronto reads your checkout's Git configuration and queries GitHub directly, using the same token as the audit. It does not run `gh pr view`. Without a target, it follows PR tracking refs and the branch's push configuration, including renamed branches and fork owners. Branch lookups prefer open PRs, then the newest matching closed or merged PR. Closed or merged PRs whose head is the repository's default branch are not selected.
+
+Set `GH_REPO=owner/repo` (or `host/owner/repo`) to choose the repository explicitly. Otherwise, Pronto uses the default set by `gh repo set-default` (`remote.<name>.gh-resolved`), then prefers remotes named `upstream`, `github` and `origin`, in that order. HTTPS, SSH and scp-style Git URLs are supported. For an enterprise host, set `GITHUB_API_URL`; `GH_HOST`, if set, must match that host.
+
+Number and branch selection require Git and a checkout unless you set `GH_REPO`. An explicit PR URL needs neither. The GitHub CLI is optional when you provide a token; Pronto only uses `gh auth token` as an authentication fallback. Selection failures stop the command before model setup or audit storage.
 
 Already merged PRs are skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto checks live merge status before starting, resuming or reusing an audit. It does not call the model or write to GitHub for merged PRs.
 

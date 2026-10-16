@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { createConnection, type Socket } from "node:net";
-import { delimiter, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import type { ReviewSnapshot } from "../reviews.ts";
-import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
+import { fixture, gitCheckout, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 const urls = [42, 43].map((pr) => `https://github.com/acme/demo/pull/${pr}`);
 
@@ -30,7 +30,7 @@ function evidence() {
       const pr = Number(number);
       const url = `https://github.com/acme/${repo}/pull/${pr}`;
       if (!suffix) {
-        data = { title: `PR ${pr}`, body: "", merged: merged.has(pr), changed_files: 0,
+        data = { html_url: url, title: `PR ${pr}`, body: "", merged: merged.has(pr), changed_files: 0,
           labels: (labels.get(pr) ?? []).map((name) => ({ name })),
           head: { sha: (pr === 42 ? "a" : "c").repeat(40), repo: { full_name: `acme/${repo}` } },
           base: { sha: "b".repeat(40), repo: { full_name: `acme/${repo}` } } };
@@ -401,26 +401,29 @@ try { await Promise.all([
   assert.equal(snapshots.length, 4);
 });
 
-test("CLI batches resolve numbers and branches in the caller's checkout", { timeout: 20_000 }, async (t) => {
+test("CLI batches resolve numbers and branches in the caller's checkout without gh", { timeout: 20_000 }, async (t) => {
   const github = evidence();
-  const f = await fixture(t, assess, { entrypoint: resolve("audit.ts"), github: github.handler });
-  const receipt = join(f.cwd, "selections.jsonl");
-  await writeFile(join(f.cwd, "gh"), `#!${process.execPath}\n
-const { appendFileSync } = require("node:fs");
-const selector = process.argv[4];
-appendFileSync(${JSON.stringify(receipt)}, JSON.stringify({ cwd: process.cwd(), selector }) + "\\n");
-process.stdout.write(selector === "42" ? ${JSON.stringify(urls[0])} : ${JSON.stringify(urls[1])});
-`, { mode: 0o700 });
-  const output = await f.run("", ["--pr", "42", "--pr", "feature/work", "local/test"], {
-    env: { PATH: `${f.cwd}${delimiter}${process.env.PATH}` },
-  });
+  const f = await fixture(t, assess, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+    if (request.url === "/github/graphql") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const { variables } = JSON.parse(Buffer.concat(chunks).toString());
+      if (variables.headRefName !== undefined) {
+        assert.equal(variables.owner, "acme");
+        assert.equal(variables.repo, "demo");
+        const nodes = [{ url: urls[1], state: "OPEN", headRefName: "feature/work", isCrossRepository: false }]
+          .filter((pr) => pr.headRefName === variables.headRefName);
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+          data: { repository: { defaultBranchRef: { name: "main" }, pullRequests: { nodes } } },
+        }));
+        return;
+      }
+    }
+    github.handler(request, response);
+  } });
+  const output = await f.run("", ["--pr", "42", "--pr", "feature/work", "local/test"], { env: await gitCheckout(f.cwd) });
   assert.match(output, /Assessment for PR 42/);
   assert.match(output, /Assessment for PR 43/);
-  const selections = (await readFile(receipt, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(selections.map((selection) => selection.selector).sort(), ["42", "feature/work"]);
-  const selectedCwds = await Promise.all(selections.map((selection) => realpath(selection.cwd)));
-  assert.ok(selectedCwds.every((cwd) => cwd === selectedCwds[0]));
-  assert.equal(selectedCwds[0], await realpath(f.cwd));
 });
 
 test("deferred assessments resume only when selected, without losing or cancelling their remote jobs", { timeout: 20_000 }, async (t) => {
