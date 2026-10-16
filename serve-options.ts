@@ -9,10 +9,16 @@ const valueFlags = ["--port", "--host", "--concurrency", "--webhook-path"];
 
 /** Serve-only flags, then the audit flags that apply to every audit the server runs. */
 export function parseServeOptions(args: string[]) {
+  let verbose = false;
   const values = new Map<string, string>();
   const rest: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
+    if (arg === "--verbose") {
+      if (verbose) throw new Error(`--verbose can be supplied only once\n${SERVE_USAGE}`);
+      verbose = true;
+      continue;
+    }
     const flag = valueFlags.find((name) => arg === name || arg.startsWith(`${name}=`));
     if (!flag) { rest.push(arg); continue; }
     const value = arg === flag ? args[++i] : arg.slice(flag.length + 1);
@@ -32,5 +38,5 @@ export function parseServeOptions(args: string[]) {
   if (!/^\/[^\s?#]*$/.test(path) || path === "/healthz") {
     throw new Error(`--webhook-path must start with / and cannot contain spaces, ? or #, and /healthz is reserved for health checks\n${SERVE_USAGE}`);
   }
-  return { ...parseAuditOptions(rest, "serve"), port, host: values.get("--host") ?? DEFAULT_HOST, concurrency, path };
+  return { ...parseAuditOptions(rest, "serve"), port, host: values.get("--host") ?? DEFAULT_HOST, concurrency, path, verbose };
 }

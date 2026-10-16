@@ -11,7 +11,11 @@ import { listRepositoryDatabases, openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { compileExclusions } from "./exclusions.ts";
+import type { Log, LogLevel } from "./logging.ts";
 import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findApproval, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+
+/** The optional CLI text preserves its detailed transcript; null marks serve-only summaries. */
+type AuditLog = (level: LogLevel, message: string, cliText?: string | null) => void;
 
 const Finding = Type.Object({
   summary: Type.String({ minLength: 1 }),
@@ -394,20 +398,20 @@ function excludedPaths(snapshot: ReviewSnapshot): string[] {
 function uncountedFile(file: ChangedFile): boolean {
   return file.lines === 0 && file.patch === null && file.status !== "renamed";
 }
-function outputExcludedFiles(paths: string[], log: (message: string) => void): void {
-  log(`[audit] Excluded ${paths.length} changed file${paths.length === 1 ? "" : "s"} (--exclude):`);
-  for (const path of paths.slice(0, MAX_LISTED_FILES)) log(stripControlCharacters(`[audit]   - ${path}`));
-  if (paths.length > MAX_LISTED_FILES) log(`[audit]   - ${paths.length - MAX_LISTED_FILES} more files`);
+function outputExcludedFiles(paths: string[], log: AuditLog): void {
+  log("debug", `Excluded ${paths.length} changed file${paths.length === 1 ? "" : "s"} (--exclude):`);
+  for (const path of paths.slice(0, MAX_LISTED_FILES)) log("debug", stripControlCharacters(`  - ${path}`));
+  if (paths.length > MAX_LISTED_FILES) log("debug", `  - ${paths.length - MAX_LISTED_FILES} more files`);
 }
-function outputSnapshotExclusions(snapshot: ReviewSnapshot, patterns: string[] | undefined, log: (message: string) => void): void {
+function outputSnapshotExclusions(snapshot: ReviewSnapshot, patterns: string[] | undefined, log: AuditLog): void {
   const paths = excludedPaths(snapshot);
   if (paths.length) outputExcludedFiles(paths, log);
-  else if (patterns?.length) log("[audit] --exclude matched no changed files.");
+  else if (patterns?.length) log("debug", "--exclude matched no changed files.");
 }
-function outputRefreshReasons(conversationId: ConversationId, reasons: string[], log: (message: string) => void): void {
-  log(`[audit] Refreshing audit ${conversationId}; reasons:`);
-  for (const reason of reasons.slice(0, 10)) log(`[audit]   - ${reason}`);
-  if (reasons.length > 10) log(`[audit]   - ${reasons.length - 10} more changes`);
+function outputRefreshReasons(conversationId: ConversationId, reasons: string[], log: AuditLog): void {
+  log("debug", `Refreshing audit ${conversationId}; reasons:`);
+  for (const reason of reasons.slice(0, 10)) log("debug", `  - ${reason}`);
+  if (reasons.length > 10) log("debug", `  - ${reasons.length - 10} more changes`);
 }
 
 const snapshotDisclaimer = "This is the agent's assessment of a saved snapshot, not proof of correctness or the PR's current live state.";
@@ -548,12 +552,13 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
 
 async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined, options: {
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
-}, log: (message: string) => void, context: Context): Promise<void> {
+}, log: AuditLog, context: Context, started: number): Promise<void> {
   const approvalBlock = options.approveMigrations ? null : migrationApprovalBlock(databaseMigration);
-  log(`\n${formatReport(snapshot, assessments, approvalBlock)}\n`);
+  const report = formatReport(snapshot, assessments, approvalBlock);
+  log("debug", report, `\n${report}\n`);
   const body = formatComment(snapshot, assessments, approvalBlock);
   const dryRun = !options.apply;
-  if (dryRun) log(`[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
+  if (dryRun) log("debug", `Verdict comment preview:\n\n${body}\n`, `[audit:dry-run] Verdict comment preview:\n\n${body}\n`);
   // Decide approval first: an approval carries the verdict in one review, otherwise it is a comment review.
   let approve = false;
   let skipped: string | null = null;
@@ -585,17 +590,25 @@ async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessme
     }
   }
   if (existing) {
-    log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Comment would be skipped" : "[audit] Comment skipped"}: matching verdict review recorded locally: ${existing.url}`));
+    const message = stripControlCharacters(`Comment ${dryRun ? "would be skipped" : "skipped"}: matching verdict review recorded locally: ${existing.url}`);
+    log("debug", message, `${dryRun ? "[audit:dry-run]" : "[audit]"} ${message}`);
   } else {
-    log(dryRun ? `[audit:dry-run] Comment would be posted${approve ? " with the approval review" : ""}.`
-      : stripControlCharacters(`[audit] Verdict comment posted to the PR${approve ? " with the approval review" : ""}: ${url}`));
+    const message = dryRun ? `Comment would be posted${approve ? " with the approval review" : ""}.`
+      : stripControlCharacters(`Verdict comment posted to the PR${approve ? " with the approval review" : ""}: ${url}`);
+    log("debug", message, `${dryRun ? "[audit:dry-run]" : "[audit]"} ${message}`);
   }
   if (skipped) {
-    log(stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${skipped}`));
+    log("info", `Approval blocked: ${skipped}`, stripControlCharacters(`${dryRun ? "[audit:dry-run] Approval would be skipped" : "[audit] Approval skipped"}: ${skipped}`));
   } else if (approve) {
-    log(existing ? `${dryRun ? "[audit:dry-run]" : "[audit]"} Approval previously submitted at ${snapshot.headSha}`
-      : dryRun ? `[audit:dry-run] PR would be approved at ${snapshot.headSha}` : `[audit] PR approved at ${snapshot.headSha}`);
+    const message = existing ? `Approval previously submitted at ${snapshot.headSha}`
+      : dryRun ? `PR would be approved at ${snapshot.headSha}` : `PR approved at ${snapshot.headSha}`;
+    log("debug", message, `${dryRun ? "[audit:dry-run]" : "[audit]"} ${message}`);
   }
+  const { counts } = summarizeFindings(assessments);
+  const outcome = dryRun ? `Preview only · would ${existing ? "skip existing review" : approve ? "approve" : "comment"}`
+    : existing ? "Already submitted" : approve ? "Approved" : "Completed";
+  log("info", `${outcome} · ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not actionable · ${((performance.now() - started) / 1000).toFixed(1)}s`, null);
+  if (url || existing) log("info", `Review: ${url ?? existing!.url}`, null);
 }
 
 export type AuditOptions = {
@@ -606,7 +619,7 @@ export type AuditOptions = {
 };
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
-export function createAuditor(models: ModelRuntime, { labelOutput = true } = {}) {
+export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output }: { labelOutput?: boolean; log?: Log } = {}) {
   const repositories = new Map<string, Promise<RepositoryAudit>>();
   const requests = new Set<string>();
   const failedRecoveries = new Set<string>();
@@ -629,7 +642,8 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
       },
     }, readComment, report] }));
     return openStateHarness({ kind: "repo", host, name }, {
-      models: gate.models, registry, settings: auditSettings, onReport: (error) => console.error(error),
+      models: gate.models, registry, settings: auditSettings,
+      onReport: (error) => output ? output("error", `${host}/${name}`, error instanceof Error ? error.message : String(error)) : console.error(error),
       // No execution environment or coding tools: audits cannot access local files.
     }, BACKGROUND_CONTEXT).then((harness) => {
       gate.attach(harness);
@@ -638,7 +652,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
         allow: async (id: ConversationId, diagnostics: AuditDiagnostics, context: Context) => {
           const provider = await harness.snapshot(ProviderDoc, id, context);
           if (!provider) throw new Error("Audit provider session identity is missing");
-          gate.allow(provider.sessionId, { ...diagnostics, warn: (message) => diagnostics.warn(`[audit:model] conversation=${id} ${message}`) });
+          gate.allow(provider.sessionId, { ...diagnostics, warn: (message) => diagnostics.warn(`${output ? "" : "[audit:model] "}conversation=${id} ${message}`) });
         },
       };
     });
@@ -652,9 +666,13 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true } = {})
       const requestKey = `${repository}#${target.pr}`;
       if (requests.has(requestKey)) throw new Error(`Audit is already in progress: ${target.url}`);
       requests.add(requestKey);
-      const label = labelOutput ? `[${target.owner}/${target.repo}#${target.pr}] ` : "";
-      const log = (message: string) => console.log(`${label}${message}`);
-      const diagnostics = createAuditDiagnostics((message) => console.error(`${label}${message}`));
+      const scope = `${target.owner}/${target.repo}#${target.pr}`;
+      const label = labelOutput ? `[${scope}] ` : "";
+      const log: AuditLog = (level, message, cliText) => {
+        if (output) output(level, scope, message);
+        else if (cliText !== null) console.log(`${label}${cliText ?? `[audit] ${message}`}`);
+      };
+      const diagnostics = createAuditDiagnostics((message) => output ? output("warn", scope, message) : console.error(`${label}${message}`));
       const context = withAbortSignal(shutdown.signal, callerContext);
       try {
         let opened = repositories.get(repository);
@@ -802,7 +820,9 @@ async function failedAudits(harness: Harness, context: Context): Promise<ReviewT
 }
 
 async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime; retryFailed: boolean }, repository: RepositoryAudit,
-  context: Context, log: (message: string) => void, diagnostics: AuditDiagnostics): Promise<void> {
+  context: Context, log: AuditLog, diagnostics: AuditDiagnostics): Promise<void> {
+  const started = performance.now();
+  const skip = (reason: string) => log("info", `Skipped · ${reason}`, `[audit] Skipping ${target.url}: ${reason}`);
   const { harness } = repository;
   const { warn, text: diagnosticText } = diagnostics;
   const prKey = String(target.pr);
@@ -811,17 +831,17 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     const startedAt = new Date().toISOString();
     const pr = await fetchPullRequest(target, context.abortSignal);
     if (pr.merged) {
-      log(`[audit] Skipping ${target.url}: PR has already been merged.`);
+      skip("PR has already been merged.");
       return;
     }
     if ((options.skipDrafts ?? true) && pr.draft) {
-      log(`[audit] Skipping ${target.url}: PR is a draft. Use --skip-drafts=false to audit anyway.`);
+      skip("PR is a draft. Use --skip-drafts=false to audit anyway.");
       return;
     }
     const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));
     const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
     if (skippedLabel) {
-      log(`[audit] Skipping ${target.url}: PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
+      skip(`PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
       return;
     }
     const isExcluded = compileExclusions(options.exclude ?? []);
@@ -839,20 +859,21 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       changedLines -= excludedLines;
     }
     if (changedLines > MAX_CHANGED_LINES) {
-      log(`[audit] Skipping ${target.url}: PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`);
-      if (uncounted) log(`[audit] GitHub gave no line counts for ${uncounted} excluded file${uncounted === 1 ? "" : "s"}, so ${uncounted === 1 ? "it still counts" : "they still count"} toward the limit.`);
+      skip(`PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`);
+      if (uncounted) log("debug", `GitHub gave no line counts for ${uncounted} excluded file${uncounted === 1 ? "" : "s"}, so ${uncounted === 1 ? "it still counts" : "they still count"} toward the limit.`);
       if (excluded.length) outputExcludedFiles(excluded.map((file) => file.path), log);
       return;
     }
     if (options.skipApproved ?? true) {
       const approver = await findApproval(target, pr.head.sha, context.abortSignal);
       if (approver) {
-        log(`[audit] Skipping ${target.url}: PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`);
+        skip(`PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`);
         return;
       }
     }
     // Persist restart intent before cancellation/evidence fetching. A crash must not turn a requested restart into
     // a cache hit or switch its selected model. Clear the intent only when the new snapshot is admitted.
+    if (options.retryFailed) log("info", "Retrying failed audit after startup recovery", null);
     if (options.force || options.retryFailed) await harness.commit(async (tx) => {
       (await tx.doc(AuditRuns, prKey, null)).restartModel = options.model;
     }, context);
@@ -866,7 +887,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     if (state?.restartModel && state.active !== null && !state.complete) {
       const existing = await harness.conversation(state.active, context);
       if (!existing) throw new Error("Incomplete audit conversation is missing");
-      log("[audit] Restarting unfinished audit; cancelling its saved work");
+      log("info", "Restarting unfinished audit; cancelling its saved work");
       await existing.abort(context);
       await harness.commit(async (tx) => { (await tx.doc(AuditRuns, prKey, null)).complete = true; }, context);
       state = await harness.snapshot(AuditRuns, prKey, context);
@@ -884,15 +905,16 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       }
       conversation = existing;
       snapshot = saved.snapshot;
-      log(`[audit] Resuming saved snapshot ${snapshot.id} at ${snapshot.headSha}`);
+      log("info", "Resuming saved snapshot", `[audit] Resuming saved snapshot ${snapshot.id} at ${snapshot.headSha}`);
+      log("debug", `Snapshot: ${snapshot.id} · head ${snapshot.headSha}`, null);
       // The saved evidence keeps the exclusions it was fetched with; --force applies different ones.
       outputSnapshotExclusions(snapshot, undefined, log);
     } else {
       const model = state?.restartModel ?? options.model;
       const policy = policyFingerprint(options.models, model);
-      log(`[audit] Fetching ${target.url}`);
+      log("debug", `Fetching ${target.url}`);
       snapshot = await fetchReviewSnapshot(target, pr, startedAt, context.abortSignal, isExcluded);
-      log(`[audit] PR title: ${stripControlCharacters(snapshot.title)}`);
+      log("debug", `PR title: ${stripControlCharacters(snapshot.title)}`);
       outputSnapshotExclusions(snapshot, options.exclude, log);
       const fingerprint = evidenceFingerprint(snapshot, policy);
       const cached = !state?.restartModel && state?.latestSuccess;
@@ -909,9 +931,11 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
               fingerprint, snapshotId: snapshot.id, startedAt: snapshot.startedAt, fetchedAt: snapshot.fetchedAt,
             } });
           }, context);
-          log(`[audit] Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`);
+          const detail = `Reusing saved assessment ${cached.conversationId} from ${cached.assessedAt}; evidence rechecked ${snapshot.fetchedAt} (unchanged)`;
+          log("info", "Reusing saved assessment", `[audit] ${detail}`);
+          log("debug", detail, null);
           outputSnapshotExclusions(snapshot, options.exclude, log);
-          await outputReport(harness, saved.snapshot, saved.report, saved.databaseMigration, options, log, context);
+          await outputReport(harness, saved.snapshot, saved.report, saved.databaseMigration, options, log, context, started);
           return;
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
@@ -944,7 +968,8 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           runs.controllerTask = controllerTask;
         },
       }, context);
-      log(`[audit] ${snapshot.comments.length} comments · head ${snapshot.headSha}`);
+      log("info", `Started · ${snapshot.comments.length} comments`, `[audit] ${snapshot.comments.length} comments · head ${snapshot.headSha}`);
+      log("debug", `Head: ${snapshot.headSha}`, null);
     }
     const savedModel = (await conversation.agent(context)).model;
     if (!options.models.getAvailableSnapshot().some((m) => m.provider === savedModel?.provider && m.id === savedModel.modelId)) {
@@ -955,8 +980,9 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     stream.start(async (events) => {
       for (const event of events) {
         if (event.type === "tool_execution_start") {
-          const text = `[audit:${event.toolName}] ${event.args.path ?? event.args.commentKey ?? ""}`;
-          log(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
+          const name = event.toolName.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+          const argument = String(event.args.path ?? event.args.commentKey ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+          log("debug", `${name} ${argument}`, `[audit:${name}] ${argument}`);
         } else if (event.type === "auto_retry_start") {
           warn(`Audit retry ${event.attempt}: ${event.errorMessage} (conversation=${conversation.id}, model=${savedModel?.provider}/${savedModel?.modelId}, retryAt=${new Date(event.at).toISOString()}, delayMs=${Math.max(0, event.at - Date.now())})`);
         }
@@ -991,7 +1017,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       }
       throw new Error(stripControlCharacters(`Agent finished without a complete assessment.${reason} No verdict was produced.`));
     }
-    await outputReport(harness, snapshot, saved.report, saved.databaseMigration, options, log, context);
+    await outputReport(harness, snapshot, saved.report, saved.databaseMigration, options, log, context, started);
   } finally {
     await stream?.stop();
   }

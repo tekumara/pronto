@@ -157,15 +157,30 @@ The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub
 - A draft that becomes ready for review while the user is already a requested reviewer. Drafts are skipped by default, so a request made on a draft would otherwise be lost.
 - A new or edited PR comment, inline comment or reply that mentions the token's user as `@login`. Submitted or edited review summaries also count. Mentions match whole logins, ignoring case. Emails, longer logins and team mentions do not count.
 
-Ordinary issue comments, pending reviews and Pronto's marked audit output do not start audits. Every other delivery is also acknowledged and logged with the reason it was ignored.
+Ordinary issue comments, pending reviews and Pronto's marked audit output do not start audits. Other deliveries are acknowledged without starting an audit. Use `--verbose` to log why they were ignored.
 
-Ignored-delivery logs include the PR URL and sender, plus the requested reviewer or team when present. Missing or unsafe values appear as `-`. Logged values have length limits, and logs omit comment bodies and the full payload.
+Ignored-delivery logs include the PR URL and sender, plus the requested reviewer or team when present. Missing or unsafe values appear as `-`. Logged values have length limits, and delivery logs omit comment bodies and the full payload.
 
 ### Options
 
 `--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup and apply to every audit, as described in the [quick start](#quick-start). Without `--apply`, the server only logs previews.
 
 `--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
+
+### Logs
+
+Serve mode logs a compact activity feed. Each line has a UTC timestamp, level and PR label (or `serve` or `webhook` for messages without a PR). Audit summaries show finding counts, elapsed time and the published review URL. Without `--apply`, they show `Preview only` and the intended verdict. Approval-blocking reasons remain visible.
+
+```text
+2026-06-01T14:33:12.000Z INFO  acme/demo#7                  Queued · review requested
+2026-06-01T14:33:12.200Z INFO  acme/demo#7                  Started · 12 comments
+2026-06-01T14:34:06.000Z INFO  acme/demo#7                  Approved · 3 addressed · 0 outstanding · 0 uncertain · 9 not actionable · 54.0s
+2026-06-01T14:34:06.000Z INFO  acme/demo#7                  Review: https://github.com/acme/demo/pull/7#pullrequestreview-100
+```
+
+Add `--verbose` to include ignored deliveries, duplicates, coalesced requests, delivery IDs, tool calls, cache changes and full reports. Every line of a multiline report keeps its timestamp and PR label so concurrent audits remain identifiable. The regular CLI still prints its full report by default.
+
+Retries, failures, recovery and shutdown messages remain visible without `--verbose`. Warnings and errors go to stderr; activity and debug messages go to stdout. For example, capture both with `pronto serve --apply 2>&1 | tee -a pronto.log`.
 
 ### How deliveries are handled
 
@@ -174,7 +189,7 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 - **Redeliveries.** A delivery ID seen among the last 1000 is dropped.
 - **One audit per PR.** A request for a PR that is waiting changes nothing. A request for a PR that is running queues one re-run behind the PRs already waiting, because its evidence may have changed. The re-run reuses the cached assessment when the evidence is unchanged and does not submit the same verdict review again.
 - **Concurrency.** At most `--concurrency` audits run at once. The rest wait in order. Each audit makes GitHub and model requests, so keep the limit within your rate limits.
-- **Failures.** A failed audit is logged as `[serve] Audit failed for <url>` and does not affect other PRs.
+- **Failures.** A failed audit is logged at `ERROR` level with its PR label and does not affect other PRs.
 
 ### Stopping and restarting
 

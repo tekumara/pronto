@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Enqueued } from "./audit-queue.ts";
+import { auditLabel, createServeLogger, type Log } from "./logging.ts";
 import { classifyDelivery, formatDeliveryContext, verifySignature } from "./webhook.ts";
 
 export const DEFAULT_WEBHOOK_PATH = "/webhook";
@@ -17,7 +18,7 @@ export type WebhookServerOptions = {
   enqueue: (url: string) => Enqueued;
   path?: string;
   maxBodyBytes?: number;
-  log?: (message: string) => void;
+  log?: Log;
 };
 
 function header(req: IncomingMessage, name: string): string | undefined {
@@ -56,7 +57,7 @@ function send(res: ServerResponse, status: number, body?: object, headers: Recor
 }
 
 /** Receives GitHub webhook deliveries. It answers before any audit runs, since GitHub gives up on a slow response. */
-export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = console.log }: WebhookServerOptions) {
+export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
   if (!secret) throw new Error("A webhook secret is required.");
   if (!login) throw new Error("The reviewer login is required.");
   // GitHub redelivers with the same ID. Only a verified audit request is remembered, and only once it was accepted.
@@ -80,42 +81,43 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
     if (!body) return send(res, 413, { error: "payload too large" }, { Connection: "close" });
     // The ID comes from an unsigned header, so it is only logged and remembered in a plain shape.
     const id = header(req, "x-github-delivery")?.match(/^[\w-]{1,64}$/)?.[0];
-    const tag = `[webhook ${id ?? "-"}]`;
+    const detail = `delivery=${id ?? "-"}`;
     if (!verifySignature(secret, body, header(req, "x-hub-signature-256"))) {
-      log(`${tag} rejected: missing or invalid signature`);
+      log("warn", "webhook", "Rejected: missing or invalid signature", detail);
       return send(res, 401, { error: "invalid signature" });
     }
     let payload: unknown;
     try {
       payload = JSON.parse(body.toString("utf8"));
     } catch {
-      log(`${tag} rejected: payload is not JSON`);
+      log("warn", "webhook", "Rejected: payload is not JSON", detail);
       return send(res, 400, { error: "payload is not JSON; set the webhook content type to application/json" });
     }
     const event = header(req, "x-github-event");
     const delivery = classifyDelivery(event, payload, login);
     if (delivery.kind === "pong") return send(res, 200, { status: "pong" });
     if (delivery.kind === "ignore") {
-      log(`${tag} ignored: ${delivery.reason} (${formatDeliveryContext(event, payload)})`);
+      log("debug", "webhook", `Ignored: ${delivery.reason} (${formatDeliveryContext(event, payload)})`, detail);
       return send(res, 204);
     }
     if (id && recent.has(id)) {
-      log(`${tag} duplicate delivery of ${delivery.url}`);
+      log("debug", auditLabel(delivery.url), "Duplicate delivery", detail);
       return send(res, 202, { status: "duplicate" });
     }
     const outcome = enqueue(delivery.url);
     if (outcome === "closed") {
-      log(`${tag} not accepted, shutting down: ${delivery.url}`);
+      log("warn", auditLabel(delivery.url), "Not accepted · shutting down", detail);
       return send(res, 503, { status: outcome });
     }
     if (id) remember(id);
-    log(`${tag} ${outcome}: ${delivery.url} (${delivery.reason})`);
+    const status = { queued: "Queued", rerun: "Re-run queued", coalesced: "Coalesced" }[outcome];
+    log(outcome === "coalesced" ? "debug" : "info", auditLabel(delivery.url), `${status} · ${delivery.reason}`, detail);
     return send(res, 202, { status: outcome });
   }
 
   const server = createServer((req, res) => {
     handle(req, res).catch((error) => {
-      log(`[webhook] error: ${error instanceof Error ? error.message : String(error)}`);
+      log("error", "webhook", `Request failed: ${error instanceof Error ? error.message : String(error)}`);
       if (res.headersSent) res.destroy();
       else send(res, 500, { error: "internal error" });
     });

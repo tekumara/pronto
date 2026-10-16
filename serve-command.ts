@@ -2,6 +2,7 @@ import { createAuditQueue } from "./audit-queue.ts";
 import { SERVE_USAGE } from "./audit-options.ts";
 import { createAuditor, type AuditOptions } from "./auditor.ts";
 import { createModelRuntime } from "./model.ts";
+import { auditLabel, createServeLogger } from "./logging.ts";
 import { fetchViewerLogin } from "./reviews.ts";
 import { createWebhookServer } from "./serve.ts";
 import { DEFAULT_CONCURRENCY, DEFAULT_HOST, DEFAULT_PORT, parseServeOptions } from "./serve-options.ts";
@@ -16,29 +17,31 @@ function printServeHelp(): void {
   console.log(`--host <address> sets the address to bind (default: ${DEFAULT_HOST}; use 0.0.0.0 to accept outside connections, behind TLS).`);
   console.log(`--concurrency <n> sets how many audits run at once (default: ${DEFAULT_CONCURRENCY}).`);
   console.log("--webhook-path <path> sets the path that receives deliveries (default: /webhook). GET /healthz reports health.");
+  console.log("--verbose includes ignored deliveries, delivery IDs, tool calls, cache changes and full reports.");
   console.log("The audit flags apply to every audit and work as they do for pronto. --force and --pr are not supported. Without --apply, audits only log previews.");
 }
 
 export async function runServe(args: string[]): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) return printServeHelp();
-  const { requested, port, host, concurrency, path, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply } = parseServeOptions(args);
+  const { requested, port, host, concurrency, path, verbose, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply } = parseServeOptions(args);
   const secret = process.env.PRONTO_WEBHOOK_SECRET;
   if (!secret) throw new Error("PRONTO_WEBHOOK_SECRET is required: set it to the secret configured on the GitHub webhook.");
   // Resolve credentials before listening, so a missing token or model fails at startup rather than on the first delivery.
   const login = await fetchViewerLogin();
   const { models, model } = await createModelRuntime(process.cwd(), requested);
   const options: AuditOptions = { model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply };
-  const auditor = createAuditor(models, { labelOutput: true });
+  const log = createServeLogger({ verbose });
+  const auditor = createAuditor(models, { log });
   let stopping = false;
   const queue = createAuditQueue({
     concurrency,
     audit: (url) => auditor.audit(url, options),
     onError: (url, error) => {
-      if (stopping) console.log(`[serve] Audit interrupted: ${url}. Its saved work is kept and resumes when the server starts again.`);
-      else console.error(`[serve] Audit failed for ${url}: ${describe(error)}`);
+      if (stopping) log("info", auditLabel(url), "Audit interrupted · saved work resumes when the server starts again");
+      else log("error", auditLabel(url), `Audit failed: ${describe(error)}`);
     },
   });
-  const server = createWebhookServer({ secret, login, enqueue: (url) => queue.enqueue(url), path });
+  const server = createWebhookServer({ secret, login, enqueue: (url) => queue.enqueue(url), path, log });
   const stopped = Promise.withResolvers<NodeJS.Signals>();
   const stop = (signal: NodeJS.Signals) => stopped.resolve(signal);
   process.on("SIGINT", stop);
@@ -46,23 +49,23 @@ export async function runServe(args: string[]): Promise<void> {
   try {
     // Before listening, so a delivery cannot race recovery to open the same repository database.
     const { urls: recoverable, skipped } = await auditor.recover();
-    for (const { database, error } of skipped) console.error(`[serve] Skipped ${database}, so its audits are not recovered: ${describe(error)}`);
+    for (const { database, error } of skipped) log("warn", "serve", `Skipped ${database}, so its audits are not recovered: ${describe(error)}`);
     const address = await server.listen(port, host);
-    console.log(`[serve] Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · previews only, add --apply to submit reviews"}`);
-    console.log(`[serve] Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
+    log("info", "serve", `Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · previews only, add --apply to submit reviews"}`);
+    log("info", "serve", `Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
     for (const url of recoverable) {
-      console.log(`[serve] Recovering audit: ${url}`);
+      log("info", auditLabel(url), "Recovering audit");
       queue.enqueue(url);
     }
     const signal = await stopped.promise;
-    console.log(`[serve] Received ${signal}; stopping`);
+    log("info", "serve", `Received ${signal}; stopping`);
   } finally {
     stopping = true;
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     await server.close();
     const dropped = queue.close();
-    if (dropped.length) console.error(`[serve] Accepted but not started; request these reviews again: ${dropped.join(", ")}`);
+    for (const url of dropped) log("warn", auditLabel(url), "Accepted but not started · request this review again");
     // Closing keeps unfinished work. The audits it interrupts settle, then the queue is idle.
     await Promise.all([auditor.close(), queue.idle()]);
   }

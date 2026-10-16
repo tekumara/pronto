@@ -3,14 +3,15 @@ import { randomUUID } from "node:crypto";
 import { request } from "node:http";
 import { test, type TestContext } from "node:test";
 import type { Enqueued } from "../audit-queue.ts";
+import type { LogLevel } from "../logging.ts";
 import { createWebhookServer, type WebhookServerOptions } from "../serve.ts";
 import { deliver, pullUrl as url, reviewRequested, sign, webhookSecret as secret } from "./webhook-fixtures.ts";
 
 async function start(t: TestContext, overrides: Partial<WebhookServerOptions> = {}, outcome: Enqueued = "queued") {
-  const logs: string[] = [];
+  const logs: { level: LogLevel; scope: string; message: string; detail?: string }[] = [];
   const enqueued: string[] = [];
   const server = createWebhookServer({
-    secret, login: "me", log: (message) => logs.push(message), ...overrides,
+    secret, login: "me", log: (level, scope, message, detail) => logs.push({ level, scope, message, detail }), ...overrides,
     enqueue: overrides.enqueue ?? ((target) => { enqueued.push(target); return outcome; }),
   });
   const { port } = await server.listen(0, "127.0.0.1");
@@ -52,7 +53,7 @@ test("rejects a missing or wrong signature before reading the payload", async (t
   }
   assert.deepEqual(enqueued, []);
   assert.equal(logs.length, 5);
-  assert.match(logs[0]!, /rejected: missing or invalid signature/);
+  assert.match(logs[0]!.message, /Rejected: missing or invalid signature/);
 });
 
 test("answers a ping and ignores events that do not ask for an audit", async (t) => {
@@ -66,8 +67,8 @@ test("answers a ping and ignores events that do not ask for an audit", async (t)
   assert.equal(await other.text(), "");
   assert.equal((await deliver(base, reviewRequested(), { event: "push" })).status, 204);
   assert.deepEqual(enqueued, []);
-  assert.match(logs.join("\n"), /ignored: review not requested from this user/);
-  assert.match(logs.join("\n"), /ignored: not a supported event/);
+  assert.match(logs.map((entry) => entry.message).join("\n"), /Ignored: review not requested from this user/);
+  assert.match(logs.map((entry) => entry.message).join("\n"), /Ignored: not a supported event/);
 });
 
 test("omits event and action from ignored-delivery context", async (t) => {
@@ -99,7 +100,7 @@ test("omits event and action from ignored-delivery context", async (t) => {
   for (const { event, payload, reason, context } of cases) {
     const id = randomUUID();
     assert.equal((await deliver(base, JSON.stringify(payload), { event, id })).status, 204);
-    assert.equal(logs.at(-1), `[webhook ${id}] ignored: ${reason} (${context})`);
+    assert.deepEqual(logs.at(-1), { level: "debug", scope: "webhook", message: `Ignored: ${reason} (${context})`, detail: `delivery=${id}` });
   }
   assert.deepEqual(enqueued, []);
 });
@@ -116,12 +117,12 @@ test("keeps ignored-delivery metadata bounded and safe, even for malformed paylo
     };
     const id = randomUUID();
     assert.equal((await deliver(base, JSON.stringify(payload), { event: "untrusted event=value", id })).status, 204);
-    assert.equal(logs.at(-1), `[webhook ${id}] ignored: not a supported event (pr=- sender=- requested_reviewer=- requested_team=-)`);
+    assert.equal(logs.at(-1)!.message, "Ignored: not a supported event (pr=- sender=- requested_reviewer=- requested_team=-)");
   }
   for (const payload of [null, [], { action: 42, pull_request: "malformed", sender: { login: {} } }]) {
     const id = randomUUID();
     assert.equal((await deliver(base, JSON.stringify(payload), { id })).status, 204);
-    assert.equal(logs.at(-1), `[webhook ${id}] ignored: malformed pull_request payload (pr=- sender=-)`);
+    assert.equal(logs.at(-1)!.message, "Ignored: malformed pull_request payload (pr=- sender=-)");
   }
   assert.deepEqual(enqueued, []);
 });
@@ -133,7 +134,7 @@ test("accepts a review request for the reviewer and hands the PR to the queue", 
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), { status: "queued" });
   assert.deepEqual(enqueued, [url]);
-  assert.deepEqual(logs, [`[webhook ${id}] queued: ${url} (review requested)`]);
+  assert.deepEqual(logs, [{ level: "info", scope: "owner/repo#42", message: "Queued · review requested", detail: `delivery=${id}` }]);
 });
 
 test("reports how the queue handled the request", async (t) => {
@@ -158,7 +159,7 @@ test("drops a redelivery of the same delivery ID but not a new delivery for the 
   assert.equal(again.status, 202);
   assert.deepEqual(await again.json(), { status: "duplicate" });
   assert.deepEqual(enqueued, [url]);
-  assert.match(logs.at(-1)!, /duplicate delivery/);
+  assert.match(logs.at(-1)!.message, /Duplicate delivery/);
   assert.equal((await deliver(base, reviewRequested(), { id: randomUUID() })).status, 202);
   assert.deepEqual(enqueued, [url, url], "a second request is the queue's to coalesce");
 });
@@ -182,8 +183,8 @@ test("does not deduplicate or log delivery IDs that are not plain tokens", async
     assert.equal((await deliver(base, reviewRequested(), { id })).status, 202);
   }
   assert.equal(enqueued.length, 6, "unusable IDs are never deduplicated");
-  assert.doesNotMatch(logs.join("\n"), /not valid|xxxx/, "unsigned header text must not reach the log");
-  assert.match(logs[0]!, /^\[webhook -\] queued:/);
+  assert.doesNotMatch(JSON.stringify(logs), /not valid|xxxx/, "unsigned header text must not reach the log");
+  assert.equal(logs[0]!.detail, "delivery=-");
 });
 
 test("forgets the oldest delivery IDs once the recent window is full", async (t) => {
@@ -225,7 +226,7 @@ test("answers 500 and keeps serving when the queue throws", async (t) => {
   let fail = true;
   const { base, logs } = await start(t, { enqueue: () => { if (fail) throw new Error("queue exploded"); return "queued"; } });
   assert.equal((await deliver(base, reviewRequested())).status, 500);
-  assert.match(logs.at(-1)!, /error: queue exploded/);
+  assert.match(logs.at(-1)!.message, /Request failed: queue exploded/);
   fail = false;
   assert.equal((await deliver(base, reviewRequested())).status, 202);
 });

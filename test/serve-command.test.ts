@@ -11,7 +11,7 @@ const headSha = "a".repeat(40);
 const env = { PRONTO_WEBHOOK_SECRET: webhookSecret };
 
 /** Simulated GitHub for one PR. The token's user is "Me", to show that logins match case-insensitively. */
-function github(user: (response: ServerResponse) => void = (response) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ login: "Me" }))) {
+function github(user: (response: ServerResponse) => void = (response) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ login: "Me" })), comments: object[] = []) {
   const reviews: { event: string; body: string; commit_id: string }[] = [];
   const state = { merged: false };
   const requests: string[] = [];
@@ -35,7 +35,7 @@ function github(user: (response: ServerResponse) => void = (response) => respons
         head: { sha: headSha, repo: { full_name: "acme/demo" } }, base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
     }
     assert.match(path, /^\/github\/repos\/acme\/demo\/(?:pulls\/7\/(?:comments|reviews|files)|issues\/7\/comments)$/);
-    json([]);
+    json(path.endsWith("/issues/7/comments") ? comments : []);
   };
   return { handler, reviews, requests, state };
 }
@@ -65,46 +65,99 @@ function watchOutput(child: ChildProcessWithoutNullStreams, stream: "stdout" | "
   };
 }
 
-test("serve audits a mention, submits one verdict, handles review requests and stops cleanly", { timeout: 40_000 }, async (t) => {
-  const gh = github();
-  let modelCalls = 0;
-  const f = await fixture(t, (_body, response) => { modelCalls++; assess(response); }, { entrypoint: resolve("audit.ts"), github: gh.handler });
-  const run = f.start(["serve", "--port", "0", "--apply"], { env });
-  const out = watchOutput(run.child);
-  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
-  const base = `http://127.0.0.1:${port}`;
-  assert.match(out.output, /Reviewing as Me with local\/test(?! · previews only)/);
+for (const verbose of [false, true]) {
+  test(`serve ${verbose ? "verbose" : "compact"} logs track audits without changing delivery or verdict behaviour`, { timeout: 40_000 }, async (t) => {
+    const gh = github();
+    let modelCalls = 0;
+    const f = await fixture(t, (_body, response) => { modelCalls++; assess(response); }, { entrypoint: resolve("audit.ts"), github: gh.handler });
+    const run = f.start(["serve", "--port", "0", "--apply", ...(verbose ? ["--verbose"] : [])], { env });
+    const out = watchOutput(run.child);
+    const errors = watchOutput(run.child, "stderr");
+    const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+    const base = `http://127.0.0.1:${port}`;
+    assert.match(out.output, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z INFO\s+serve\s+Reviewing as Me with local\/test(?! · previews only)/m);
 
-  assert.equal((await deliver(base, "{}", { event: "ping" })).status, 200);
-  const mention = JSON.stringify({ action: "created", comment: { body: "Ready for another look, @me?", user: { login: "author" } },
-    issue: { html_url: prUrl, pull_request: { html_url: prUrl } } });
-  const accepted = await deliver(base, mention, { event: "issue_comment" });
-  assert.equal(accepted.status, 202);
-  assert.equal(((await accepted.json()) as { status: string }).status, "queued");
-  await out.until(/\[acme\/demo#7\] \[audit\] Verdict comment posted to the PR: /);
-  assert.equal(gh.reviews.length, 1);
-  assert.equal(gh.reviews[0]!.event, "COMMENT");
-  assert.equal(gh.reviews[0]!.commit_id, headSha);
-  assert.match(gh.reviews[0]!.body, /Review audit/);
+    const ignoredId = "ignored-delivery-id";
+    assert.equal((await deliver(base, reviewRequested("someone-else", prUrl), { id: ignoredId })).status, 204);
+    assert.equal((await deliver(base, "{}", { signature: null })).status, 401);
+    await errors.until(/WARN\s+webhook\s+Rejected: missing or invalid signature/);
+    assert.equal((await deliver(base, "{}", { event: "ping" })).status, 200);
+    const mention = JSON.stringify({ action: "created", comment: { body: "Ready for another look, @me?", user: { login: "author" } },
+      issue: { html_url: prUrl, pull_request: { html_url: prUrl } } });
+    const accepted = await deliver(base, mention, { event: "issue_comment" });
+    assert.equal(accepted.status, 202);
+    assert.equal(((await accepted.json()) as { status: string }).status, "queued");
+    await out.until(/INFO\s+acme\/demo#7\s+Review: /);
+    assert.equal(gh.reviews.length, 1);
+    assert.equal(gh.reviews[0]!.event, "COMMENT");
+    assert.equal(gh.reviews[0]!.commit_id, headSha);
+    assert.match(gh.reviews[0]!.body, /Review audit/);
 
-  // A repeat request reuses the assessment and does not post the same verdict again.
-  const repeat = await deliver(base, reviewRequested("me", prUrl));
-  assert.equal(repeat.status, 202);
-  await out.until(/\[acme\/demo#7\] \[audit\] Reusing saved assessment/);
-  await out.until(/Comment skipped: matching verdict review recorded locally/);
-  assert.equal(gh.reviews.length, 1);
-  assert.equal(modelCalls, 1);
+    // A repeat request reuses the assessment and does not post the same verdict again.
+    const repeat = await deliver(base, reviewRequested("me", prUrl));
+    assert.equal(repeat.status, 202);
+    await out.until(/INFO\s+acme\/demo#7\s+Reusing saved assessment/);
+    await out.until(/INFO\s+acme\/demo#7\s+Already submitted/);
+    assert.equal(gh.reviews.length, 1);
+    assert.equal(modelCalls, 1);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Queued · mentioned in a pull request comment/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Started · 0 comments/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Completed · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds/);
+    if (verbose) {
+      assert.match(out.output, /DEBUG\s+webhook\s+Ignored: review not requested from this user.*delivery=ignored-delivery-id/);
+      assert.match(out.output, /DEBUG\s+acme\/demo#7\s+report_review_assessment/);
+      assert.match(out.output, /PR review audit/);
+    } else {
+      assert.doesNotMatch(out.output, /DEBUG|Ignored:|ignored-delivery-id|report_review_assessment|PR review audit|Verdict comment preview/);
+    }
 
-  const other = await deliver(base, reviewRequested("someone-else", prUrl));
-  assert.equal(other.status, 204);
-  await out.until(/ignored: review not requested from this user/);
+    run.child.kill("SIGTERM");
+    const result = await run.done;
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /Received SIGTERM; stopping/);
+    assert.equal(gh.reviews.length, 1);
+    for (const line of result.stdout.trim().split("\n")) {
+      assert.match(line, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (INFO|DEBUG)\s+(serve|webhook|acme\/demo#7)\s+\S/,
+        "every line, including multiline reports, needs its own timestamp, level and context");
+    }
+  });
+}
 
-  run.child.kill("SIGTERM");
-  const result = await run.done;
-  assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /Received SIGTERM; stopping/);
-  assert.equal(gh.reviews.length, 1);
-});
+for (const { migration, apply, verbose, outcome } of [
+  { migration: false, apply: true, verbose: false, outcome: "Approved" },
+  { migration: false, apply: false, verbose: false, outcome: "Preview only · would approve" },
+  { migration: true, apply: false, verbose: true, outcome: "Preview only · would comment" },
+]) {
+  test(`serve logs ${outcome}${migration ? " when migration approval is blocked" : ""}`, { timeout: 20_000 }, async (t) => {
+    const evidence = `${prUrl}#issuecomment-1`;
+    const gh = github(undefined, [{ id: 1, body: "Please check compatibility and failure handling.", html_url: evidence,
+      user: { login: "reviewer" }, created_at: "2026-01-01T00:00:00Z" }]);
+    const statuses = migration ? ["addressed", "outstanding", "uncertain", "not-actionable"] : ["addressed", "not-actionable"];
+    const f = await fixture(t, (_body, response) => tool(response, "report_review_assessment", {
+      databaseMigration: migration ? { status: "migration", reason: "Adds a database column." } : noDatabaseMigration,
+      assessments: [{ commentKey: "comment:1", findings: statuses.map((status) => ({
+        summary: `A ${status} finding`, status, reason: "Assessment supplied by the model fixture.", awaiting: "reviewer", evidence: [evidence],
+      })) }],
+    }), { entrypoint: resolve("audit.ts"), github: gh.handler });
+    const run = f.start(["serve", "--port", "0", "--approve", ...(apply ? ["--apply"] : []), ...(verbose ? ["--verbose"] : [])], { env });
+    const out = watchOutput(run.child);
+    const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+    assert.equal((await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).status, 202);
+    await out.until(new RegExp(`INFO\\s+acme/demo#7\\s+${outcome}`));
+    run.child.kill("SIGTERM");
+    const result = await run.done;
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(gh.reviews.length, apply ? 1 : 0);
+    if (apply) assert.equal(gh.reviews[0]!.event, "APPROVE");
+    else assert.match(result.stdout, /previews only, add --apply to submit reviews/);
+    assert.match(result.stdout, migration
+      ? /1 addressed · 1 outstanding · 1 uncertain · 1 not actionable/
+      : /1 addressed · 0 outstanding · 0 uncertain · 1 not actionable/);
+    if (migration) assert.match(result.stdout, /Approval blocked:.*database migration/i);
+    if (verbose) assert.match(result.stdout, /DEBUG\s+acme\/demo#7\s+Verdict comment preview:/);
+    else assert.doesNotMatch(result.stdout, /Verdict comment preview|PR review audit/);
+  });
+}
 
 /** A model that hangs on its first request, so the first audit is still unfinished when its server is stopped. */
 function hangingModel() {
@@ -139,9 +192,9 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
 
     const second = f.start(["serve", "--port", "0", "--apply"], { env });
     const out = watchOutput(second.child);
-    await out.until(/\[serve\] Recovering audit: https:\/\/github\.com\/acme\/demo\/pull\/7/);
-    await out.until(/\[acme\/demo#7\] \[audit\] Resuming saved snapshot/);
-    await out.until(/\[acme\/demo#7\] \[audit\] Verdict comment posted to the PR: /);
+    await out.until(/INFO\s+acme\/demo#7\s+Recovering audit/);
+    await out.until(/INFO\s+acme\/demo#7\s+Resuming saved snapshot/);
+    await out.until(/INFO\s+acme\/demo#7\s+Review: /);
     assert.equal(gh.reviews.length, 1);
     assert.equal(model.calls.count, 2, "the interrupted request is retried, not a new audit");
     second.child.kill("SIGTERM");
@@ -174,10 +227,13 @@ for (const failure of ["model error", "missing assessment"] as const) {
       const errors = watchOutput(run.child, "stderr");
       const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
       assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
-      assert.match(out.output, /\[serve\] Recovering audit: https:\/\/github\.com\/acme\/demo\/pull\/7/);
-      if (expectedCalls === 3) await errors.until(/\[serve\] Audit failed for /);
-      else await out.until(/Verdict comment posted to the PR: /);
-      assert.match(out.output, /retrying failed audit after startup recovery/);
+      assert.match(out.output, /INFO\s+acme\/demo#7\s+Recovering audit/);
+      if (expectedCalls === 3) {
+        await errors.until(/ERROR\s+acme\/demo#7\s+Audit failed:/);
+        if (failure === "model error") assert.match(errors.output, /WARN\s+acme\/demo#7\s+conversation=\d+ Model HTTP error:.*status=401/);
+        assert.doesNotMatch(out.output, /INFO\s+acme\/demo#7\s+(Completed|Approved|Review:)/);
+      } else await out.until(/INFO\s+acme\/demo#7\s+Review: /);
+      assert.match(out.output, /Retrying failed audit after startup recovery/);
       assert.doesNotMatch(out.output, /--force requested/, "startup recovery must not claim a user requested --force");
       assert.equal(calls, expectedCalls, "each startup admits one fresh assessment, without another webhook");
       assert.equal(gh.reviews.length, expectedCalls === 3 ? 0 : 1);
@@ -208,8 +264,8 @@ test("serve checks a resumed PR again, so one merged in the meantime is skipped"
   gh.state.merged = true;
   const second = f.start(["serve", "--port", "0", "--apply"], { env });
   const out = watchOutput(second.child);
-  await out.until(/\[serve\] Recovering audit: /);
-  await out.until(/\[acme\/demo#7\] \[audit\] Skipping https:\/\/github\.com\/acme\/demo\/pull\/7: PR has already been merged\./);
+  await out.until(/INFO\s+acme\/demo#7\s+Recovering audit/);
+  await out.until(/INFO\s+acme\/demo#7\s+Skipped · PR has already been merged\./);
   second.child.kill("SIGTERM");
   assert.equal((await second.done).code, 0);
   assert.equal(model.calls.count, 1, "a merged PR must not resume model work");
@@ -239,14 +295,14 @@ test("serve starts and reports a repository database that another process holds"
   const [, port] = await firstOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
   assert.equal((await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).status, 202);
   // Once it has audited the PR, the first server holds the repository's database.
-  await firstOut.until(/Verdict:/);
+  await firstOut.until(/Preview only · would comment/);
 
   const second = f.start(["serve", "--port", "0"], { env });
   await watchOutput(second.child).until(/Listening on /);
   second.child.kill("SIGTERM");
   const result = await second.done;
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stderr, /\[serve\] Skipped github\.com\/acme~demo, so its audits are not recovered: .*Database is already in use/);
+  assert.match(result.stderr, /WARN\s+serve\s+Skipped github\.com\/acme~demo, so its audits are not recovered: .*Database is already in use/);
   first.child.kill("SIGTERM");
   assert.equal((await first.done).code, 0);
 });
@@ -272,7 +328,7 @@ test("serve keeps an interrupted audit's work for a later run to resume", { time
   run.child.kill("SIGTERM");
   const result = await run.done;
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /\[serve\] Audit interrupted: https:\/\/github\.com\/acme\/demo\/pull\/7\./);
+  assert.match(result.stdout, /INFO\s+acme\/demo#7\s+Audit interrupted · saved work resumes/);
   assert.equal(gh.reviews.length, 0);
 
   const resumed = await f.run("", [prUrl]);
@@ -313,5 +369,6 @@ test("serve prints its usage without a secret or token", { timeout: 20_000 }, as
   assert.match(output, /^Usage: pronto serve /m);
   assert.match(output, /PRONTO_WEBHOOK_SECRET must be set/);
   assert.match(output, /--concurrency <n>.*default: 4/);
+  assert.match(output, /--verbose includes ignored deliveries/);
   assert.match(output, /--force and --pr are not supported/);
 });
