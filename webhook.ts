@@ -32,10 +32,7 @@ export function formatDeliveryContext(event: string | undefined, payload: unknow
       // Do not log unsupported URLs, which could include credentials or other private text.
     }
   }
-  const fields = [
-    `event=${token(event)}`, `action=${token(body?.action)}`, `pr=${pr}`,
-    `sender=${token(object(body?.sender)?.login)}`,
-  ];
+  const fields = [`pr=${pr}`, `sender=${token(object(body?.sender)?.login)}`];
   if (body?.requested_reviewer !== undefined) fields.push(`requested_reviewer=${token(object(body.requested_reviewer)?.login)}`);
   if (body?.requested_team !== undefined) fields.push(`requested_team=${token(object(body.requested_team)?.slug)}`);
   return fields.join(" ");

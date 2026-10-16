@@ -159,7 +159,7 @@ The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub
 
 Ordinary issue comments, pending reviews and Pronto's marked audit output do not start audits. Every other delivery is also acknowledged and logged with the reason it was ignored.
 
-Ignored-delivery logs include the event, action, PR URL and sender, plus the requested reviewer or team when present. Missing or unsafe values appear as `-`. Logged values have length limits, and logs omit comment bodies and the full payload.
+Ignored-delivery logs include the PR URL and sender, plus the requested reviewer or team when present. Missing or unsafe values appear as `-`. Logged values have length limits, and logs omit comment bodies and the full payload.
 
 ### Options
 
