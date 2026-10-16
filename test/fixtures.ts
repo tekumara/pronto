@@ -16,6 +16,7 @@ type Launch = { nodeArgs?: string[]; entrypoint?: string; env?: NodeJS.ProcessEn
 export async function fixture(t: TestContext, respond: (body: Request, response: ServerResponse) => void, options: {
   entrypoint?: string;
   github?: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>;
+  modelCost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "pi-durable-test-"));
   const agentDir = join(directory, "pi");
@@ -65,7 +66,7 @@ export async function fixture(t: TestContext, respond: (body: Request, response:
   await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { local: {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     api: "openai-completions",
-    models: [{ id: "test", contextWindow: 128000, maxTokens: 1000 }],
+    models: [{ id: "test", contextWindow: 128000, maxTokens: 1000, ...(options.modelCost ? { cost: options.modelCost } : {}) }],
   } } }));
 
   const start = (args: string[] = [], launch: Launch = {}) => {
@@ -98,16 +99,16 @@ export async function fixture(t: TestContext, respond: (body: Request, response:
   return { directory, cwd, agentDir, stateDir, start, run };
 }
 
-export function reply(response: ServerResponse, deltas: object[], finish = "stop") {
+export function reply(response: ServerResponse, deltas: object[], finish = "stop", usage?: { prompt_tokens: number; completion_tokens: number }) {
   if (!response.headersSent) response.writeHead(200, { "Content-Type": "text/event-stream" });
   for (const delta of deltas) {
     response.write(`data: ${JSON.stringify({ id: "reply", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
   }
-  response.end(`data: ${JSON.stringify({ id: "reply", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`);
+  response.end(`data: ${JSON.stringify({ id: "reply", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: finish }], ...(usage ? { usage } : {}) })}\n\ndata: [DONE]\n\n`);
 }
 
 let callSequence = 0;
-export function tool(response: ServerResponse, name: string, args: object) {
-  reply(response, [{ role: "assistant", tool_calls: [{ index: 0, id: `call-${name}-${++callSequence}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }], "tool_calls");
+export function tool(response: ServerResponse, name: string, args: object, usage?: { prompt_tokens: number; completion_tokens: number }) {
+  reply(response, [{ role: "assistant", tool_calls: [{ index: 0, id: `call-${name}-${++callSequence}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }], "tool_calls", usage);
 }
 

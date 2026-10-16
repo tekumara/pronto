@@ -71,8 +71,12 @@ for (const verbose of [false, true]) {
     let modelCalls = 0;
     const preparationLogged = Promise.withResolvers<void>();
     t.after(() => preparationLogged.resolve());
-    const f = await fixture(t, (_body, response) => { modelCalls++; assess(response); }, {
+    const f = await fixture(t, (_body, response) => {
+      modelCalls++;
+      tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] }, { prompt_tokens: 1000, completion_tokens: 500 });
+    }, {
       entrypoint: resolve("audit.ts"),
+      modelCost: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 },
       github: async (request, response) => {
         // Hold the first GitHub fetch until preparation is visible, not just logged after the fetch.
         if (request.url === "/github/repos/acme/demo/pulls/7") await preparationLogged.promise;
@@ -112,12 +116,13 @@ for (const verbose of [false, true]) {
     assert.equal(repeat.status, 202);
     await out.until(/INFO\s+acme\/demo#7\s+Reusing saved assessment/);
     await out.until(/INFO\s+acme\/demo#7\s+Already submitted/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Already submitted · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · est\. \$0(?:\n|$)/);
     assert.equal(gh.reviews.length, 1);
     assert.equal(modelCalls, 1);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Queued · mentioned in a pull request comment · requester=maintainer/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+(Queued|Re-run queued) · review requested · requester=alice/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Started · 0 comments/);
-    assert.match(out.output, /INFO\s+acme\/demo#7\s+Completed · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Completed · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · est\. \$0\.02/);
     if (verbose) {
       assert.match(out.output, /DEBUG\s+webhook\s+Ignored: review not requested from this user.*delivery=ignored-delivery-id/);
       assert.match(out.output, /DEBUG\s+acme\/demo#7\s+report_review_assessment/);

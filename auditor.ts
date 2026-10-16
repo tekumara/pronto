@@ -4,8 +4,8 @@ import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil
 import { Type } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, watchEvents,
-  type Conversation, type ConversationId, type Cursor, type Harness, type ModelRef, type SubmissionId, type TaskId,
+  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, UsageDoc, watchEvents,
+  type Conversation, type ConversationId, type Cursor, type Harness, type ModelRef, type SubmissionId, type TaskId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
@@ -416,6 +416,13 @@ function outputRefreshReasons(conversationId: ConversationId, reasons: string[],
 
 const snapshotDisclaimer = "This is the agent's assessment of a saved snapshot, not proof of correctness or the PR's current live state.";
 
+function estimatedCost(usage: UsageState | undefined): string {
+  const cost = [...Object.values(usage?.models ?? {}), ...Object.values(usage?.tools ?? {})]
+    .reduce((total, item) => total + item.cost.total, 0);
+  const formatted = cost.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+  return `est. $${formatted}`;
+}
+
 function summarizeFindings(assessments: Assessment[]) {
   const findings = assessments.flatMap((a) => a.findings);
   const counts = Object.fromEntries(["addressed", "outstanding", "uncertain", "not-actionable"].map((status) => [status, findings.filter((f) => f.status === status).length]));
@@ -552,7 +559,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
 
 async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined, options: {
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
-}, log: AuditLog, context: Context, started: number): Promise<void> {
+}, log: AuditLog, context: Context, started: number, conversationId: ConversationId | null): Promise<void> {
   const approvalBlock = options.approveMigrations ? null : migrationApprovalBlock(databaseMigration);
   const report = formatReport(snapshot, assessments, approvalBlock);
   log("debug", report, `\n${report}\n`);
@@ -607,7 +614,8 @@ async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessme
   const { counts } = summarizeFindings(assessments);
   const outcome = dryRun ? `Preview only · would ${existing ? "skip existing review" : approve ? "approve" : "comment"}`
     : existing ? "Already submitted" : approve ? "Approved" : "Completed";
-  log("info", `${outcome} · ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not actionable · ${((performance.now() - started) / 1000).toFixed(1)}s`, null);
+  const cost = conversationId ? estimatedCost(await harness.snapshot(UsageDoc, conversationId, context)) : "est. $0";
+  log("info", `${outcome} · ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not actionable · ${((performance.now() - started) / 1000).toFixed(1)}s · ${cost}`, null);
   if (url || existing) log("info", `Review: ${url ?? existing!.url}`, null);
 }
 
@@ -936,7 +944,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           log("info", "Reusing saved assessment", `[audit] ${detail}`);
           log("debug", detail, null);
           outputSnapshotExclusions(snapshot, options.exclude, log);
-          await outputReport(harness, saved.snapshot, saved.report, saved.databaseMigration, options, log, context, started);
+          await outputReport(harness, saved.snapshot, saved.report, saved.databaseMigration, options, log, context, started, null);
           return;
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
@@ -1018,7 +1026,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       }
       throw new Error(stripControlCharacters(`Agent finished without a complete assessment.${reason} No verdict was produced.`));
     }
-    await outputReport(harness, snapshot, saved.report, saved.databaseMigration, options, log, context, started);
+    await outputReport(harness, snapshot, saved.report, saved.databaseMigration, options, log, context, started, conversation.id);
   } finally {
     await stream?.stop();
   }
