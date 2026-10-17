@@ -219,7 +219,7 @@ const readFile = defineTool({
       const doc = await tx.doc(AuditDocument, api.conversationId);
       if (!doc.inspected.includes(result.url)) doc.inspected.push(result.url);
     }, context);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { output: [{ type: "text", text: JSON.stringify(result) }] };
   },
 });
 const readComment = defineTool({
@@ -228,7 +228,7 @@ const readComment = defineTool({
   execute: async ({ commentKey }, api, context) => {
     const comment = (await api.snapshot(AuditDocument, api.conversationId, context))?.snapshot?.comments.find((c) => c.key === commentKey);
     if (!comment) throw new Error(`Unknown comment key: ${commentKey}`);
-    return { content: [{ type: "text", text: JSON.stringify(comment) }] };
+    return { output: [{ type: "text", text: JSON.stringify(comment) }] };
   },
 });
 const report = defineTool({
@@ -260,7 +260,7 @@ const report = defineTool({
       doc.report = assessments;
       doc.databaseMigration = databaseMigration;
     }, context);
-    return { content: [{ type: "text", text: "Complete assessment saved. The host will print the report." }], control: { terminate: true } };
+    return { output: [{ type: "text", text: "Complete assessment saved. The host will print the report." }], control: { terminate: true } };
   },
 });
 // Keep admission and completion durable, not in a caller's lifetime. The shared scheduler

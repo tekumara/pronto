@@ -39,7 +39,7 @@ export function createAuditExecutionGate(models: Models) {
     await awaitWithContext(pending.promise, context);
     return sessionId;
   }
-  // Durable 1.0.3 polls omit sessionId. Resolve the owning conversation from saved
+  // Durable deferred polls omit sessionId. Resolve the owning conversation from saved
   // generation checkpoints without changing the provider's opaque deferred handle.
   async function waitDeferred(handle: DeferredHandle, context: Context): Promise<string> {
     const harness = await awaitWithContext(attached.promise, context);
