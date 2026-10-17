@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
@@ -49,7 +50,7 @@ function githubEvidence(options: {
   const issueComments = options.issueComments ?? (options.issueComment ? [issueComment(3, "Which roles should have access?", "human")] : []);
   const approvals: { body: string; event: string; commit_id: string }[] = [];
   const reviews: (IssueComment & { state: string; commit_id: string })[] = [];
-  const state = { headSha: sha, baseSha: sha, login: "auditor", loseResponse: false };
+  const state = { headSha: sha, baseSha: sha, login: "auditor", loseResponse: false, holdResponse: false };
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     const requestUrl = new URL(request.url!, "http://fixture");
     const path = requestUrl.pathname;
@@ -72,12 +73,15 @@ function githubEvidence(options: {
         reviews.push({ ...issueComment(id, body.body, state.login), html_url: `${url}#pullrequestreview-${id}`,
           state: approving ? "APPROVED" : "COMMENTED", commit_id: body.commit_id });
       }
+      if (state.holdResponse) return; // Accepted remotely; the client cannot save an acknowledgement.
       if (state.loseResponse) response.statusCode = 502; // GitHub accepted the review, but its response was lost.
       json({ state: approving ? "APPROVED" : "COMMENTED", commit_id: body.commit_id, html_url: `${url}#pullrequestreview-${100 + reviews.length - 1}` });
       return;
     }
     assert.equal(request.method, path === "/github/graphql" ? "POST" : "GET");
-    if (path === "/github/graphql") {
+    if (path === "/github/user") {
+      json({ login: state.login });
+    } else if (path === "/github/graphql") {
       json({ data: { repository: { pullRequest: { reviewThreads: {
         pageInfo: { hasNextPage: false, endCursor: null },
         nodes: options.empty ? [] : [{ isResolved: false, isOutdated: false, comments: { nodes: [{ fullDatabaseId: "1" }] } }],
@@ -106,6 +110,68 @@ function githubEvidence(options: {
     }
   };
   return { handler, comments, posted, attempts, issueComments, reviews, approvals, state };
+}
+
+async function recoverPublisher(f: Awaited<ReturnType<typeof fixture>>) {
+  // No --apply, --approve or PR target: recovery must use only the saved publication intent.
+  const run = f.start(["serve", "--port", "0"], { env: { PRONTO_WEBHOOK_SECRET: "publication-test-secret" } });
+  let output = "";
+  const published = Promise.withResolvers<void>();
+  run.child.stdout.on("data", (chunk) => {
+    output += chunk;
+    if (/Saved verdict published:/.test(output)) published.resolve();
+  });
+  const timer = new AbortController();
+  try {
+    await Promise.race([published.promise,
+      run.done.then((result) => { throw new Error(`Server exited before recovery: ${result.stderr}\n${output}`); }),
+      delay(5000, undefined, { signal: timer.signal }).then(() => { throw new Error(`Publication was not recovered:\n${output}`); }),
+    ]);
+    return output;
+  } finally {
+    timer.abort();
+    run.child.kill("SIGTERM");
+    await run.done;
+  }
+}
+
+for (const cached of [false, true]) {
+  test(`${cached ? "cached" : "fresh"} assessment completion survives a crash before POST with its explicit approval choices`, { timeout: 20000 }, async (t) => {
+    const github = githubEvidence();
+    let calls = 0;
+    let interrupting = false;
+    const f = await fixture(t, (body, response) => {
+      calls++;
+      assess(body, response, ["uncertain"], { status: "migration", reason: "This changes database data." });
+    }, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+      // The durable publisher may start before report printing. Hold preflight so the
+      // kill point is unambiguously before POST, not an ambiguous accepted response.
+      if (interrupting && request.url === "/github/user") return;
+      await github.handler(request, response);
+    } });
+    if (cached) await f.run("", [url]);
+    const preload = join(f.directory, "crash-before-publication.cjs");
+    await writeFile(preload, `const write = process.stdout.write;
+process.stdout.write = function(chunk, ...args) {
+  if (String(chunk).includes(${JSON.stringify(cached ? "Reusing saved assessment" : "Verdict:")})) process.kill(process.pid, "SIGKILL");
+  return write.call(this, chunk, ...args);
+};`);
+    interrupting = true;
+    const killed = f.start([url, "--apply", "--approve", "--allow-uncertain", "--approve-migrations"], { nodeArgs: ["--require", preload] });
+    killed.child.stdin.end();
+    assert.equal((await killed.done).signal, "SIGKILL");
+    assert.equal(calls, 1);
+    assert.equal(github.attempts.length, 0);
+    interrupting = false;
+    await recoverPublisher(f);
+    assert.equal(calls, 1, "publication recovery must not run the model, even for a cached handoff");
+    assert.deepEqual(github.posted.map(({ event, commit_id }) => [event, commit_id]), [["APPROVE", sha]],
+      "recovery must retain the uncertain/migration overrides, not the new server's defaults");
+    assert.match(github.comments[0], /<!-- pronto:publication:[a-f0-9]{64} -->\n<!-- pronto:review-audit -->$/);
+    const repeated = await f.run("", [url, "--skip-approved=false", "--apply", "--approve", "--allow-uncertain", "--approve-migrations"]);
+    assert.match(repeated, /Comment skipped: matching verdict review recorded locally/);
+    assert.equal(github.attempts.length, 1);
+  });
 }
 
 for (const status of ["addressed", "uncertain"] as const) {
@@ -463,31 +529,50 @@ for (const awaiting of [undefined, "invented-person"]) {
   });
 }
 
-test("a lost response leaves no local submission receipt, so retrying can duplicate an accepted review", { timeout: 20000 }, async (t) => {
-  const github = githubEvidence();
-  github.state.loseResponse = true;
+for (const crash of [false, true]) test(`${crash ? "a crash before the receipt" : "a lost POST response"} is reconciled on startup without another review`, { timeout: 20000 }, async (t) => {
+  const github = githubEvidence({ pageSize: 1 });
+  github.state.loseResponse = !crash;
+  github.state.holdResponse = crash;
+  const accepted = Promise.withResolvers<void>();
   let calls = 0;
   const f = await fixture(t, (body, response) => {
     calls++;
     assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+    await github.handler(request, response);
+    if (request.method === "POST" && request.url?.endsWith("/reviews")) accepted.resolve();
+  } });
   const { child, done } = f.start([url, "--apply"]);
   child.stdin.end();
+  if (crash) {
+    await accepted.promise;
+    child.kill("SIGKILL");
+  }
   const failed = await done;
-  assert.equal(failed.code, 1);
-  assert.match(failed.stderr, /GitHub request failed \(502\)/);
+  if (crash) assert.equal(failed.signal, "SIGKILL");
+  else {
+    assert.equal(failed.code, 1);
+    assert.match(failed.stderr, /GitHub request failed \(502\)/);
+  }
   assert.equal(github.comments.length, 1, "the server accepted the review despite the failed response");
 
-  github.state.loseResponse = false;
-  const retry = await f.run("", [url, "--apply"]);
-  assert.match(retry, /Reusing saved assessment/);
-  assert.match(retry, /Verdict comment posted/);
+  github.state.loseResponse = github.state.holdResponse = false;
+  const actual = github.reviews[0];
+  // Matching a marker alone is unsafe. All these reviews precede the real one on separate pages.
+  github.reviews.unshift(
+    { ...actual, user: { login: "someone-else" }, html_url: `${url}#wrong-author` },
+    { ...actual, commit_id: "b".repeat(40), html_url: `${url}#wrong-head` },
+    { ...actual, state: "APPROVED", html_url: `${url}#wrong-event` },
+    { ...actual, body: `Edited\n${actual.body}`, html_url: `${url}#wrong-body` },
+  );
+  const recovered = await recoverPublisher(f);
+  assert.ok(recovered.includes(`Saved verdict published: ${url}#pullrequestreview-100`));
   assert.equal(calls, 1);
-  assert.equal(github.attempts.length, 2, "without a local receipt, GitHub's earlier acceptance is unknown");
+  assert.equal(github.attempts.length, 1, "reconciliation must find the accepted review before retrying POST");
 
-  const repeated = await f.run("", [url, "--apply"]);
-  assert.match(repeated, /Comment skipped: matching verdict review recorded locally/);
-  assert.equal(github.attempts.length, 2, "the successful retry saved a receipt for later invocations");
+  const repeated = await f.run("", [url, "--apply", "--skip-approved=false"]);
+  assert.ok(repeated.includes(`Comment skipped: matching verdict review recorded locally: ${url}#pullrequestreview-100`));
+  assert.equal(github.attempts.length, 1, "recovery saved a receipt for later invocations");
 });
 
 test("submitting an audit review does not require a separate GitHub duplicate lookup after assessment", { timeout: 20000 }, async (t) => {
@@ -509,7 +594,7 @@ test("submitting an audit review does not require a separate GitHub duplicate lo
 });
 
 for (const action of ["comment", "approve"] as const) {
-  test(`a failed ${action} request exits nonzero without retrying or losing the completed assessment`, { timeout: 20000 }, async (t) => {
+  test(`a failed ${action} request exits nonzero, retaining the assessment and explicit publication intent`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence({ commentStatus: action === "approve" ? undefined : 403, approvalStatus: 403 });
     let calls = 0;
     const f = await fixture(t, (body, response) => {
@@ -531,7 +616,7 @@ for (const action of ["comment", "approve"] as const) {
     assert.match(cached, /Reusing saved assessment/);
     assert.match(cached, /Comment would be posted/, "a failed write must not create a submission receipt");
     assert.equal(calls, 1, "a failed write must not invalidate the completed assessment");
-    assert.equal(github.attempts.length, 1, "approval intent must not persist");
+    assert.equal(github.attempts.length, 2, "startup retries the earlier explicit --apply, not the new preview");
   });
 }
 

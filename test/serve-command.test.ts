@@ -278,19 +278,19 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
     assert.equal((await second.done).code, 0);
   });
 
-  test(`serve resumes an audit that ${signal} left unfinished when it starts again`, { timeout: 40_000 }, async (t) => {
+  for (const apply of [true, false]) test(`serve resumes ${apply ? "an applied" : "a preview"} audit after ${signal} without inferring new publication flags`, { timeout: 40_000 }, async (t) => {
     const gh = github();
     const model = hangingModel();
     const f = await fixture(t, model.respond, { entrypoint: resolve("audit.ts"), github: gh.handler });
-    await interruptedServe(f, model, signal, ["--apply"]);
+    await interruptedServe(f, model, signal, apply ? ["--apply"] : []);
     assert.equal(gh.reviews.length, 0);
 
-    const second = f.start(["serve", "--port", "0", "--apply"], { env });
+    const second = f.start(["serve", "--port", "0", ...(apply ? [] : ["--apply"])], { env });
     const out = watchOutput(second.child);
     await out.until(/INFO\s+acme\/demo#7\s+Recovering audit/);
     await out.until(/INFO\s+acme\/demo#7\s+Resuming saved snapshot/);
-    await out.until(/INFO\s+acme\/demo#7\s+Review: /);
-    assert.equal(gh.reviews.length, 1);
+    await out.until(/INFO\s+acme\/demo#7\s+(Review: |Preview only)/);
+    assert.equal(gh.reviews.length, apply ? 1 : 0, "startup flags must not change an admitted assessment's publication choices");
     assert.equal(model.calls.count, 2, "the interrupted request is retried, not a new audit");
     second.child.kill("SIGTERM");
     const result = await second.done;
@@ -311,7 +311,7 @@ for (const failure of ["model error", "missing assessment"] as const) {
     }, { entrypoint: resolve("audit.ts"), github: gh.handler });
     // Keep an older, reusable success: recovery must retry the latest failed attempt, not reuse it.
     await f.run("", [prUrl]);
-    const failed = f.start(["--force", prUrl]);
+    const failed = f.start(["--force", "--apply", prUrl]);
     failed.child.stdin.end();
     assert.equal((await failed.done).code, 1);
     assert.equal(calls, 2);

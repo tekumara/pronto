@@ -40,7 +40,7 @@ A submission answers: "What is the status of this request, and where is its answ
 
 Tracks the individual pieces of work needed to answer a request.
 
-One submission can require several model generations and many tool calls. Each is a task with saved input, execution state and an eventual outcome. An `app.review-audit-controller` task belongs to each assessment conversation. It admits the saved evidence using a stable request ID, waits for the submission and publishes completion and the PR's cache pointer in one commit.
+One submission can require several model generations and many tool calls. Each is a task with saved input, execution state and an eventual outcome. An `app.review-audit-controller` task belongs to each assessment conversation. It admits the saved evidence using a stable request ID, waits for the submission and saves completion, the PR's cache pointer and any verdict-publication task in one commit.
 
 While unfinished, a task stores the checkpoint needed to resume. It can also store temporary durable memos, such as a fetched GitHub file. Memos are removed once the task's outcome is decided; committed tool-result entries remain.
 
@@ -67,6 +67,8 @@ The table stores the document's identity, owner and history policy, not its actu
 | `app.review-audit-identity` | Evidence-and-policy fingerprint and policy hash |
 | `app.review-audit-runs` | One family member per PR: current attempt, controller task, restart intent and cache pointer |
 | `app.submitted-audit-reviews` | One family member per PR: submitted audit reviews used to skip duplicate writes |
+| `app.audit-publication-requests` | Explicit publication choices admitted with an assessment, and its publication task IDs |
+| `app.audit-publications` | One family member per PR: immutable pending publication intents and delivery state |
 
 #### `document_revisions`
 
@@ -219,7 +221,7 @@ For an unchanged-evidence recheck, there is no new conversation, submission or m
 - Rechecks are `entries` with kind `app.review-audit-recheck`. They also update `latestSuccess.lastCheckedAt` in that PR's session-scoped `app.review-audit-runs` family member.
 - Commit sequences are not timestamps. Changes saved in the same atomic commit share a sequence.
 
-The audit document definitions are in [`auditor.ts`](auditor.ts). Webhook task and queue definitions are in [`webhook-queue.ts`](webhook-queue.ts).
+The audit document definitions are in [`auditor.ts`](auditor.ts). Publication tasks and receipts are in [`publication.ts`](publication.ts). Webhook task and queue definitions are in [`webhook-queue.ts`](webhook-queue.ts).
 
 ## Audit database contents
 
@@ -231,7 +233,7 @@ The in-memory queue only dispatches durable task invocations. It limits concurre
 
 Startup recovery resets interrupted intake entries to waiting and repairs any missing or terminal task still referenced by a pending entry. It retains each repository harness while work drains, including repositories without assessment conversations. Intake and assessment recovery for the same PR share one execution. Delivery IDs remain after completion, but IDs older than the repository's last 1000 accepted IDs can be admitted again. This replaces the former process-local, server-wide window. Restart order across repository databases is not a persisted global FIFO.
 
-Queue execution is at least once, not exactly once. An interrupted webhook can re-enter normal audit and publication handling. There is no publication outbox: failed verdict submissions and completed assessments without pending intake keep their existing recovery limits. GitHub writes and local submission receipts remain non-atomic.
+Queue execution is at least once, not exactly once. An interrupted webhook can re-enter normal audit handling. Verdict publication has its own durable handoff, independent of webhook intake. GitHub writes and local submission receipts remain non-atomic.
 
 Each newly admitted audit attempt creates an independent conversation. Its evidence, identity, controller task and PR controller pointer are saved together, before submitting work to the model. Restored model requests and remote file reads wait until their PR is selected and passes live merge-status and label checks. Deferred-provider jobs keep their opaque handles in generation-task poll checkpoints. The execution gate resolves each handle's owning conversation from those saved checkpoints before polling it; unselected jobs are neither polled nor resubmitted.
 
@@ -246,12 +248,26 @@ The application stores these logical documents, not separate tables for each kin
 | `app.review-audit-identity` | Conversation | `fingerprint`: evidence and policy hash. `policy`: model and auditor configuration hash. Older conversations may not have this document. |
 | `app.review-audit-runs` | Session family, keyed by PR number as a string | `active`: latest admitted conversation ID. `controllerTask`: its durable controller task ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
 | `app.submitted-audit-reviews` | Session family, keyed by PR number as a string | `reviews`: receipts for submitted audit reviews, keyed by verdict/head/review-type fingerprint. Each receipt contains `headSha`, `event`, `url` and `recordedAt`. |
+| `app.audit-publication-requests` | Conversation | `choices`: explicit `apply`, `approve`, `allowUncertain` and `approveMigrations` booleans saved before assessment execution. `tasks`: publication task IDs by fingerprint. Resuming with explicit new choices admits them before waiting; startup uses saved choices, not new server flags. Legacy assessments without saved choices default to preview during recovery. |
+| `app.audit-publications` | Session family, keyed by PR number as a string | `pending`: fingerprint map containing an immutable intent, current task ID, author, attempted flag and failure flag. The intent stores the explicit choices, target URL, head and base SHAs, selected review event, exact rendered body and fingerprint. |
 
 The session-scoped `app.submitted-audit-reviews` family is also keyed by PR number as a string. Its `reviews` map holds one receipt per submitted-review fingerprint. Each receipt stores `headSha`, review `event` (`COMMENT` or `APPROVE`), GitHub review `url` and `recordedAt`. The fingerprint is a SHA-256 hash of the head, review event and rendered verdict body, ignoring evidence-fetch times and trailing whitespace. It is separate from the assessment cache fingerprint.
 
 `recordedAt` is the local receipt timestamp, not GitHub's `submitted_at` value. Earlier experimental receipt schemas are not migrated; an existing GitHub review without a receipt in this document can be submitted again.
 
-Review submission receipts are the source of truth for duplicate prevention. They are shared across audit attempts, working directories, CLI, chat and GitHub accounts using this repository database. They are created only after an acknowledged GitHub review submission, never for a preview or failed request. They are not reconstructed from GitHub, so external edits, deletions, dismissals and later review decisions do not change them. GitHub's write and the receipt commit are not atomic: a lost response or interruption before the commit can leave a posted review without a local receipt. That review can be posted again on retry.
+Review submission receipts remain the local source of truth for duplicate prevention. They are shared across audit attempts, working directories, CLI, chat and GitHub accounts using this repository database. Previews create no receipt or publication task. External edits, deletions, dismissals and later review decisions do not change a saved receipt.
+
+### Durable verdict publication
+
+For a fresh assessment, the controller atomically saves successful completion, cache state and an `app.publish-audit-review` task through `tx.createTask()`. Explicit choices are saved with evidence admission, so a crash before controller completion cannot lose the handoff. For a cache hit, the recheck entry, `lastCheckedAt` and publication handoff share a transaction. Neither path needs another model assessment to publish. A matching receipt suppresses task creation; a matching pending intent shares its task.
+
+The publisher is a conversation-owned background task with a `publish` checkpoint. It cannot be cancelled by a model conversation restart. Its immutable input contains the complete publication intent. Before POST, it saves the authenticated author and an attempted flag in the pending document. This flag conservatively means GitHub may have accepted the request. After acknowledgement, it atomically saves the receipt, removes the pending entry and completes the task. A process crash leaves the live task resumable. A request failure leaves the intent pending and the task failed; startup creates a replacement delivery task, preserving the original intent and attempt state. A later explicit `--apply` can also retry it.
+
+Serve startup discovers pending publications even without pending webhook work or an unfinished assessment. It retains their repository harnesses and resumes publication directly, without rerunning live audit admission or the model. CLI and chat recover publications when opening the targeted repository. Normal audit completion waits for its publication tasks; shutdown interrupts invocations but leaves their durable state. Failed publications are reported and retained for another startup or explicit apply, rather than retried in a tight loop.
+
+On a saved attempted publication, the publisher lists all review pages before another POST. It accepts only a review matching the saved author, head SHA, review state, exact body and `<!-- pronto:publication:<fingerprint> -->` marker. A match restores the receipt without posting, even if an approval's head has since changed. Otherwise a retry still performs the normal approval head/base checks. Lookup failures stop the delivery rather than falling through to POST. If credentials now identify a different account, Pronto can reconcile the original author's review but refuses a new POST until that account is restored. Fresh intents do not adopt arbitrary remote reviews from another state directory.
+
+This is not exactly-once publication. GitHub's `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` does not document a client idempotency key; Pronto does not send or rely on an `Idempotency-Key` header. A crash or lost response can leave a review in flight or not yet visible when reconciliation runs. Edits, deletions or dismissals before receipt recovery can also prevent a match. Retrying after an empty successful lookup can therefore create a duplicate. Keep the state directory and inspect the PR after ambiguous failures. Durable's SQLite backend uses WAL with `synchronous=NORMAL`: it protects against process crashes, not loss of the newest commits after host or power failure.
 
 See [How findings are stored](#how-findings-are-stored) for the report structure, finding fields and relationship between sources and finding counts.
 
@@ -264,12 +280,13 @@ Expect these changes across invocations:
 | Accepted webhook | Atomically save its delivery ID and pending intent; create an `app.webhook-audit` task, or coalesce into waiting work or one saved rerun. Commit before HTTP `202`. |
 | New audit after a cache miss | New conversation, evidence snapshot, identity and controller task; then submission, model and tool records, and an accepted report if successful. Older conversations remain stored. |
 | Resume an unfinished audit | Same conversation and snapshot. The stable `review-audit:<snapshot.id>` request ID avoids a duplicate submission. Recovery updates task state and can add further model and tool entries. |
-| Reuse an unchanged assessment | No new conversation, submission or assessment. Append an `app.review-audit-recheck` entry to the cached conversation and update `lastCheckedAt`. The receipt records the fingerprint, new check's snapshot ID and fetch window, not another full snapshot. Original evidence and report remain unchanged. |
+| Reuse an unchanged assessment | No new conversation, submission or assessment. Atomically append an `app.review-audit-recheck` entry, update `lastCheckedAt` and admit any explicit publication task. The recheck records the fingerprint, snapshot ID and fetch window. Original evidence and report remain unchanged. |
 | Force a restart | Save restart intent, cancel that PR's unfinished work if present, then create a new conversation when fresh evidence is admitted. Keep the cancelled conversation's existing evidence and transcript. |
 | Failed attempt | Keep any admitted conversation and its partial history. The report may remain `null`; the previous successful cache is not replaced. |
-| Post a verdict with `--apply` | After GitHub acknowledges the review, add its fingerprint and receipt to that PR's `app.submitted-audit-reviews` document. The completed assessment is unchanged. |
+| Post a verdict with `--apply` | Save immutable intent and publisher task at completion or cache recheck. After acknowledgement or remote reconciliation, atomically save the receipt, remove the pending intent and complete the publisher. The completed assessment is unchanged. |
 | Skip a locally recorded verdict | No new review submission receipt. A normal cache recheck can still append its own evidence-check receipt and update `lastCheckedAt`. |
-| Preview or failed GitHub request | No review submission receipt is created. The assessment and its cache can still be saved normally. |
+| Preview | No publication task or submission receipt. The assessment and its cache can still be saved normally. Earlier explicitly authorised pending writes can still recover. |
+| Failed GitHub request | No new submission receipt. Keep the publication intent and attempt state for recovery. The assessment and cache remain saved. |
 
 A report can be saved before its submission finishes. Its presence alone does not establish a successful audit. Before the initial evidence is admitted, an interrupted fetch leaves no new assessment conversation or snapshot. A webhook intake task or a force-restart intent may already be saved.
 

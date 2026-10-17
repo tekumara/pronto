@@ -200,17 +200,21 @@ Retries, failures, recovery and shutdown messages remain visible without `--verb
 
 ### Stopping and restarting
 
-On startup, the server recovers accepted webhook work, unfinished audits and each PR's latest failed assessment from saved repository databases. This includes failures saved by earlier versions. Ctrl+C, SIGTERM and crashes preserve waiting work and a queued rerun. Recovery and normal admission share one repository database owner. Recovery keeps databases with pending webhook work open, even if no assessment has started.
+On startup, the server recovers accepted webhook work, unfinished audits, pending verdict publications and each PR's latest failed assessment from saved repository databases. This includes failures saved by earlier versions. Ctrl+C, SIGTERM and crashes preserve waiting work and a queued rerun. Recovery and normal admission share one repository database owner. Recovery keeps databases with pending webhook work open, even if no assessment has started.
 
-Interrupted audits resume their saved snapshot and model. An interrupted fetch before evidence admission starts again with current server options. Waiting requests also use the options configured at restart. Recovery discovers repositories and saves all recovery intents before the server listens. It then dispatches recovered work through the same global concurrency limit. Cross-repository order after restart follows discovery and dispatch, not a persisted global FIFO.
+Interrupted audits resume their saved snapshot and model. Their saved publication choices do not change when startup flags change. A preview-only assessment stays preview-only, even if the server restarts with `--apply`. Conversely, an earlier explicit `--apply` remains authorised even if the server now defaults to previews. An interrupted fetch before evidence admission starts again with current server options. Waiting requests without an admitted assessment also use the options configured at restart. Recovery discovers repositories and saves all recovery intents before the server listens. It then dispatches recovered work through the same global concurrency limit. Cross-repository order after restart follows discovery and dispatch, not a persisted global FIFO.
 
-An assessment that exhausted model retries (`model_error`), or finished without a complete report, gets a fresh attempt with current evidence and server options. This attempt bypasses any older cached success. Startup queues each failed assessment once; another failure waits for the next restart or review request. Successful, cancelled and superseded attempts are not retried.
+An assessment that exhausted model retries (`model_error`), or finished without a complete report, gets a fresh attempt with current evidence and server options, retaining its saved publication choices. Older attempts without saved choices recover as previews. This attempt bypasses any older cached success. Startup queues each failed assessment once; another failure waits for the next restart or review request. Successful, cancelled and superseded attempts are not retried.
 
 Every recovered audit repeats the live checks. A PR that is now merged, a draft, labelled, over the size limit or approved is skipped and keeps its saved work.
 
 Webhook execution is at least once. Its queue task stays pending until the normal audit call settles, so an interruption can repeat live checks and cached verdict handling. A saved assessment is reused when the evidence is unchanged.
 
-There is no durable verdict-publication outbox. Failed verdict submissions are not retried on startup. A completed assessment without pending webhook work is not automatically published either: request the review again. GitHub submission and the local submission receipt are not atomic, so a lost response or crash between them can cause a duplicate review. Waiting work is durable; exactly-once publication is not.
+Verdict publication is a separate durable task. Fresh assessment completion and cache rechecks save any explicit publication intent atomically with their completion bookkeeping. Startup resumes pending publications even without webhook work, using the saved review type, body, head and approval options. It does not run the model again or change previews into writes. Publication recovery finishes an already authorised action; it does not repeat audit skip checks. Approval retries still check the saved head and base before posting.
+
+After a lost response or crash before receipt storage, Pronto lists remote reviews and matches the saved author, head, event, exact body and fingerprint marker before another POST. A match restores the receipt. Lookup failure stops the attempt. Failed deliveries remain pending for another startup or explicit `--apply`; they do not retry in a tight loop.
+
+This reduces duplicates, but is not exactly-once publication. GitHub's create-review endpoint does not document a client idempotency key. Pronto does not rely on an `Idempotency-Key` header. An earlier POST can still be in flight or not yet visible during reconciliation. An edited, deleted or dismissed review may no longer match. A retry after an empty lookup can then post a duplicate. Keep the state directory and check the PR after ambiguous failures. See [durable verdict publication](DATABASE.md#durable-verdict-publication) for the storage protocol and limits.
 
 A database with nothing to recover is closed at once, so the CLI can still use that repository while the server runs. A database another process holds is skipped with a message, and the server starts anyway. While the server runs it holds the lock on each repository database where it has accepted or recovered work, so a CLI run against one of those repositories fails with "Database is already in use". Stop the server first, or request the review instead.
 
@@ -369,15 +373,15 @@ The verdict comment is previewed by default. With `--apply`, Pronto posts it unl
 
 `--apply` checks local records of [submitted audit reviews](GLOSSARY.md#language) in the repository's SQLite database. When the verdict body, review type and audited head match a recorded review, Pronto skips the write and prints its saved URL. Evidence-fetch times and trailing whitespace do not affect the match. This applies to cached assessments and forced refreshes. A preview followed by `--apply` still posts if no matching receipt exists. Changed verdict content or a different head can produce a new review.
 
-A submission receipt is saved only after GitHub returns a successful response with the review URL. Receipts are shared across working directories, CLI and chat, and GitHub accounts using the same state directory. GitHub review history is not used to discover or reconcile submitted audit reviews. Earlier reviews without local receipts, including reviews from another machine or state directory, do not prevent posting. Editing, deleting or dismissing a review on GitHub does not remove its local receipt. `--force` refreshes the assessment, not review submission history.
+A submission receipt is saved after GitHub acknowledges the review, or after remote reconciliation finds a previously attempted publication. Receipts are shared across working directories, CLI and chat, and GitHub accounts using the same state directory. Remote history is checked only for a saved attempted publication. Earlier reviews without a local receipt or pending intent, including reviews from another machine or state directory, do not prevent posting. Editing, deleting or dismissing a review on GitHub does not remove its local receipt. `--force` refreshes the assessment, not review submission history.
 
 The review is a `COMMENT` review, or an `APPROVE` review when approval is selected and eligible (see [Approve clean audits](#approve-clean-audits)). A recorded comment review does not prevent a later approval review. A recorded approval prevents another matching approval, even after a later dismissal or request for changes on GitHub. The separate live `--skip-approved` check still skips PRs already approved at their current head; use `--skip-approved=false` to audit them anyway.
 
 Reviews are pinned to the audited head commit. Pronto never edits or replaces an earlier audit review or comment. Audit reviews include a hidden marker on their final line. Pronto uses it to exclude its own output from the evidence it assesses, so it does not invalidate the cache. Audit comments posted by earlier versions as plain PR comments are left as they are. The former `--sticky` flag has been removed; Pronto rejects it as an unknown option.
 
-With `--apply`, the host posts reviews only after a complete, validated assessment. A cache hit can post a review, such as for an assessment first run as a preview. The model remains read-only. Marked Pronto comments and reviews do not invalidate the evidence cache. Changes to other PR discussion still do.
+With `--apply`, the durable publisher posts reviews only after a complete, validated assessment. A cache hit can post a review, such as for an assessment first run as a preview. The model remains read-only. Marked Pronto comments and reviews do not invalidate the evidence cache. Changes to other PR discussion still do.
 
-GitHub writes are not replayed by Durable, and the flags do not persist across invocations. A failed request saves no submission receipt, but retains the completed assessment and exits 1. GitHub's write and the local receipt are not one atomic operation. If GitHub accepts a review but its response is lost, or the process stops before saving the receipt, retrying can post a duplicate. A receipt-storage failure also exits 1 and prints the posted review URL. Check the PR before retrying after an interruption or ambiguous failure.
+Publication flags are not sticky defaults for future audits. They are saved for the specific admitted assessment and publication task. A failed request retains the completed assessment and publication intent and exits 1. Reopening that repository, or starting serve mode, can finish the earlier authorised write even without a new `--apply`. The new invocation's preview does not authorise another write. A crash or receipt-storage failure leaves the publication recoverable, subject to the reconciliation limits above.
 
 ### Approve clean audits
 
@@ -401,7 +405,7 @@ Add `--approve-migrations` to allow approval of database-migration PRs:
 pronto --apply --approve --approve-migrations https://github.com/owner/repo/pull/42
 ```
 
-`--approve-migrations` defaults to false and does not persist across invocations. It bypasses the migration approval block, including uncertain or missing migration classifications. It still requires `--approve`, and `--apply` to submit a review. Outstanding findings always prevent approval. Uncertain findings still require `--allow-uncertain`.
+`--approve-migrations` defaults to false for each new audit. A pending publication retains its saved choice. It bypasses the migration approval block, including uncertain or missing migration classifications. It still requires `--approve`, and `--apply` to submit a review. Outstanding findings always prevent approval. Uncertain findings still require `--allow-uncertain`.
 
 The model always saves a migration classification. This flag only changes approval eligibility, not the classification, findings or cache. A cache hit uses the saved findings with the current approval options. With `--apply`, it posts only if the resulting verdict body, review type and head do not match a local submission receipt.
 
@@ -413,13 +417,13 @@ Add `--allow-uncertain` to permit approval with uncertain findings, provided the
 pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
 ```
 
-`--allow-uncertain` defaults to false and does not persist across invocations. It still requires `--approve`, and `--apply` to submit a review. Audits with only uncertain findings can qualify. Audits with no actionable findings qualify without this flag. The migration approval block still applies unless you add `--approve-migrations`. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
+`--allow-uncertain` defaults to false for each new audit. A pending publication retains its saved choice. It still requires `--approve`, and `--apply` to submit a review. Audits with only uncertain findings can qualify. Audits with no actionable findings qualify without this flag. The migration approval block still applies unless you add `--approve-migrations`. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving and stops if either differs from the saved snapshot. The review is pinned to the audited head SHA. Its body is the verdict comment, so the verdict and the approval appear as one review rather than a comment plus a body-less approval. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
 With `--apply --approve`, the host decides eligibility first. An eligible audit selects one `APPROVE` review carrying the verdict. Otherwise it selects a `COMMENT` review, and the terminal explains why approval was skipped. Either review is posted only if no matching receipt exists in local history. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
 
-Approvals are not replayed by Durable, and the flag does not persist across invocations. Approval errors exit 1 but retain the completed assessment. Because the verdict is the approval review's body, nothing is posted if that request fails or if the head or base SHA changed. GitHub rejects approval of your own PR, for example. Rerun without `--approve` to post the verdict as a `COMMENT` review. Check the PR before retrying after an interruption or ambiguous network failure.
+The approval choice is saved for that publication task, not applied to future audits. Approval errors exit 1 but retain the completed assessment and pending publication. Because the verdict is the approval review's body, a rejected approval does not fall back to a separate comment. A head or base change still prevents a new approval POST. GitHub rejects approval of your own PR, for example. An explicit new audit without `--approve` can request a `COMMENT` review instead; it does not revoke an earlier pending approval. Check the PR after ambiguous network failures.
 
 ### Preview comments and approvals
 
@@ -429,7 +433,7 @@ Audits run in dry-run mode by default. They show the exact comment body without 
 pronto --approve https://github.com/owner/repo/pull/42
 ```
 
-The normal report is followed by a labelled comment preview and the planned actions. The preview checks local review submission history and says when posting would be skipped. It creates no submission receipt and makes no GitHub duplicate lookup. For an addressed verdict with no recorded approval, the action preview looks like this:
+The normal report is followed by a labelled comment preview and the planned actions. The preview checks local review submission history and says when posting would be skipped. It creates no publication task or submission receipt and makes no GitHub duplicate lookup for the preview. Opening a repository can still recover an earlier explicitly authorised publication. For an addressed verdict with no recorded approval, the action preview looks like this:
 
 ```text
 [audit:dry-run] Comment would be posted with the approval review.
@@ -444,11 +448,11 @@ To perform the selected actions, add `--apply`:
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--apply` defaults to false. When supplied, it posts the verdict unless a matching review is recorded locally; with `--approve`, that review is an approval if eligible. Without `--apply`, no comments or reviews are created. The flag does not persist across invocations; every invocation that writes must include it.
+`--apply` defaults to false for each new audit. When supplied, it authorises publication unless a matching review is recorded locally; with `--approve`, that review is an approval if eligible. Without `--apply`, the new audit creates no pending GitHub write. A previously authorised publication can still finish during recovery, using its saved choices.
 
 With no action flags, the default preview shows the rendered comment body and the planned comment action. A preview does not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed; omit `--apply` to preview.
 
-The audit otherwise runs normally: it fetches evidence, may call the model, saves its assessment and uses the cache. Dry-run mode prevents GitHub writes, not local storage writes or model requests. You can combine previews with `--force` to reassess fresh evidence.
+The audit otherwise runs normally: it fetches evidence, may call the model, saves its assessment and uses the cache. Dry-run mode prevents new publication requests, not local storage writes or model requests. It does not revoke earlier authorised publications. You can combine previews with `--force` to reassess fresh evidence.
 
 ## Assessment caching and restart
 

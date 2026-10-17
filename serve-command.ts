@@ -17,7 +17,7 @@ function printServeHelp(): void {
   console.log(`--concurrency <n> sets how many audits run at once (default: ${DEFAULT_CONCURRENCY}).`);
   console.log("--webhook-path <path> sets the path that receives deliveries (default: /webhook). GET /healthz reports health.");
   console.log("--verbose includes ignored deliveries, delivery IDs, tool calls, cache changes and full reports.");
-  console.log("The audit flags apply to every audit and work as they do for pronto. --force and --pr are not supported. Without --apply, audits only log previews.");
+  console.log("The audit flags apply to every audit and work as they do for pronto. --force and --pr are not supported. Without --apply, new audits only log previews. Previously authorised publications can still recover.");
 }
 
 export async function runServe(args: string[]): Promise<void> {
@@ -47,7 +47,7 @@ export async function runServe(args: string[]): Promise<void> {
     for (const { database, error } of skipped) log("warn", "serve", `Skipped ${database}, so its audits are not recovered: ${describe(error)}`);
     if (stopping) return;
     const address = await server.listen(port, host);
-    log("info", "serve", `Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · previews only, add --apply to submit reviews"}`);
+    log("info", "serve", `Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · new audits: previews only, add --apply to submit reviews; saved publications still recover"}`);
     log("info", "serve", `Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
     for (const url of recoverable) {
       if (stopping) break;

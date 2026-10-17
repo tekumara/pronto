@@ -308,8 +308,22 @@ export function isAuditComment(body: string | null | undefined): boolean {
   return body?.trimEnd().split("\n").at(-1) === AUDIT_COMMENT_MARKER;
 }
 
-/** Submits one review pinned to the audited head. The caller records submitted audit reviews. Returns null for a preview. */
-export async function submitAuditReview(snapshot: ReviewSnapshot, body: string, {
+/** Reconcile only a saved, possibly attempted publication, not arbitrary remote reviews on a fresh run. */
+export async function reconcileAuditReview(intent: {
+  target: ReviewTarget; headSha: string; event: "COMMENT" | "APPROVE"; body: string; fingerprint: string;
+}, author: string, signal?: AbortSignal): Promise<string | null> {
+  const client = github(signal);
+  const { owner, repo, pr } = intent.target;
+  const reviews = await client.pages<RawComment>(`/repos/${owner}/${repo}/pulls/${pr}/reviews?per_page=100`);
+  const state = intent.event === "APPROVE" ? "APPROVED" : "COMMENTED";
+  const match = reviews.find((review) => review.user?.login.toLowerCase() === author.toLowerCase()
+    && review.commit_id === intent.headSha && review.state === state
+    && review.body === intent.body && review.body.includes(`<!-- pronto:publication:${intent.fingerprint} -->`));
+  return match?.html_url || null;
+}
+
+/** Submits one review pinned to the audited head. The durable publisher records its receipt. Returns null for a preview. */
+export async function submitAuditReview(snapshot: Pick<ReviewSnapshot, "target" | "headSha" | "baseSha">, body: string, {
   approve = false, apply = false, signal,
 }: { approve?: boolean; apply?: boolean; signal?: AbortSignal } = {}): Promise<string | null> {
   const client = github(signal);
