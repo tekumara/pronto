@@ -1,4 +1,3 @@
-import { createAuditQueue } from "./audit-queue.ts";
 import { SERVE_USAGE } from "./audit-options.ts";
 import { createAuditor, type AuditOptions } from "./auditor.ts";
 import { createModelRuntime } from "./model.ts";
@@ -31,32 +30,30 @@ export async function runServe(args: string[]): Promise<void> {
   const { models, model } = await createModelRuntime(process.cwd(), requested);
   const options: AuditOptions = { model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply };
   const log = createServeLogger({ verbose });
-  const auditor = createAuditor(models, { log });
+  const auditor = createAuditor(models, { log, webhooks: { concurrency, options } });
   let stopping = false;
-  const queue = createAuditQueue({
-    concurrency,
-    audit: (url) => auditor.audit(url, options),
-    onError: (url, error) => {
-      if (stopping) log("info", auditLabel(url), "Audit interrupted · saved work resumes when the server starts again");
-      else log("error", auditLabel(url), `Audit failed: ${describe(error)}`);
-    },
-  });
-  const server = createWebhookServer({ secret, login, enqueue: (url) => queue.enqueue(url), path, log });
+  const server = createWebhookServer({ secret, login, enqueue: async (url, id) => {
+    if (stopping) return "closed";
+    const outcome = await auditor.enqueue(url, id);
+    return stopping ? "closed" : outcome;
+  }, path, log });
   const stopped = Promise.withResolvers<NodeJS.Signals>();
-  const stop = (signal: NodeJS.Signals) => stopped.resolve(signal);
+  const stop = (signal: NodeJS.Signals) => { stopping = true; stopped.resolve(signal); };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
     // Before listening, so a delivery cannot race recovery to open the same repository database.
     const { urls: recoverable, skipped } = await auditor.recover();
     for (const { database, error } of skipped) log("warn", "serve", `Skipped ${database}, so its audits are not recovered: ${describe(error)}`);
+    if (stopping) return;
     const address = await server.listen(port, host);
     log("info", "serve", `Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · previews only, add --apply to submit reviews"}`);
     log("info", "serve", `Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
     for (const url of recoverable) {
+      if (stopping) break;
       log("info", auditLabel(url), "Recovering audit");
-      queue.enqueue(url);
     }
+    await auditor.resume();
     const signal = await stopped.promise;
     log("info", "serve", `Received ${signal}; stopping`);
   } finally {
@@ -64,9 +61,7 @@ export async function runServe(args: string[]): Promise<void> {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     await server.close();
-    const dropped = queue.close();
-    for (const url of dropped) log("warn", auditLabel(url), "Accepted but not started · request this review again");
-    // Closing keeps unfinished work. The audits it interrupts settle, then the queue is idle.
-    await Promise.all([auditor.close(), queue.idle()]);
+    // Closing interrupts task invocations, not their persisted intents (including waiting work and reruns).
+    await auditor.close();
   }
 }

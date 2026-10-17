@@ -3,16 +3,17 @@ import { randomUUID } from "node:crypto";
 import { request } from "node:http";
 import { test, type TestContext } from "node:test";
 import type { Enqueued } from "../audit-queue.ts";
+import type { Accepted } from "../webhook-queue.ts";
 import type { LogLevel } from "../logging.ts";
 import { createWebhookServer, type WebhookServerOptions } from "../serve.ts";
 import { deliver, pullUrl as url, reviewRequested, sign, webhookSecret as secret } from "./webhook-fixtures.ts";
 
-async function start(t: TestContext, overrides: Partial<WebhookServerOptions> = {}, outcome: Enqueued = "queued") {
+async function start(t: TestContext, overrides: Partial<WebhookServerOptions> = {}, outcome: Accepted = "queued") {
   const logs: { level: LogLevel; scope: string; message: string; detail?: string }[] = [];
   const enqueued: string[] = [];
   const server = createWebhookServer({
     secret, login: "me", log: (level, scope, message, detail) => logs.push({ level, scope, message, detail }), ...overrides,
-    enqueue: overrides.enqueue ?? ((target) => { enqueued.push(target); return outcome; }),
+    enqueue: overrides.enqueue ?? (async (target) => { enqueued.push(target); return outcome; }),
   });
   const { port } = await server.listen(0, "127.0.0.1");
   t.after(() => server.close());
@@ -149,7 +150,7 @@ test("keeps missing or unsafe requesters out of queued logs without rejecting th
 });
 
 test("reports how the queue handled the request", async (t) => {
-  for (const outcome of ["rerun", "coalesced"] as const) {
+  for (const outcome of ["rerun", "coalesced", "duplicate"] as const) {
     const { base } = await start(t, {}, outcome);
     assert.deepEqual(await (await deliver(base, reviewRequested())).json(), { status: outcome });
   }
@@ -162,23 +163,41 @@ test("hands over a draft that became ready while the reviewer was requested", as
   assert.deepEqual(enqueued, [url]);
 });
 
-test("drops a redelivery of the same delivery ID but not a new delivery for the same PR", async (t) => {
-  const { base, enqueued, logs } = await start(t);
+test("waits for admission and passes the delivery ID to its durable owner", async (t) => {
+  const admitted = Promise.withResolvers<Enqueued>();
+  const received = Promise.withResolvers<string | undefined>();
+  const { base } = await start(t, { enqueue: async (_url, id) => {
+    received.resolve(id);
+    return admitted.promise;
+  } });
   const id = randomUUID();
-  assert.equal((await deliver(base, reviewRequested(), { id })).status, 202);
-  const again = await deliver(base, reviewRequested(), { id });
-  assert.equal(again.status, 202);
-  assert.deepEqual(await again.json(), { status: "duplicate" });
-  assert.deepEqual(enqueued, [url]);
-  assert.match(logs.at(-1)!.message, /Duplicate delivery/);
-  assert.equal((await deliver(base, reviewRequested(), { id: randomUUID() })).status, 202);
-  assert.deepEqual(enqueued, [url, url], "a second request is the queue's to coalesce");
+  let answered = false;
+  const response = deliver(base, reviewRequested(), { id }).then((response) => { answered = true; return response; });
+  assert.equal(await received.promise, id);
+  assert.equal(answered, false, "a pending admission is not a 202 acceptance");
+  admitted.resolve("queued");
+  assert.equal((await response).status, 202);
 });
 
-test("does not remember a delivery that was not accepted", async (t) => {
+test("does not answer 202 when shutdown begins during admission", async (t) => {
+  const admitted = Promise.withResolvers<Accepted>();
+  const received = Promise.withResolvers<void>();
+  const { base, server } = await start(t, { enqueue: async () => {
+    received.resolve();
+    return admitted.promise;
+  } });
+  const response = deliver(base, reviewRequested());
+  await received.promise;
+  const closing = server.close();
+  admitted.resolve("queued");
+  assert.equal((await response).status, 503);
+  await closing;
+});
+
+test("allows a delivery refused by admission to be retried", async (t) => {
   let closed = true;
   const enqueued: string[] = [];
-  const { base } = await start(t, { enqueue: (target) => { enqueued.push(target); return closed ? "closed" : "queued"; } });
+  const { base } = await start(t, { enqueue: async (target) => { enqueued.push(target); return closed ? "closed" : "queued"; } });
   const id = randomUUID();
   const refused = await deliver(base, reviewRequested(), { id });
   assert.equal(refused.status, 503, "GitHub must see a failure so the delivery can be redelivered");
@@ -196,15 +215,6 @@ test("does not deduplicate or log delivery IDs that are not plain tokens", async
   assert.equal(enqueued.length, 6, "unusable IDs are never deduplicated");
   assert.doesNotMatch(JSON.stringify(logs), /not valid|xxxx/, "unsigned header text must not reach the log");
   assert.equal(logs[0]!.detail, "delivery=-");
-});
-
-test("forgets the oldest delivery IDs once the recent window is full", async (t) => {
-  const { base, enqueued } = await start(t);
-  const ids = Array.from({ length: 1001 }, () => randomUUID());
-  for (let i = 0; i < ids.length; i += 100) await Promise.all(ids.slice(i, i + 100).map((id) => deliver(base, reviewRequested(), { id })));
-  assert.equal(enqueued.length, 1001);
-  assert.deepEqual(await (await deliver(base, reviewRequested(), { id: ids.at(-1)! })).json(), { status: "duplicate" });
-  assert.deepEqual(await (await deliver(base, reviewRequested(), { id: ids[0]! })).json(), { status: "queued" }, "the oldest ID was evicted");
 });
 
 test("rejects a signed payload that is not JSON", async (t) => {
@@ -233,11 +243,11 @@ test("rejects a payload over the size limit, declared or streamed", async (t) =>
   assert.equal((await deliver(base, reviewRequested())).status, 202, "the server keeps serving afterwards");
 });
 
-test("answers 500 and keeps serving when the queue throws", async (t) => {
+test("answers 503 and keeps serving when durable admission fails", async (t) => {
   let fail = true;
-  const { base, logs } = await start(t, { enqueue: () => { if (fail) throw new Error("queue exploded"); return "queued"; } });
-  assert.equal((await deliver(base, reviewRequested())).status, 500);
-  assert.match(logs.at(-1)!.message, /Request failed: queue exploded/);
+  const { base, logs } = await start(t, { enqueue: async () => { if (fail) throw new Error("queue exploded"); return "queued"; } });
+  assert.equal((await deliver(base, reviewRequested())).status, 503);
+  assert.match(logs.at(-1)!.message, /Admission failed: queue exploded/);
   fail = false;
   assert.equal((await deliver(base, reviewRequested())).status, 202);
 });
@@ -251,6 +261,6 @@ test("stops listening on close", async (t) => {
 });
 
 test("requires a secret and a reviewer login", () => {
-  assert.throws(() => createWebhookServer({ secret: "", login: "me", enqueue: () => "queued" }), /secret is required/);
-  assert.throws(() => createWebhookServer({ secret, login: "", enqueue: () => "queued" }), /login is required/);
+  assert.throws(() => createWebhookServer({ secret: "", login: "me", enqueue: async () => "queued" }), /secret is required/);
+  assert.throws(() => createWebhookServer({ secret, login: "", enqueue: async () => "queued" }), /login is required/);
 });

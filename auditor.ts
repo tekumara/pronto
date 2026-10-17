@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness } from "./state.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
+import { createWebhookQueue } from "./webhook-queue.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { compileExclusions } from "./exclusions.ts";
 import type { Log, LogLevel } from "./logging.ts";
@@ -627,18 +628,31 @@ export type AuditOptions = {
 };
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
-export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output }: { labelOutput?: boolean; log?: Log } = {}) {
+export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output, webhooks }: {
+  labelOutput?: boolean; log?: Log;
+  webhooks?: { concurrency: number; options: AuditOptions };
+} = {}) {
   const repositories = new Map<string, Promise<RepositoryAudit>>();
   const requests = new Set<string>();
   const failedRecoveries = new Set<string>();
   const shutdown = new AbortController();
   let closing: Promise<void> | undefined;
+  let recovering: Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> | undefined;
+  const webhookQueue = webhooks ? createWebhookQueue({
+    concurrency: webhooks.concurrency,
+    audit: (url) => auditor.audit(url, webhooks.options),
+    onError: (url, error) => {
+      const target = parseReviewTarget(url);
+      output?.("error", `${target.owner}/${target.repo}#${target.pr}`, `Audit failed: ${error instanceof Error ? error.message : String(error)}`);
+    },
+  }) : undefined;
 
   const repositoryKey = (target: ReviewTarget) => `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}`;
 
   /** Opens a repository's database, which takes its process lock. `host` and `name` are the path components in openStateHarness. */
   function openRepository(host: string, name: string): Promise<RepositoryAudit> {
     const registry = createRegistry();
+    if (webhookQueue) registry.install(webhookQueue.extension);
     const gate = createAuditExecutionGate(models);
     registry.install(defineExtension({ ...Auditor, tools: [{
       ...readFile,
@@ -666,8 +680,45 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
     });
   }
 
-  return {
+  function repositoryFor(target: ReviewTarget): Promise<RepositoryAudit> {
+    const repository = repositoryKey(target);
+    let opened = repositories.get(repository);
+    if (!opened) {
+      const name = `${target.owner.toLowerCase()}~${target.repo.toLowerCase()}`;
+      const host = encodeURIComponent(new URL(target.url).hostname.toLowerCase());
+      opened = openRepository(host, name).catch((error) => {
+        repositories.delete(repository);
+        throw error;
+      });
+      // Publish the opening promise before yielding: admission and audits share one owner.
+      repositories.set(repository, opened);
+    }
+    return opened;
+  }
+
+  const auditor = {
+    async enqueue(url: string, deliveryId?: string) {
+      if (!webhookQueue) throw new Error("Webhook queue is not enabled");
+      if (closing) return "closed" as const;
+      if (recovering) await recovering;
+      if (closing) return "closed" as const;
+      const { harness } = await repositoryFor(parseReviewTarget(url));
+      const outcome = await webhookQueue.admit(harness, url, deliveryId);
+      // Admission is already durable. Scheduler startup is reconstructible, not acceptance.
+      if (!closing) harness.resume();
+      return outcome;
+    },
+    /** Starts staged recovery work, without readmitting a PR that may already be running. */
+    async resume(): Promise<void> {
+      if (recovering) await recovering;
+      if (closing) return;
+      for (const opened of repositories.values()) {
+        const { harness } = await opened;
+        if (!closing) harness.resume();
+      }
+    },
     async audit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<void> {
+      if (recovering) await recovering;
       if (closing) throw new Error("Auditor is closed");
       const target = parseReviewTarget(url);
       const repository = repositoryKey(target);
@@ -683,72 +734,84 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       const diagnostics = createAuditDiagnostics((message) => output ? output("warn", scope, message) : console.error(`${label}${message}`));
       const context = withAbortSignal(shutdown.signal, callerContext);
       try {
-        let opened = repositories.get(repository);
-        if (!opened) {
-          const name = `${target.owner.toLowerCase()}~${target.repo.toLowerCase()}`;
-          const host = encodeURIComponent(new URL(target.url).hostname.toLowerCase());
-          opened = openRepository(host, name).catch((error) => {
-            repositories.delete(repository);
-            throw error;
-          });
-          // Store the opening promise before yielding so concurrent first requests cannot open twice.
-          repositories.set(repository, opened);
-        }
-        const repositoryAudit = await awaitWithContext(opened, context);
+        const repositoryAudit = await awaitWithContext(repositoryFor(target), context);
         const retryFailed = failedRecoveries.delete(requestKey);
         await auditRequest(target, { ...options, retryFailed, models }, repositoryAudit, context, log, diagnostics);
+      } catch (error) {
+        if (closing && webhooks) log("info", "Audit interrupted · saved work resumes when the server starts again", null);
+        throw error;
       } finally {
         requests.delete(requestKey);
       }
     },
     /**
-     * Opens saved repository databases and returns unfinished and latest failed assessments for the caller to audit.
-     * Failed assessments get one fresh attempt, bypassing any older cache. Interrupted work keeps its saved snapshot.
-     * Databases with nothing to recover are closed; ones that cannot be opened are skipped and reported.
+     * Startup-only discovery of pending intake, unfinished audits and latest failed assessments.
+     * Retain every database with pending work, including ones without an assessment conversation.
+     * Normal admissions wait for discovery; discovery cannot race an already-used auditor.
      */
-    async recover(context: Context = BACKGROUND_CONTEXT): Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> {
-      const urls: string[] = [];
-      const skipped: { database: string; error: unknown }[] = [];
-      for (const { host, name } of await listRepositoryDatabases()) {
-        if (closing) throw new Error("Auditor is closed");
-        let repository: RepositoryAudit | undefined;
-        try {
-          repository = await openRepository(host, name);
-          const unfinished = await unfinishedAudits(repository.harness, context);
-          const failed = await failedAudits(repository.harness, context);
-          const targets = [...unfinished, ...failed];
-          if (closing || !targets.length) {
-            await repository.harness.close(context);
+    recover(context: Context = BACKGROUND_CONTEXT): Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> {
+      if (recovering) return recovering;
+      if (repositories.size || requests.size) return Promise.reject(new Error("Recover before admitting audits"));
+      return recovering = (async () => {
+        const urls: string[] = [];
+        const skipped: { database: string; error: unknown }[] = [];
+        for (const { host, name } of await listRepositoryDatabases()) {
+          if (closing) throw new Error("Auditor is closed");
+          let repository: RepositoryAudit | undefined;
+          try {
+            repository = await openRepository(host, name);
+            const pending = webhookQueue ? await webhookQueue.recover(repository.harness, context) : [];
+            const unfinished = await unfinishedAudits(repository.harness, context);
+            const failed = await failedAudits(repository.harness, context);
+            // Intake and assessment recovery for the same PR select one execution, not a rerun.
+            const selected = new Map<string, string>();
+            for (const url of [...unfinished.map((target) => target.url), ...failed.map((target) => target.url), ...pending]) {
+              selected.set(String(parseReviewTarget(url).pr), url);
+            }
+            if (closing || !selected.size) {
+              await repository.harness.close(context);
+              repository = undefined;
+              if (closing) throw new Error("Auditor is closed");
+              continue;
+            }
+            const target = parseReviewTarget(selected.values().next().value!);
+            repositories.set(repositoryKey(target), Promise.resolve(repository));
             repository = undefined;
-            if (closing) throw new Error("Auditor is closed");
-            continue;
+            for (const target of failed) failedRecoveries.add(`${repositoryKey(target)}#${target.pr}`);
+            urls.push(...selected.values());
+          } catch (error) {
+            await repository?.harness.close(BACKGROUND_CONTEXT).catch(() => {});
+            if (closing) throw error;
+            skipped.push({ database: `${host}/${name}`, error });
           }
-          // Register under the key audit() computes from the same URL, so it reuses this harness rather than opening the database again.
-          repositories.set(repositoryKey(targets[0]!), Promise.resolve(repository));
-          repository = undefined;
-          for (const target of failed) failedRecoveries.add(`${repositoryKey(target)}#${target.pr}`);
-          urls.push(...targets.map((target) => target.url));
-        } catch (error) {
-          if (closing) throw error;
-          await repository?.harness.close(context).catch(() => {});
-          skipped.push({ database: `${host}/${name}`, error });
         }
-      }
-      return { urls, skipped };
+        // Stage all recovery intents before starting any scheduler or HTTP admission. If a
+        // write fails partway through, fail startup and close the dispatcher, rather than
+        // leaving a reserved slot waiting on a repository that discovery has skipped.
+        if (webhookQueue) for (const url of urls) {
+          const { harness } = await repositoryFor(parseReviewTarget(url));
+          await webhookQueue.admit(harness, url);
+        }
+        return { urls, skipped };
+      })();
     },
     close(): Promise<void> {
       if (!closing) {
+        webhookQueue?.close();
         shutdown.abort(new Error("Auditor is closed"));
         closing = (async () => {
+          await recovering?.catch(() => {});
           const results = await Promise.allSettled([...repositories.values()].map((opened) =>
             opened.then(({ harness }) => harness.close(BACKGROUND_CONTEXT), () => {})));
           const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+          await webhookQueue?.idle();
           if (errors.length) throw new AggregateError(errors, "Failed to close audit storage");
         })();
       }
       return closing;
     },
   };
+  return auditor;
 }
 
 /** CLI/chat batch lifecycle. A failed PR never closes another PR's harness or ends its request. */

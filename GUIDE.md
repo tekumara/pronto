@@ -192,23 +192,27 @@ Retries, failures, recovery and shutdown messages remain visible without `--verb
 ### How deliveries are handled
 
 - **Verification.** The server checks the `X-Hub-Signature-256` signature over the raw body, in constant time, before it reads the payload. Bodies over 5 MiB are refused. GitHub's signature has no timestamp, so a captured delivery can be replayed. A replay only repeats an audit that GitHub reported, and the cache and verdict history stop it posting again.
-- **Responses.** The server answers before any audit runs: `202` for an accepted or duplicate request, `204` for an ignored delivery, `401` for a bad signature, `413` for an oversized body and `503` while shutting down. GitHub shows `503` as a failed delivery, so you can redeliver it.
-- **Redeliveries.** A delivery ID seen among the last 1000 is dropped.
+- Responses: `202` means the verified audit request is saved in its repository database, or its delivery ID was already accepted. Admission commits before the response; audits run asynchronously. The server returns `503` if saving fails or shutdown has begun. GitHub shows `503` as a failed delivery, so you can redeliver it. Ignored deliveries still return `204`, bad signatures `401` and oversized bodies `413`.
+- Redeliveries: the last 1000 accepted delivery IDs per repository are saved across restarts. Duplicate requests do not create work or add a rerun. Concurrent copies of an ID share one atomic admission. Missing or unsafe delivery IDs are not deduplicated. IDs from ignored or refused deliveries are not remembered.
 - **One audit per PR.** A request for a PR that is waiting changes nothing. A request for a PR that is running queues one re-run behind the PRs already waiting, because its evidence may have changed. The re-run reuses the cached assessment when the evidence is unchanged and does not submit the same verdict review again.
 - **Concurrency.** At most `--concurrency` audits run at once. The rest wait in order. Each audit makes GitHub and model requests, so keep the limit within your rate limits.
 - **Failures.** A failed audit is logged at `ERROR` level with its PR label and does not affect other PRs.
 
 ### Stopping and restarting
 
-On startup, the server recovers unfinished audits and each PR's latest failed assessment from saved repository databases. This includes failures saved by earlier versions. Interrupted audits resume their saved snapshot and model. Ctrl+C, SIGTERM and crashes preserve this unfinished work.
+On startup, the server recovers accepted webhook work, unfinished audits and each PR's latest failed assessment from saved repository databases. This includes failures saved by earlier versions. Ctrl+C, SIGTERM and crashes preserve waiting work and a queued rerun. Recovery and normal admission share one repository database owner. Recovery keeps databases with pending webhook work open, even if no assessment has started.
+
+Interrupted audits resume their saved snapshot and model. An interrupted fetch before evidence admission starts again with current server options. Waiting requests also use the options configured at restart. Recovery discovers repositories and saves all recovery intents before the server listens. It then dispatches recovered work through the same global concurrency limit. Cross-repository order after restart follows discovery and dispatch, not a persisted global FIFO.
 
 An assessment that exhausted model retries (`model_error`), or finished without a complete report, gets a fresh attempt with current evidence and server options. This attempt bypasses any older cached success. Startup queues each failed assessment once; another failure waits for the next restart or review request. Successful, cancelled and superseded attempts are not retried.
 
 Every recovered audit repeats the live checks. A PR that is now merged, a draft, labelled, over the size limit or approved is skipped and keeps its saved work.
 
-If the server stopped after a successful assessment but before it submitted the verdict, request the review again. The saved assessment is reused when the evidence is unchanged. Failed verdict submissions are not retried on startup. Requests that were accepted but had not started are not saved either. The server lists them as it exits, and a crash loses them, so request those reviews again.
+Webhook execution is at least once. Its queue task stays pending until the normal audit call settles, so an interruption can repeat live checks and cached verdict handling. A saved assessment is reused when the evidence is unchanged.
 
-A database with nothing to recover is closed at once, so the CLI can still use that repository while the server runs. A database another process holds is skipped with a message, and the server starts anyway. While the server runs it holds the lock on each repository database it has audited or resumed, so a CLI run against one of those repositories fails with "Database is already in use". Stop the server first, or request the review instead.
+There is no durable verdict-publication outbox. Failed verdict submissions are not retried on startup. A completed assessment without pending webhook work is not automatically published either: request the review again. GitHub submission and the local submission receipt are not atomic, so a lost response or crash between them can cause a duplicate review. Waiting work is durable; exactly-once publication is not.
+
+A database with nothing to recover is closed at once, so the CLI can still use that repository while the server runs. A database another process holds is skipped with a message, and the server starts anyway. While the server runs it holds the lock on each repository database where it has accepted or recovered work, so a CLI run against one of those repositories fails with "Database is already in use". Stop the server first, or request the review instead.
 
 ## How the audit works
 

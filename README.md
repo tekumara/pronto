@@ -61,6 +61,12 @@ These safeguards rely on the AI’s assessment of the review feedback and migrat
 
 The goal is less time chasing review feedback and waiting for another review round—not replacing tests or a full code review.
 
+## Webhook reliability
+
+In serve mode, Pronto saves accepted audit requests before returning `202`. Waiting work and one queued rerun per PR survive restarts. Delivery deduplication also survives restarts, within the last 1000 accepted delivery IDs per repository.
+
+This does not guarantee exactly-once GitHub publication. A failed verdict submission still needs another review request. See [serve mode recovery and limits](GUIDE.md#stopping-and-restarting).
+
 ## Technical guide
 
 See the [technical guide](GUIDE.md) for setup, usage, audit behaviour and development details.

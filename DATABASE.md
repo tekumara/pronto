@@ -219,11 +219,19 @@ For an unchanged-evidence recheck, there is no new conversation, submission or m
 - Rechecks are `entries` with kind `app.review-audit-recheck`. They also update `latestSuccess.lastCheckedAt` in that PR's session-scoped `app.review-audit-runs` family member.
 - Commit sequences are not timestamps. Changes saved in the same atomic commit share a sequence.
 
-The audit document definitions are in [`auditor.ts`](auditor.ts).
+The audit document definitions are in [`auditor.ts`](auditor.ts). Webhook task and queue definitions are in [`webhook-queue.ts`](webhook-queue.ts).
 
 ## Audit database contents
 
 Each repository has one database at `<state-directory>/repos/<github-host>/<owner>~<repo>.sqlite`, shared by the CLI and chat command across working directories. The host directory is the percent-encoded, lower-case GitHub hostname; the filename uses the lower-case base-repository owner and name, separated by `~`. The host and repo components distinguish origins and repositories, while excluding PR numbers and fork head names. One process owns the database; its shared harness can run independent PR audits concurrently. Earlier hash-named repository databases in the root of `repos/` are left untouched and are not imported. The first audit using a readable name starts a fresh database. The coding conversation remains separate in `<state-directory>/chats/<cwd-hash>.sqlite`.
+
+Serve mode first saves accepted webhook work in the repository database. Its `app.webhook-audit` task belongs to the root conversation and starts at a `dispatch` checkpoint. The session-scoped `app.webhook-queue` document records deduplication and pending PRs. Concurrent copies of a delivery ID cannot create duplicate tasks. Only verified, classified audit deliveries reach this admission boundary; raw payloads and secrets are not stored.
+
+The in-memory queue only dispatches durable task invocations. It limits concurrency across repositories and never overlaps one PR. A task marks its PR running before calling the normal auditor. Requests for a waiting PR coalesce. Requests for a running PR save at most one rerun, using the original URL. Completion removes the pending entry or atomically replaces its task with a rerun task, dispatched behind other waiting PRs. Ordinary audit failures settle the intake task; transient queue-bookkeeping failures retry. Shutdown preserves the checkpoint, pending entry and rerun flag.
+
+Startup recovery resets interrupted intake entries to waiting and repairs any missing or terminal task still referenced by a pending entry. It retains each repository harness while work drains, including repositories without assessment conversations. Intake and assessment recovery for the same PR share one execution. Delivery IDs remain after completion, but IDs older than the repository's last 1000 accepted IDs can be admitted again. This replaces the former process-local, server-wide window. Restart order across repository databases is not a persisted global FIFO.
+
+Queue execution is at least once, not exactly once. An interrupted webhook can re-enter normal audit and publication handling. There is no publication outbox: failed verdict submissions and completed assessments without pending intake keep their existing recovery limits. GitHub writes and local submission receipts remain non-atomic.
 
 Each newly admitted audit attempt creates an independent conversation. Its evidence, identity, controller task and PR controller pointer are saved together, before submitting work to the model. Restored model requests and remote file reads wait until their PR is selected and passes live merge-status and label checks. Deferred-provider jobs keep their opaque handles in generation-task poll checkpoints. The execution gate resolves each handle's owning conversation from those saved checkpoints before polling it; unselected jobs are neither polled nor resubmitted.
 
@@ -233,6 +241,7 @@ The application stores these logical documents, not separate tables for each kin
 
 | Document kind | Scope | Contents |
 | --- | --- | --- |
+| `app.webhook-queue` | Session | `recent`: last 1000 accepted delivery IDs in this repository. `pending`: PR-number map containing the original URL, current intake task ID, running flag and one rerun flag. Admission changes this document and creates any new task in one commit. |
 | `app.review-audit` | Conversation | `snapshot`: PR details, pinned commits, comments, replies, thread states, changed files and patches. `report`: accepted findings assessments, initially `null`. `databaseMigration`: model classification (`migration`, `not-migration` or `uncertain`) and reason, initially `null` and absent in older reports. `inspected`: URLs of remote file ranges read by tools. |
 | `app.review-audit-identity` | Conversation | `fingerprint`: evidence and policy hash. `policy`: model and auditor configuration hash. Older conversations may not have this document. |
 | `app.review-audit-runs` | Session family, keyed by PR number as a string | `active`: latest admitted conversation ID. `controllerTask`: its durable controller task ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
@@ -252,6 +261,7 @@ Expect these changes across invocations:
 
 | Event | Database effect |
 | --- | --- |
+| Accepted webhook | Atomically save its delivery ID and pending intent; create an `app.webhook-audit` task, or coalesce into waiting work or one saved rerun. Commit before HTTP `202`. |
 | New audit after a cache miss | New conversation, evidence snapshot, identity and controller task; then submission, model and tool records, and an accepted report if successful. Older conversations remain stored. |
 | Resume an unfinished audit | Same conversation and snapshot. The stable `review-audit:<snapshot.id>` request ID avoids a duplicate submission. Recovery updates task state and can add further model and tool entries. |
 | Reuse an unchanged assessment | No new conversation, submission or assessment. Append an `app.review-audit-recheck` entry to the cached conversation and update `lastCheckedAt`. The receipt records the fingerprint, new check's snapshot ID and fetch window, not another full snapshot. Original evidence and report remain unchanged. |
@@ -261,7 +271,7 @@ Expect these changes across invocations:
 | Skip a locally recorded verdict | No new review submission receipt. A normal cache recheck can still append its own evidence-check receipt and update `lastCheckedAt`. |
 | Preview or failed GitHub request | No review submission receipt is created. The assessment and its cache can still be saved normally. |
 
-A report can be saved before its submission finishes. Its presence alone does not establish a successful audit. Before the initial evidence is admitted, an interrupted fetch leaves no new conversation or snapshot, although a force-restart intent may already be saved.
+A report can be saved before its submission finishes. Its presence alone does not establish a successful audit. Before the initial evidence is admitted, an interrupted fetch leaves no new assessment conversation or snapshot. A webhook intake task or a force-restart intent may already be saved.
 
 In SQLite, `conversations` identifies attempts, `entries` holds transcript and recheck records, `submissions` holds request IDs and status, and `tasks` holds execution state. Tool memos support recovery while a task is live; they are removed when its outcome is decided. `documents` identifies application and built-in `pi.*` documents. Their JSON values are stored in `document_revisions` as bases or deltas. Use Durable's snapshot API to read a materialised value rather than treating the latest delta as the whole document.
 

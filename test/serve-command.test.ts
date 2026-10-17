@@ -11,7 +11,10 @@ const headSha = "a".repeat(40);
 const env = { PRONTO_WEBHOOK_SECRET: webhookSecret };
 
 /** Simulated GitHub for one PR. The token's user is "Me", to show that logins match case-insensitively. */
-function github(user: (response: ServerResponse) => void = (response) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ login: "Me" })), comments: object[] = []) {
+function github(user: (response: ServerResponse) => void = (response) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ login: "Me" })), comments: object[] = [], target = prUrl) {
+  const [, owner, repo, , number] = new URL(target).pathname.split("/");
+  const repository = `/github/repos/${owner}/${repo}`;
+  const pull = `${repository}/pulls/${number}`;
   const reviews: { event: string; body: string; commit_id: string }[] = [];
   const state = { merged: false };
   const requests: string[] = [];
@@ -19,23 +22,23 @@ function github(user: (response: ServerResponse) => void = (response) => respons
     const path = request.url!.split("?")[0]!;
     requests.push(`${request.method} ${path}`);
     const json = (value: unknown): void => { response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(value)); };
-    if (request.method === "POST" && path === "/github/repos/acme/demo/pulls/7/reviews") {
+    if (request.method === "POST" && path === `${pull}/reviews`) {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       reviews.push(JSON.parse(Buffer.concat(chunks).toString()));
-      return json({ html_url: `${prUrl}#pullrequestreview-${reviews.length}` });
+      return json({ html_url: `${target}#pullrequestreview-${reviews.length}` });
     }
     assert.equal(request.method, path === "/github/graphql" ? "POST" : "GET");
     if (path === "/github/user") return user(response);
     if (path === "/github/graphql") {
       return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } });
     }
-    if (path === "/github/repos/acme/demo/pulls/7") {
+    if (path === pull) {
       return json({ title: "Served PR", body: "", merged: state.merged, draft: false, labels: [], changed_files: 0,
         head: { sha: headSha, repo: { full_name: "acme/demo" } }, base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
     }
-    assert.match(path, /^\/github\/repos\/acme\/demo\/(?:pulls\/7\/(?:comments|reviews|files)|issues\/7\/comments)$/);
-    json(path.endsWith("/issues/7/comments") ? comments : []);
+    assert.ok([`${pull}/comments`, `${pull}/reviews`, `${pull}/files`, `${repository}/issues/${number}/comments`].includes(path), path);
+    json(path === `${repository}/issues/${number}/comments` ? comments : []);
   };
   return { handler, reviews, requests, state };
 }
@@ -203,6 +206,78 @@ async function interruptedServe(f: Awaited<ReturnType<typeof fixture>>, model: R
 }
 
 for (const signal of ["SIGKILL", "SIGTERM"] as const) {
+  test(`serve drains 202-accepted waiting work and deduplicates deliveries after ${signal}`, { timeout: 30_000 }, async (t) => {
+    const queuedUrl = "https://github.com/acme/queued/pull/8";
+    const siblingUrl = "https://github.com/acme/demo/pull/8";
+    const active = github();
+    const sibling = github(undefined, [], siblingUrl);
+    const waiting = github(undefined, [], queuedUrl);
+    const model = hangingModel();
+    let restarting = false;
+    const checking = Promise.withResolvers<void>();
+    let liveChecks = 0;
+    const release = Promise.withResolvers<void>();
+    t.after(() => release.resolve());
+    const f = await fixture(t, model.respond, {
+      entrypoint: resolve("audit.ts"),
+      github: async (request, response) => {
+        if (restarting && /^\/github\/repos\/acme\/demo\/pulls\/[78]$/.test(request.url!)) {
+          if (++liveChecks === 2) checking.resolve();
+          await release.promise;
+        }
+        const gh = request.url?.includes("/acme/queued/") ? waiting
+          : /\/demo\/(?:pulls|issues)\/8(?:\/|$)/.test(request.url!) ? sibling : active;
+        await gh.handler(request, response);
+      },
+    });
+    const first = f.start(["serve", "--port", "0", "--concurrency", "1"], { env });
+    const [, port] = await watchOutput(first.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+    const base = `http://127.0.0.1:${port}`;
+    assert.equal((await deliver(base, reviewRequested("me", prUrl))).status, 202);
+    await model.started;
+    const originalChecks = active.requests.filter((request) => request.endsWith("/pulls/7")).length;
+    assert.deepEqual(await (await deliver(base, reviewRequested("me", siblingUrl))).json(), { status: "queued" });
+    // Concurrent redeliveries must atomically admit one waiting task, not several executions.
+    const id = "durable-waiting-delivery";
+    const responses = await Promise.all(Array.from({ length: 8 }, () => deliver(base, reviewRequested("me", queuedUrl), { id })));
+    assert.ok(responses.every((response) => response.status === 202));
+    const statuses = await Promise.all(responses.map(async (response) => ((await response.json()) as { status: string }).status));
+    assert.equal(statuses.filter((status) => status === "queued").length, 1);
+    assert.equal(statuses.filter((status) => status === "duplicate").length, 7);
+    assert.equal(waiting.requests.length, 0, "202 was returned before this PR began execution");
+    assert.deepEqual(await (await deliver(base, reviewRequested("me", prUrl), { id: "rerun" })).json(), { status: "rerun" });
+    assert.deepEqual(await (await deliver(base, reviewRequested("me", "https://github.com/ACME/Demo/pull/7/"))).json(), { status: "coalesced" });
+    first.child.kill(signal);
+    await first.done;
+
+    restarting = true;
+    active.state.merged = sibling.state.merged = waiting.state.merged = true;
+    const second = f.start(["serve", "--port", "0", "--concurrency", "2"], { env });
+    const out = watchOutput(second.child);
+    const [, resumedPort] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+    const resumedBase = `http://127.0.0.1:${resumedPort}`;
+    await checking.promise;
+    const cli = f.start([queuedUrl]);
+    cli.child.stdin.end();
+    const locked = await cli.done;
+    assert.equal(locked.code, 1, "recovery must retain a repository with only pending intake work");
+    assert.match(locked.stderr, /Database is already in use/);
+    assert.equal(liveChecks, 2, "independent PRs in one repository must use both available slots");
+    assert.equal(waiting.requests.length, 0, "the global cap still applies across repository databases");
+    assert.deepEqual(await (await deliver(resumedBase, reviewRequested("me", queuedUrl), { id })).json(), { status: "duplicate" });
+    assert.deepEqual(await (await deliver(resumedBase, reviewRequested("me", queuedUrl))).json(), { status: "coalesced" });
+    release.resolve();
+    await out.until(/Skipped[\s\S]*Skipped[\s\S]*Skipped[\s\S]*Skipped/);
+    const preparing = [...out.output.matchAll(/(acme\/\S+)\s+Preparing/g)].map((match) => match[1]);
+    assert.ok(preparing.indexOf("acme/queued#8") < preparing.lastIndexOf("acme/demo#7"), "the saved rerun stays behind other waiting PRs");
+    assert.equal(sibling.requests.filter((request) => request.endsWith("/pulls/8")).length, 1, "staging recovery must not readmit a running sibling as a rerun");
+    assert.equal(waiting.requests.filter((request) => request.endsWith("/pulls/8")).length, 1);
+    assert.equal(active.requests.filter((request) => request.endsWith("/pulls/7")).length, originalChecks + 2, "exactly two executions after restart, retaining the original URL");
+    assert.equal(model.calls.count, 1, "live skips must keep resumed model work gated");
+    second.child.kill("SIGTERM");
+    assert.equal((await second.done).code, 0);
+  });
+
   test(`serve resumes an audit that ${signal} left unfinished when it starts again`, { timeout: 40_000 }, async (t) => {
     const gh = github();
     const model = hangingModel();
@@ -276,6 +351,35 @@ for (const failure of ["model error", "missing assessment"] as const) {
   });
 }
 
+test("serve retains a bounded delivery window across restart", { timeout: 30_000 }, async (t) => {
+  const gh = github();
+  gh.state.merged = true;
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const first = f.start(["serve", "--port", "0"], { env });
+  const out = watchOutput(first.child);
+  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const base = `http://127.0.0.1:${port}`;
+  const body = reviewRequested("me", prUrl);
+  // Finish an audit before filling the window: deduplication must outlive queue entries too.
+  assert.equal((await deliver(base, body, { id: "finished" })).status, 202);
+  await out.until(/Skipped · PR has already been merged/);
+  for (let i = 0; i < 1000; i += 50) {
+    const responses = await Promise.all(Array.from({ length: 50 }, (_, n) => deliver(base, body, { id: `window-${i + n}` })));
+    assert.ok(responses.every((response) => response.status === 202));
+  }
+  first.child.kill("SIGTERM");
+  assert.equal((await first.done).code, 0);
+  const second = f.start(["serve", "--port", "0"], { env });
+  const [, resumedPort] = await watchOutput(second.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const resumed = `http://127.0.0.1:${resumedPort}`;
+  assert.deepEqual(await (await deliver(resumed, body, { id: "window-999" })).json(), { status: "duplicate" });
+  const oldest = await deliver(resumed, body, { id: "finished" });
+  assert.equal(oldest.status, 202);
+  assert.notEqual(((await oldest.json()) as { status: string }).status, "duplicate", "only the last 1000 accepted IDs per repository are retained");
+  second.child.kill("SIGTERM");
+  assert.equal((await second.done).code, 0);
+});
+
 test("serve checks a resumed PR again, so one merged in the meantime is skipped", { timeout: 40_000 }, async (t) => {
   const gh = github();
   const model = hangingModel();
@@ -318,13 +422,19 @@ test("serve starts and reports a repository database that another process holds"
   await firstOut.until(/Preview only · would comment/);
 
   const second = f.start(["serve", "--port", "0"], { env });
-  await watchOutput(second.child).until(/Listening on /);
+  const [, secondPort] = await watchOutput(second.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const secondBase = `http://127.0.0.1:${secondPort}`;
+  const id = "refused-while-locked";
+  assert.equal((await deliver(secondBase, reviewRequested("me", prUrl), { id })).status, 503,
+    "a database lock failure must not acknowledge an in-memory-only job");
+  first.child.kill("SIGTERM");
+  assert.equal((await first.done).code, 0);
+  assert.deepEqual(await (await deliver(secondBase, reviewRequested("me", prUrl), { id })).json(), { status: "queued" },
+    "failed admission must not reserve the delivery ID");
   second.child.kill("SIGTERM");
   const result = await second.done;
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stderr, /WARN\s+serve\s+Skipped github\.com\/acme~demo, so its audits are not recovered: .*Database is already in use/);
-  first.child.kill("SIGTERM");
-  assert.equal((await first.done).code, 0);
 });
 
 test("serve keeps an interrupted audit's work for a later run to resume", { timeout: 40_000 }, async (t) => {

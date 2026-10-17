@@ -1,21 +1,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Enqueued } from "./audit-queue.ts";
+import type { Accepted } from "./webhook-queue.ts";
 import { auditLabel, createServeLogger, type Log } from "./logging.ts";
 import { classifyDelivery, formatDeliveryContext, verifySignature } from "./webhook.ts";
 
 export const DEFAULT_WEBHOOK_PATH = "/webhook";
 // GitHub caps payloads at 25 MB, but a pull_request event is a small fraction of that.
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
-const RECENT_DELIVERIES = 1000;
 
 export type WebhookServerOptions = {
   /** Shared secret configured on the GitHub webhook. */
   secret: string;
   /** GitHub user Pronto reviews as: review requests and PR comment mentions of them start audits. */
   login: string;
-  /** Hands a verified PR URL to the audit queue. */
-  enqueue: (url: string) => Enqueued;
+  /** Resolves only after durable admission (including delivery deduplication) commits. */
+  enqueue: (url: string, deliveryId?: string) => Promise<Accepted>;
   path?: string;
   maxBodyBytes?: number;
   log?: Log;
@@ -56,16 +55,11 @@ function send(res: ServerResponse, status: number, body?: object, headers: Recor
   res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(json), ...headers }).end(json);
 }
 
-/** Receives GitHub webhook deliveries. It answers before any audit runs, since GitHub gives up on a slow response. */
+/** Receives GitHub deliveries. Waits for durable admission, not audit execution: GitHub gives up on a slow response. */
 export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
   if (!secret) throw new Error("A webhook secret is required.");
   if (!login) throw new Error("The reviewer login is required.");
-  // GitHub redelivers with the same ID. Only a verified audit request is remembered, and only once it was accepted.
-  const recent = new Set<string>();
-  const remember = (id: string) => {
-    recent.add(id);
-    if (recent.size > RECENT_DELIVERIES) recent.delete(recent.values().next().value!);
-  };
+  let stopping = false;
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     let pathname: string;
@@ -100,16 +94,23 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
       log("debug", "webhook", `Ignored: ${delivery.reason} (${formatDeliveryContext(event, payload)})`, detail);
       return send(res, 204);
     }
-    if (id && recent.has(id)) {
-      log("debug", auditLabel(delivery.url), "Duplicate delivery", detail);
-      return send(res, 202, { status: "duplicate" });
+    if (stopping) return send(res, 503, { status: "closed" });
+    let outcome: Accepted;
+    try {
+      outcome = await enqueue(delivery.url, id);
+    } catch (error) {
+      log("error", auditLabel(delivery.url), `Admission failed: ${error instanceof Error ? error.message : String(error)}`, detail);
+      return send(res, 503, { error: "durable admission failed" });
     }
-    const outcome = enqueue(delivery.url);
+    if (stopping) return send(res, 503, { status: "closed" });
+    if (outcome === "duplicate") {
+      log("debug", auditLabel(delivery.url), "Duplicate delivery", detail);
+      return send(res, 202, { status: outcome });
+    }
     if (outcome === "closed") {
       log("warn", auditLabel(delivery.url), "Not accepted · shutting down", detail);
       return send(res, 503, { status: outcome });
     }
-    if (id) remember(id);
     const status = { queued: "Queued", rerun: "Re-run queued", coalesced: "Coalesced" }[outcome];
     log(outcome === "coalesced" ? "debug" : "info", auditLabel(delivery.url), `${status} · ${delivery.reason} · requester=${delivery.requester}`, detail);
     return send(res, 202, { status: outcome });
@@ -137,6 +138,7 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
     },
     /** Stops accepting connections and waits for requests in flight. */
     close(): Promise<void> {
+      stopping = true;
       return new Promise((resolve) => {
         const force = setTimeout(() => server.closeAllConnections(), 5_000);
         // Not listening yet reports an error, but there is nothing to wait for either way.
