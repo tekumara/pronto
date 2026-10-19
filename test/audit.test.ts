@@ -100,91 +100,59 @@ function assessments() {
   ] };
 }
 
-for (const { name, entrypoint, input, args, draft = false } of [
-  { name: "CLI", entrypoint: resolve("audit.ts"), input: "", args: [prUrl, "--force", "--apply", "--approve"] },
-  { name: "chat", entrypoint: resolve("agent.ts"), input: `/audit --force --apply --approve ${prUrl}\n/quit\n`, args: [] },
-  { name: "CLI default", entrypoint: resolve("audit.ts"), input: "", draft: true,
-    args: [prUrl, "--force", "--apply", "--approve", "--exclude", "generated"] },
-  { name: "CLI --skip-drafts", entrypoint: resolve("audit.ts"), input: "", draft: true,
-    args: [prUrl, "--skip-drafts", "--force", "--apply", "--approve"] },
-  { name: "CLI --skip-drafts=true", entrypoint: resolve("audit.ts"), input: "", draft: true,
-    args: [prUrl, "--force", "--apply", "--approve", "--skip-drafts=true"] },
-  { name: "chat default", entrypoint: resolve("agent.ts"), draft: true, args: [],
-    input: `/audit --force --apply --approve ${prUrl}\n/quit\n` },
+for (const { name, metadata, flags = [] as string[], reason, approved = false } of [
+  { name: "merged", metadata: { merged: true, draft: true }, reason: "PR has already been merged." },
+  { name: "draft", metadata: { draft: true, additions: 20_000 }, flags: ["--exclude", "generated"],
+    reason: "PR is a draft. Use --skip-drafts=false to audit anyway." },
+  { name: "labelled", metadata: { labels: [{ name: "Skip-Audit" }], additions: 20_000 },
+    flags: ["--skip", "unmatched", "--skip=skip-audit", "--skip", "skip-audit"], reason: 'PR has matching skip label: "Skip-Audit".' },
+  { name: "oversized", metadata: { additions: 6_000, deletions: 4_001 }, reason: "PR changes 10001 lines, more than the 10000 line limit." },
+  { name: "approved", metadata: {}, approved: true,
+    reason: `PR is already approved by reviewer at ${headSha}. Use --skip-approved=false to audit anyway.` },
 ]) {
-  test(`${name} skips ${draft ? "a draft" : "an already merged"} PR successfully, even with --force --apply --approve`, { timeout: 20000 }, async (t) => {
-    let reads = 0;
+  for (const chat of [false, true]) test(`${chat ? "chat" : "CLI"} previews the skip reason for a ${name} PR and posts it only with --apply`, { timeout: 20000 }, async (t) => {
+    const requests: string[] = [];
+    const posted: { event: string; commit_id: string; body: string }[] = [];
     const f = await fixture(t, () => assert.fail("Skipped PRs must not reach the model"), {
-      entrypoint,
-      github: (request, response) => {
-        reads++;
-        assert.equal(request.method, "GET", "Skipped PRs must not mutate GitHub");
-        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Skipped PRs need no review or code evidence");
-        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-          merged: !draft, draft, state: draft ? "open" : "closed", title: "Skipped PR", body: "", changed_files: 0,
-          additions: 20_000, deletions: 0,
-          head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: { full_name: "acme/demo" } },
-        }));
+      entrypoint: resolve(chat ? "agent.ts" : "audit.ts"),
+      github: async (request, response) => {
+        const path = request.url!.split("?")[0];
+        requests.push(`${request.method} ${path}`);
+        const json = (value: unknown) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(value));
+        if (request.method === "POST") {
+          assert.equal(path, "/github/repos/acme/demo/pulls/7/reviews", "skips must use a review, not an issue comment");
+          const chunks = [];
+          for await (const chunk of request) chunks.push(chunk);
+          posted.push(JSON.parse(Buffer.concat(chunks).toString()));
+          json({ html_url: `${prUrl}#pullrequestreview-1` });
+        } else if (path === "/github/user") json({ login: "auditor" });
+        else if (path === "/github/repos/acme/demo/pulls/7/reviews" && approved) {
+          json([{ user: { login: "reviewer" }, state: "APPROVED", commit_id: headSha }]);
+        } else {
+          assert.equal(path, "/github/repos/acme/demo/pulls/7", "skipped PRs need no review or code evidence");
+          json({ ...metadata, head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: null } });
+        }
       },
     });
-    const output = await f.run(input, args);
-    assert.ok(output.includes(`[audit] Skipping ${prUrl}: ${draft ? "PR is a draft. Use --skip-drafts=false to audit anyway." : "PR has already been merged."}`));
-    assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
-    assert.equal(reads, 1);
-  });
-}
+    const run = (apply: boolean) => {
+      const args = [prUrl, "--force", "--approve", ...flags, ...(apply ? ["--apply"] : [])];
+      return f.run(chat ? `/audit ${args.join(" ")}\n/quit\n` : "", chat ? [] : args);
+    };
+    const preview = await run(false);
+    assert.ok(preview.includes(`[audit] Skipping ${prUrl}: ${reason}`));
+    assert.ok(preview.includes(`## Review audit · Skipped\n\n${reason}`));
+    assert.match(preview, /Skip comment would be posted/);
+    assert.deepEqual(requests, ["GET /github/repos/acme/demo/pulls/7", ...(approved ? ["GET /github/repos/acme/demo/pulls/7/reviews"] : [])]);
+    assert.equal(posted.length, 0);
 
-for (const { name, entrypoint, input, args, label } of [
-  { name: "CLI single label", entrypoint: resolve("audit.ts"), input: "", label: "do not audit",
-    args: ["--skip", "do not audit", prUrl, "local/test", "--force", "--apply", "--approve"] },
-  { name: "CLI multiple labels", entrypoint: resolve("audit.ts"), input: "", label: "Skip-Audit",
-    args: ["--skip", "unmatched", prUrl, "--skip=skip-audit", "--skip", "skip-audit", "--force", "--apply", "--approve"] },
-  { name: "chat multiple labels", entrypoint: resolve("agent.ts"), label: "Skip-Audit", args: [],
-    input: `/audit --skip unmatched ${prUrl} --skip=skip-audit --force --apply --approve\n/quit\n` },
-]) {
-  test(`${name} skips a matching PR without fetching evidence or writing to GitHub`, { timeout: 20000 }, async (t) => {
-    let reads = 0;
-    const f = await fixture(t, () => assert.fail("Skipped PRs must not reach the model"), {
-      entrypoint,
-      github: (request, response) => {
-        reads++;
-        assert.equal(request.method, "GET", "Skipped PRs must not mutate GitHub");
-        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Skipped PRs need no review or code evidence");
-        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-          merged: false, labels: [{ name: "unrelated" }, { name: label }],
-          head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: null },
-        }));
-      },
-    });
-    const output = await f.run(input, args);
-    assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR has matching skip label: "${label}".`));
-    assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
-    assert.equal(reads, 1);
-  });
-}
-
-for (const { name, entrypoint, input, args } of [
-  { name: "CLI", entrypoint: resolve("audit.ts"), input: "", args: [prUrl, "--force", "--apply", "--approve"] },
-  { name: "chat", entrypoint: resolve("agent.ts"), input: `/audit --force --apply --approve ${prUrl}\n/quit\n`, args: [] },
-]) {
-  test(`${name} skips a PR changing more than 10000 lines without fetching evidence or writing to GitHub`, { timeout: 20000 }, async (t) => {
-    let reads = 0;
-    const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), {
-      entrypoint,
-      github: (request, response) => {
-        reads++;
-        assert.equal(request.method, "GET", "Oversized PRs must not mutate GitHub");
-        assert.equal(request.url, "/github/repos/acme/demo/pulls/7", "Oversized PRs need no review or code evidence");
-        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-          merged: false, additions: 6_000, deletions: 4_001, changed_files: 40,
-          head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: null },
-        }));
-      },
-    });
-    const output = await f.run(input, args);
-    assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR changes 10001 lines, more than the 10000 line limit.`));
-    assert.doesNotMatch(output, /Verdict:|Resuming saved snapshot|Reusing saved assessment/);
-    assert.equal(reads, 1);
+    const applied = await run(true);
+    assert.doesNotMatch(applied, /Verdict:|Resuming saved snapshot|Reusing saved assessment|PR approved/);
+    assert.ok(applied.includes(`Skip comment posted to the PR: ${prUrl}#pullrequestreview-1`));
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0]!.event, "COMMENT", "--approve must never approve a skipped PR");
+    assert.equal(posted[0]!.commit_id, headSha);
+    assert.ok(posted[0]!.body.includes(`## Review audit · Skipped\n\n${reason}`));
+    assert.match(posted[0]!.body, /<!-- pronto:publication:[a-f0-9]{64} -->\n<!-- pronto:review-audit -->$/);
   });
 }
 
@@ -531,6 +499,7 @@ for (const failure of ["moved", "incompleteFiles"] as const) {
 test("restart checks live merge status, draft status and skip labels but preserves saved evidence and cache", { timeout: 30000 }, async (t) => {
   const prState = { merged: false, draft: false, labels: [] as string[] };
   const github = githubEvidence(prState);
+  const skipReviews: string[] = [];
   const started = Promise.withResolvers<void>();
   let turn = 0;
   let snapshotId: string;
@@ -562,7 +531,20 @@ test("restart checks live merge status, draft status and skip labels but preserv
         break;
       default: assert.fail("Unexpected model turn");
     }
-  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  }, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+    const json = (value: unknown) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(value));
+    if (request.url === "/github/user") { json({ login: "auditor" }); return; }
+    if (request.method === "POST" && request.url === "/github/repos/acme/demo/pulls/7/reviews") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const review = JSON.parse(Buffer.concat(chunks).toString());
+      assert.equal(review.event, "COMMENT");
+      skipReviews.push(review.body);
+      json({ html_url: `${prUrl}#pullrequestreview-${skipReviews.length}` });
+      return;
+    }
+    await github.handle(request, response);
+  } });
   const first = f.start([prUrl]);
   first.child.stdin.end();
   await started.promise;
@@ -623,4 +605,5 @@ test("restart checks live merge status, draft status and skip labels but preserv
   assert.doesNotMatch(skippedCached, /Reusing saved assessment|Verdict:/);
   assert.equal(turn, 3, "a merged PR must not reassess a cached audit");
   assert.deepEqual(github.requests.slice(reads), ["/github/repos/acme/demo/pulls/7"]);
+  assert.equal(skipReviews.length, 3, "publish each skip reason once without disturbing saved work or cache");
 });

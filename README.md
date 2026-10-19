@@ -39,13 +39,15 @@ The full review also includes expandable sections with reasoning, evidence and a
 
 ## When Pronto skips a PR
 
-Pronto skips the audit and does not respond on the PR when:
+Pronto skips the audit when:
 
 - the PR has already been merged
 - the PR is a draft, unless auditing drafts is enabled
 - the PR has a label configured to skip audits
 - the PR changes more than 10,000 lines, counting additions and deletions after configured file exclusions
 - the PR’s latest commit already has a reviewer’s approval, unless auditing approved PRs is enabled
+
+With `--apply`, Pronto posts the skip reason as a comment review on the PR’s current commit. Otherwise, it previews the comment. A skip never approves the PR or calls the model. Repeating the same reason at the same commit does not post another review when a local receipt exists.
 
 ## Approval conditions and safeguards
 
@@ -65,7 +67,7 @@ The goal is less time chasing review feedback and waiting for another review rou
 
 In serve mode, Pronto saves accepted audit requests before returning `202`. Waiting work and one queued rerun per PR survive restarts. Delivery deduplication also survives restarts, within the last 1000 accepted delivery IDs per repository.
 
-With `--apply`, Pronto also saves verdict publication as a durable task. Startup resumes pending publications without running the model again, including assessments first published from the cache. Preview-only assessments do not become pending writes when the server restarts with different flags.
+With `--apply`, Pronto saves verdict and skip-reason publication as durable tasks. Startup resumes pending publications without running the model again, including assessments first published from the cache. Preview-only assessments do not become pending writes when the server restarts with different flags.
 
 GitHub submission and local storage are not one transaction. After an ambiguous POST, Pronto checks remote reviews for the saved author, head, review type, body and fingerprint before retrying. This reduces duplicates but does not guarantee exactly-once publication. See [serve mode recovery and limits](GUIDE.md#stopping-and-restarting).
 

@@ -87,7 +87,7 @@ const PublishReview = defineTask<PublicationIntent, { phase: "publish" }, Public
 });
 export const Publisher = defineExtension({ name: "audit-publisher", tasks: [PublishReview] });
 
-/** Atomic handoff, called in the assessment-completion or cache-recheck transaction. */
+/** Atomic handoff for verdict and skip reviews. Skips use the root conversation. */
 export async function enqueuePublication(tx: Tx, conversationId: ConversationId, intent: PublicationIntent): Promise<TaskId<PublicationResult> | null> {
   if (!intent.choices.apply) return null;
   const pr = String(intent.target.pr);

@@ -582,16 +582,47 @@ function publicationPlan(snapshot: ReviewSnapshot, assessments: Assessment[], da
     else if (approvable || (options.allowUncertain && counts.uncertain > 0 && !counts.outstanding)) approve = true;
     else skipped = "outstanding or uncertain findings remain.";
   }
-  const event = approve ? "APPROVE" : "COMMENT";
+  const intent = reviewPublication(snapshot, body, approve ? "APPROVE" : "COMMENT", choices);
+  return { intent, approve, skipped, approvalBlock };
+}
+
+function reviewPublication(snapshot: Pick<ReviewSnapshot, "target" | "headSha" | "baseSha">, body: string,
+  event: PublicationIntent["event"], choices: PublicationChoices): PublicationIntent {
   // Fetch times describe collection, not a change to the verdict. Keep all other content in the match.
   const fingerprint = digest({ headSha: snapshot.headSha, event,
     body: body.trimEnd().replace(/^(- audited head: `[a-f\d]{40}`\n)- evidence fetched: .*\n/im, "$1"),
   });
   // Keep the evidence-exclusion marker last. The publication marker does not participate in its own hash.
   const markedBody = body.replace(AUDIT_COMMENT_MARKER, `<!-- pronto:publication:${fingerprint} -->\n${AUDIT_COMMENT_MARKER}`);
-  const intent: PublicationIntent = { choices, target: snapshot.target, headSha: snapshot.headSha, baseSha: snapshot.baseSha,
+  return { choices, target: snapshot.target, headSha: snapshot.headSha, baseSha: snapshot.baseSha,
     event, body: markedBody, fingerprint };
-  return { intent, approve, skipped, approvalBlock };
+}
+
+async function outputSkip(harness: Harness, snapshot: Pick<ReviewSnapshot, "target" | "headSha" | "baseSha">, reason: string,
+  options: AuditOptions, log: AuditLog, context: Context): Promise<void> {
+  reason = stripControlCharacters(reason);
+  log("info", `Skipped · ${reason}`, `[audit] Skipping ${snapshot.target.url}: ${reason}`);
+  const body = `## Review audit · Skipped\n\n${reason}\n\nNo review findings were assessed.\n\n${AUDIT_COMMENT_MARKER}`;
+  const intent = reviewPublication(snapshot, body, "COMMENT", publicationChoices(options));
+  const existing = (await harness.snapshot(SubmittedAuditReviews, String(snapshot.target.pr), context))?.reviews[intent.fingerprint];
+  const dryRun = !options.apply;
+  if (dryRun) log("debug", `Skip comment preview:\n\n${intent.body}\n`, `[audit:dry-run] Skip comment preview:\n\n${intent.body}\n`);
+  if (existing) {
+    const message = stripControlCharacters(`Skip comment ${dryRun ? "would be skipped" : "skipped"}: matching skip review recorded locally: ${existing.url}`);
+    log("debug", message, `${dryRun ? "[audit:dry-run]" : "[audit]"} ${message}`);
+  } else if (dryRun) {
+    log("debug", "Skip comment would be posted.", "[audit:dry-run] Skip comment would be posted.");
+  } else {
+    // A skip has no assessment conversation. Publish under the root without changing saved audit work.
+    const root = await harness.root(context);
+    const taskId = await harness.commit((tx) => enqueuePublication(tx, root.id, intent), context);
+    if (taskId) {
+      const url = await waitForPublication(harness, taskId, context);
+      const message = stripControlCharacters(`Skip comment posted to the PR: ${url}`);
+      log("debug", message, `[audit] ${message}`);
+      log("info", stripControlCharacters(`Review: ${url}`), null);
+    }
+  }
 }
 
 async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined,
@@ -932,7 +963,6 @@ async function failedAudits(harness: Harness, context: Context): Promise<ReviewT
 async function auditRequest(target: ReviewTarget, options: AuditOptions & { models: ModelRuntime; retryFailed: boolean; restored: boolean }, repository: RepositoryAudit,
   context: Context, log: AuditLog, diagnostics: AuditDiagnostics): Promise<void> {
   const started = performance.now();
-  const skip = (reason: string) => log("info", `Skipped · ${reason}`, `[audit] Skipping ${target.url}: ${reason}`);
   const { harness } = repository;
   const { warn, text: diagnosticText } = diagnostics;
   const prKey = String(target.pr);
@@ -949,18 +979,19 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     const startedAt = new Date().toISOString();
     log("info", "Preparing · fetching GitHub evidence", null);
     const pr = await fetchPullRequest(target, context.abortSignal);
+    const skip = (reason: string) => outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
     if (pr.merged) {
-      skip("PR has already been merged.");
+      await skip("PR has already been merged.");
       return;
     }
     if ((options.skipDrafts ?? true) && pr.draft) {
-      skip("PR is a draft. Use --skip-drafts=false to audit anyway.");
+      await skip("PR is a draft. Use --skip-drafts=false to audit anyway.");
       return;
     }
     const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));
     const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
     if (skippedLabel) {
-      skip(`PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
+      await skip(`PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
       return;
     }
     const isExcluded = compileExclusions(options.exclude ?? []);
@@ -978,7 +1009,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       changedLines -= excludedLines;
     }
     if (changedLines > MAX_CHANGED_LINES) {
-      skip(`PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`);
+      await skip(`PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`);
       if (uncounted) log("debug", `GitHub gave no line counts for ${uncounted} excluded file${uncounted === 1 ? "" : "s"}, so ${uncounted === 1 ? "it still counts" : "they still count"} toward the limit.`);
       if (excluded.length) outputExcludedFiles(excluded.map((file) => file.path), log);
       return;
@@ -986,7 +1017,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     if (options.skipApproved ?? true) {
       const approver = await findApproval(target, pr.head.sha, context.abortSignal);
       if (approver) {
-        skip(`PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`);
+        await skip(`PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`);
         return;
       }
     }

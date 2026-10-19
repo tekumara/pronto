@@ -50,7 +50,7 @@ function githubEvidence(options: {
   const issueComments = options.issueComments ?? (options.issueComment ? [issueComment(3, "Which roles should have access?", "human")] : []);
   const approvals: { body: string; event: string; commit_id: string }[] = [];
   const reviews: (IssueComment & { state: string; commit_id: string })[] = [];
-  const state = { headSha: sha, baseSha: sha, login: "auditor", loseResponse: false, holdResponse: false };
+  const state = { headSha: sha, baseSha: sha, draft: false, merged: false, login: "auditor", loseResponse: false, holdResponse: false };
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     const requestUrl = new URL(request.url!, "http://fixture");
     const path = requestUrl.pathname;
@@ -88,6 +88,7 @@ function githubEvidence(options: {
       } } } } });
     } else if (path.endsWith("/pulls/8")) {
       json({ title: options.title ?? "Explain behaviour", body: options.description ?? "", changed_files: options.files?.length ?? 0,
+        draft: state.draft, merged: state.merged,
         head: { sha: state.headSha, repo: { full_name: "acme/demo" } }, base: { sha: state.baseSha, repo: { full_name: "acme/demo" } } });
     } else if (path.endsWith("/pulls/8/comments")) {
       json(options.empty ? [] : [{ id: 1, body: "Why is this intentional?", html_url: evidenceUrl, user: { login: "human" }, created_at: "2026-01-01" },
@@ -173,6 +174,69 @@ process.stdout.write = function(chunk, ...args) {
     assert.equal(github.attempts.length, 1);
   });
 }
+
+test("skip reviews deduplicate by head and reason across CLI and chat, and stay out of later audit evidence", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  github.state.draft = true;
+  let calls = 0;
+  const f = await fixture(t, (body, response) => {
+    calls++;
+    const input = body.messages.findLast((message) => message.role === "user")!.content!;
+    assert.doesNotMatch(input, /Review audit · Skipped/);
+    assess(body, response);
+  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+
+  await f.run("", [url, "--apply", "--approve"]);
+  assert.equal(github.posted.length, 1);
+  const repeated = await f.run(`/audit ${url} --force --apply\n/quit\n`, [], { entrypoint: resolve("agent.ts") });
+  assert.match(repeated, /Skip comment skipped: matching skip review recorded locally/);
+  const preview = await f.run("", [url]);
+  assert.match(preview, /Skip comment would be skipped: matching skip review recorded locally/);
+  assert.equal(github.posted.length, 1, "changing action flags must not duplicate a skip review");
+
+  github.state.headSha = "c".repeat(40);
+  await f.run("", [url, "--apply"]);
+  assert.equal(github.posted.length, 2, "a new head needs its own skip explanation");
+  assert.equal(github.posted[1]!.commit_id, github.state.headSha);
+  github.state.merged = true;
+  await f.run("", [url, "--apply"]);
+  assert.equal(github.posted.length, 3, "a different reason at the same head needs its own explanation");
+  assert.match(github.posted[2]!.body, /PR has already been merged/);
+  assert.ok(github.posted.every(({ event }) => event === "COMMENT"));
+  assert.equal(calls, 0);
+
+  github.state.draft = github.state.merged = false;
+  await f.run("", [url]);
+  assert.equal(calls, 1, "skipping must not create an assessment or poison a later audit");
+});
+
+test("a skip publication survives a crash without an assessment and recovers without --apply", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  github.state.draft = true;
+  const publishing = Promise.withResolvers<void>();
+  let interrupting = true;
+  const f = await fixture(t, () => assert.fail("Skip publication must not run the model"), {
+    entrypoint: resolve("audit.ts"),
+    github: async (request, response) => {
+      if (interrupting && request.url === "/github/user") { publishing.resolve(); return; }
+      await github.handler(request, response);
+    },
+  });
+  const killed = f.start([url, "--apply", "--approve"]);
+  killed.child.stdin.end();
+  await publishing.promise;
+  killed.child.kill("SIGKILL");
+  assert.equal((await killed.done).signal, "SIGKILL");
+  assert.equal(github.attempts.length, 0);
+  interrupting = false;
+  await recoverPublisher(f);
+  assert.equal(github.posted.length, 1);
+  assert.equal(github.posted[0]!.event, "COMMENT");
+  assert.equal(github.posted[0]!.commit_id, sha);
+  assert.match(github.posted[0]!.body, /PR is a draft/);
+  await f.run("", [url, "--apply"]);
+  assert.equal(github.attempts.length, 1, "recovery must save the same duplicate-prevention receipt");
+});
 
 for (const status of ["addressed", "uncertain"] as const) {
   test(`${status} verdict is read-only by default and gates opt-in approval independently of an open GitHub thread`, { timeout: 20000 }, async (t) => {

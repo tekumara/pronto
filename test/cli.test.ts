@@ -176,8 +176,6 @@ for (const { name, labels, args, draft = false, input = "", entrypoint = resolve
 
 for (const { name, reviews, args, approver } of [
   { name: "an approval of the current head", reviews: [review("auditor", "APPROVED")], args: [], approver: "auditor" },
-  { name: "another reviewer's approval, even with --force --apply --approve", reviews: [review("someone-else", "APPROVED")],
-    args: ["--force", "--apply", "--approve"], approver: "someone-else" },
   { name: "an approval followed by a comment-only review", reviews: [review("someone-else", "APPROVED"), review("someone-else", "COMMENTED")],
     args: ["--skip-approved=true"], approver: "someone-else" },
   { name: "an approval with --skip-approved=false", reviews: [review("someone-else", "APPROVED")], args: ["--skip-approved=false"], approver: null },

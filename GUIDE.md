@@ -37,7 +37,13 @@ Set `GH_REPO=owner/repo` (or `host/owner/repo`) to choose the repository explici
 
 Number and branch selection require Git and a checkout unless you set `GH_REPO`. An explicit PR URL needs neither. The GitHub CLI is optional when you provide a token; Pronto only uses `gh auth token` as an authentication fallback. Selection failures stop the command before model setup or audit storage.
 
-Already merged PRs are skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto checks live merge status before starting, resuming or reusing an audit. It does not call the model or write to GitHub for merged PRs.
+Skipped PRs get a review explaining the reason when you use `--apply`. Without `--apply`, Pronto previews that review. Skip reviews use `COMMENT`, never `APPROVE`, even with `--approve`.
+
+They are pinned to the PR’s current head commit and use the same durable publication and local duplicate prevention as verdict reviews. The same reason at the same head does not post again when a receipt exists. A different reason or head can produce a new review.
+
+Skipping preserves unfinished work and cached assessments, without collecting an audit snapshot or calling the model. Publication failures exit with code 1 and keep the pending review for recovery.
+
+Already merged PRs are skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto checks live merge status before starting, resuming or reusing an audit.
 
 Draft PRs are skipped by default (`--skip-drafts=true`). To audit a draft PR, turn off this check:
 
@@ -45,7 +51,7 @@ Draft PRs are skipped by default (`--skip-drafts=true`). To audit a draft PR, tu
 pronto --skip-drafts=false https://github.com/owner/repo/pull/42
 ```
 
-You can also write `--skip-drafts false`. Pronto checks live draft status after the merged check and before starting, resuming or reusing an audit. A draft skip prints a message and exits with code 0, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence, call the model or write to GitHub. Skipping preserves unfinished work and cached assessments. The flag does not persist across invocations. Other skip rules still apply when you use `--skip-drafts=false`.
+You can also write `--skip-drafts false`. Pronto checks live draft status after the merged check and before starting, resuming or reusing an audit. A draft skip prints a message and exits with code 0, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence or call the model. With `--apply`, it posts the skip reason instead. Skipping preserves unfinished work and cached assessments. The flag does not persist across invocations. Other skip rules still apply when you use `--skip-drafts=false`.
 
 Use `--skip <label>` to skip PRs with a matching label. Repeat the flag to provide multiple labels:
 
@@ -55,7 +61,7 @@ pronto --skip skip-audit --skip "do not review" https://github.com/owner/repo/pu
 
 You can also write `--skip=skip-audit`. Labels match by full name, ignoring case. Any match skips the audit with a message and exit code 0. Without a match, the audit runs normally. The flag does not persist across invocations.
 
-Pronto checks live labels before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence, call the model or write to GitHub when a label matches. Skipping preserves unfinished work and cached assessments.
+Pronto checks live labels before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. It does not fetch review evidence or call the model when a label matches. With `--apply`, it posts the skip reason instead. Skipping preserves unfinished work and cached assessments.
 
 PRs already approved by any reviewer are skipped by default (`--skip-approved=true`). Pronto checks each reviewer's latest approval, request for changes or dismissal, ignoring comment-only reviews. The PR counts as approved if at least one reviewer's latest decision approves its current head commit. An approval of an earlier commit does not count, so a PR with new commits is audited again. A dismissal or request for changes replaces that reviewer's approval, but does not cancel another reviewer's approval.
 
@@ -63,9 +69,9 @@ PRs already approved by any reviewer are skipped by default (`--skip-approved=tr
 pronto --skip-approved=false https://github.com/owner/repo/pull/42
 ```
 
-You can also write `--skip-approved false`. Like the label skip, this check runs after the merged, draft and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching review evidence, calling the model or writing to GitHub, and preserves unfinished work and cached assessments. The check reads the PR's reviews, following pagination. It does not fetch your GitHub login. The flag does not persist across invocations.
+You can also write `--skip-approved false`. Like the label skip, this check runs after the merged, draft and label checks and before starting, resuming or reusing an audit, even with `--force`, `--apply` or `--approve`. Use `--skip-approved=false` to audit an approved PR anyway. A skip prints a message and exits with code 0, without fetching audit evidence or calling the model. With `--apply`, it posts the skip reason instead. It preserves unfinished work and cached assessments. The check reads the PR’s reviews, following pagination. It only fetches your GitHub login when publishing a new review. The flag does not persist across invocations.
 
-PRs that change more than 10,000 lines are also skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto counts additions plus deletions from the PR's live metadata, so the check costs no extra request. It runs before fetching review evidence, calling the model or writing to GitHub.
+PRs that change more than 10,000 lines are also skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto counts additions plus deletions from the PR's live metadata, so the check costs no extra request. It runs before fetching review evidence or calling the model. With `--apply`, Pronto posts the skip reason instead.
 
 Use `--exclude <path>` to leave generated or vendored files out of both the size limit and the audit. Repeat the flag for multiple paths, or write `--exclude=<path>`:
 
@@ -210,7 +216,7 @@ Every recovered audit repeats the live checks. A PR that is now merged, a draft,
 
 Webhook execution is at least once. Its queue task stays pending until the normal audit call settles, so an interruption can repeat live checks and cached verdict handling. A saved assessment is reused when the evidence is unchanged.
 
-Verdict publication is a separate durable task. Fresh assessment completion and cache rechecks save any explicit publication intent atomically with their completion bookkeeping. Startup resumes pending publications even without webhook work, using the saved review type, body, head and approval options. It does not run the model again or change previews into writes. Publication recovery finishes an already authorised action; it does not repeat audit skip checks. Approval retries still check the saved head and base before posting.
+Verdict publication is a separate durable task. Fresh assessment completion and cache rechecks save any explicit publication intent atomically with their completion bookkeeping. Skips with `--apply` save their reason and publication task without creating an assessment. Startup resumes pending publications even without webhook work, using the saved review type, body, head and approval options. It does not run the model again or change previews into writes. Publication recovery finishes an already authorised action; it does not repeat audit skip checks. Approval retries still check the saved head and base before posting.
 
 After a lost response or crash before receipt storage, Pronto lists remote reviews and matches the saved author, head, event, exact body and fingerprint marker before another POST. A match restores the receipt. Lookup failure stops the attempt. Failed deliveries remain pending for another startup or explicit `--apply`; they do not retry in a tight loop.
 
@@ -379,7 +385,7 @@ The review is a `COMMENT` review, or an `APPROVE` review when approval is select
 
 Reviews are pinned to the audited head commit. Pronto never edits or replaces an earlier audit review or comment. Audit reviews include a hidden marker on their final line. Pronto uses it to exclude its own output from the evidence it assesses, so it does not invalidate the cache. Audit comments posted by earlier versions as plain PR comments are left as they are. The former `--sticky` flag has been removed; Pronto rejects it as an unknown option.
 
-With `--apply`, the durable publisher posts reviews only after a complete, validated assessment. A cache hit can post a review, such as for an assessment first run as a preview. The model remains read-only. Marked Pronto comments and reviews do not invalidate the evidence cache. Changes to other PR discussion still do.
+With `--apply`, the durable publisher posts verdict reviews only after a complete, validated assessment. Skip-reason reviews need no assessment and always use `COMMENT`. A cache hit can post a review, such as for an assessment first run as a preview. The model remains read-only. Marked Pronto comments and reviews do not invalidate the evidence cache. Changes to other PR discussion still do.
 
 Publication flags are not sticky defaults for future audits. They are saved for the specific admitted assessment and publication task. A failed request retains the completed assessment and publication intent and exits 1. Reopening that repository, or starting serve mode, can finish the earlier authorised write even without a new `--apply`. The new invocation's preview does not authorise another write. A crash or receipt-storage failure leaves the publication recoverable, subject to the reconciliation limits above.
 
