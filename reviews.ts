@@ -322,6 +322,13 @@ export async function reconcileAuditReview(intent: {
   return match?.html_url || null;
 }
 
+export class StaleReviewSnapshotError extends Error {
+  constructor() {
+    super("PR commits changed since the audit snapshot. Nothing was submitted; run the audit again.");
+    this.name = "StaleReviewSnapshotError";
+  }
+}
+
 /** Submits one review pinned to the audited head. The durable publisher records its receipt. Returns null for a preview. */
 export async function submitAuditReview(snapshot: Pick<ReviewSnapshot, "target" | "headSha" | "baseSha">, body: string, {
   approve = false, apply = false, signal,
@@ -332,7 +339,7 @@ export async function submitAuditReview(snapshot: Pick<ReviewSnapshot, "target" 
   if (approve) {
     const latest = await client.request<PullRequest>(path);
     if (latest.head.sha !== snapshot.headSha || latest.base.sha !== snapshot.baseSha) {
-      throw new Error("PR commits changed since the audit snapshot. Nothing was submitted; run the audit again.");
+      throw new StaleReviewSnapshotError();
     }
   }
   if (!apply) return null;

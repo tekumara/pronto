@@ -8,13 +8,13 @@ import {
   type Conversation, type ConversationId, type Cursor, type Harness, type ModelRef, type SubmissionId, type TaskId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness } from "./state.ts";
-import { Publisher, SubmittedAuditReviews, enqueuePublication, recoverPublications, waitForPublication, type PublicationChoices, type PublicationIntent } from "./publication.ts";
+import { Publisher, SubmittedAuditReviews, completeReassessment, enqueuePublication, pendingReassessments, recoverPublications, waitForPublication, type PublicationChoices, type PublicationIntent, type PublicationResult } from "./publication.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { createWebhookQueue } from "./webhook-queue.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { compileExclusions } from "./exclusions.ts";
 import type { Log, LogLevel } from "./logging.ts";
-import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, findApproval, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, fetchViewerLogin, findApproval, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 /** The optional CLI text preserves its detailed transcript; null marks serve-only summaries. */
 type AuditLog = (level: LogLevel, message: string, cliText?: string | null) => void;
@@ -61,7 +61,7 @@ const AuditRuns = defineDocFamily<{
 });
 // Explicit caller choices saved before model execution. Recovery never substitutes server flags.
 const PublicationRequests = defineDoc<{
-  choices: PublicationChoices[]; tasks: Record<string, TaskId<{ url: string }>>;
+  choices: PublicationChoices[]; tasks: Record<string, TaskId<PublicationResult>>;
 }>({
   kind: "app.audit-publication-requests", version: 1, scope: "conversation", history: "latest", fork: "initial",
   initial: () => ({ choices: [], tasks: {} }),
@@ -638,6 +638,10 @@ async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessme
   if (dryRun) await submitAuditReview(snapshot, body, { approve, signal: context.abortSignal });
   const url = taskId ? await waitForPublication(harness, taskId, context)
     : !dryRun ? (await harness.snapshot(SubmittedAuditReviews, String(snapshot.target.pr), context))?.reviews[intent.fingerprint]?.url ?? null : null;
+  if (taskId && !url) {
+    log("info", "PR commits changed since the audit snapshot · reassessing before publishing");
+    return;
+  }
   if (existing) {
     const message = stripControlCharacters(`Comment ${dryRun ? "would be skipped" : "skipped"}: matching verdict review recorded locally: ${existing.url}`);
     log("debug", message, `${dryRun ? "[audit:dry-run]" : "[audit]"} ${message}`);
@@ -766,9 +770,18 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
         if (!closing) {
           harness.resume();
           for (const { target, taskId } of publications) {
-            void waitForPublication(harness, taskId, BACKGROUND_CONTEXT).then((url) => {
-              output?.("info", `${target.owner}/${target.repo}#${target.pr}`, stripControlCharacters(`Saved verdict published: ${url}`));
-            }, () => {}); // The task reports failures and keeps its saved intent for the next startup.
+            const scope = `${target.owner}/${target.repo}#${target.pr}`;
+            void waitForPublication(harness, taskId, BACKGROUND_CONTEXT).then(async (url) => {
+              if (url) output?.("info", scope, stripControlCharacters(`Saved verdict published: ${url}`));
+              else {
+                output?.("info", scope, "PR commits changed since the audit snapshot · reassessing before publishing");
+                // An active caller consumes the saved reassessment itself. Otherwise use normal
+                // durable admission and concurrency limits; a crash before admission keeps the request.
+                if (webhookQueue && !requests.has(`${repositoryKey(target)}#${target.pr}`)) await auditor.enqueue(target.url);
+              }
+            }, () => {}).catch((error) => {
+              output?.("error", scope, `Could not queue reassessment: ${error instanceof Error ? error.message : String(error)}`);
+            }); // Other failures are reported by the task and retain their saved publication intent.
           }
         }
       }
@@ -798,7 +811,11 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
         }));
         const retryFailed = failedRecoveries.delete(requestKey);
         const restored = restoredRequests.delete(requestKey);
-        await auditRequest(target, { ...options, retryFailed, restored, models }, repositoryAudit, context, log, diagnostics);
+        do {
+          await auditRequest(target, { ...options, retryFailed, restored, models }, repositoryAudit, context, log, diagnostics);
+          // A live assessment can also become stale before publication. Retire its old
+          // approval and consume the durable reassessment without needing another webhook.
+        } while ((await pendingReassessments(repositoryAudit.harness, context))[String(target.pr)]);
       } catch (error) {
         if (closing && webhooks) log("info", "Audit interrupted · saved work resumes when the server starts again", null);
         throw error;
@@ -825,9 +842,11 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
             const pending = webhookQueue ? await webhookQueue.recover(repository.harness, context) : [];
             const unfinished = await unfinishedAudits(repository.harness, context);
             const failed = await failedAudits(repository.harness, context);
+            const reassessments = Object.values(await pendingReassessments(repository.harness, context));
             // Intake and assessment recovery for the same PR select one execution, not a rerun.
             const selected = new Map<string, string>();
-            for (const url of [...unfinished.map((target) => target.url), ...failed.map((target) => target.url), ...pending]) {
+            for (const url of [...unfinished.map((target) => target.url), ...failed.map((target) => target.url),
+              ...reassessments.map(({ target }) => target.url), ...pending]) {
               selected.set(String(parseReviewTarget(url).pr), url);
             }
             if (closing || (!selected.size && !repository.publications.length)) {
@@ -974,12 +993,22 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       options = { ...options, ...(requests?.choices.at(-1) ?? publicationChoices({})) };
     }
   }
+  const reassessment = (await pendingReassessments(harness, context))[prKey];
+  if (reassessment) {
+    if (reassessment.author && (await fetchViewerLogin(context.abortSignal)).toLowerCase() !== reassessment.author.toLowerCase()) {
+      throw new Error(`Pending verdict belongs to ${reassessment.author}; restore that GitHub account before retrying.`);
+    }
+    options = { ...options, ...reassessment.choices };
+  }
   let stream: Awaited<ReturnType<typeof watchEvents>> | undefined;
   try {
     const startedAt = new Date().toISOString();
     log("info", "Preparing · fetching GitHub evidence", null);
     const pr = await fetchPullRequest(target, context.abortSignal);
-    const skip = (reason: string) => outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
+    const skip = async (reason: string) => {
+      await outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
+      if (reassessment) await harness.commit((tx) => completeReassessment(tx, prKey, reassessment), context);
+    };
     if (pr.merged) {
       await skip("PR has already been merged.");
       return;
@@ -1024,14 +1053,16 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     // Persist restart intent before cancellation/evidence fetching. A crash must not turn a requested restart into
     // a cache hit or switch its selected model. Clear the intent only when the new snapshot is admitted.
     if (options.retryFailed) log("info", "Retrying failed audit after startup recovery", null);
-    if (options.force || options.retryFailed) await harness.commit(async (tx) => {
+    if (reassessment) log("info", "Reassessing · PR commits changed before approval publication", null);
+    if (options.force || options.retryFailed || reassessment) await harness.commit(async (tx) => {
       (await tx.doc(AuditRuns, prKey, null)).restartModel = options.model;
     }, context);
     let state = await harness.snapshot(AuditRuns, prKey, context);
     const previousId = state?.latestSuccess?.conversationId ?? state?.active;
     if (state?.restartModel && previousId != null) {
       const reason = options.force ? "--force requested"
-        : options.retryFailed ? "retrying failed audit after startup recovery" : "saved restart intent";
+        : options.retryFailed ? "retrying failed audit after startup recovery"
+        : reassessment ? "PR commits changed before approval publication" : "saved restart intent";
       outputRefreshReasons(state.active ?? previousId, [reason], log);
     }
     if (state?.restartModel && state.active !== null && !state.complete) {
@@ -1125,6 +1156,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
         init: async (tx, id) => {
           (await tx.doc(AuditDocument, id)).snapshot = snapshot;
           (await tx.doc(PublicationRequests, id)).choices.push(publicationChoices(options));
+          await completeReassessment(tx, prKey, reassessment);
           const identity = await tx.doc(AuditIdentity, id);
           identity.fingerprint = fingerprint;
           identity.policy = policy;

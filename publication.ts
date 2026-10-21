@@ -1,13 +1,30 @@
 import type { Context } from "@earendil-works/chord";
-import { defineDocFamily, defineExtension, defineTask, type ConversationId, type Cursor, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { fetchViewerLogin, reconcileAuditReview, submitAuditReview, type ReviewSnapshot } from "./reviews.ts";
+import { defineDoc, defineDocFamily, defineExtension, defineTask, type ConversationId, type Cursor, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { fetchViewerLogin, reconcileAuditReview, StaleReviewSnapshotError, submitAuditReview, type ReviewSnapshot } from "./reviews.ts";
 
 export type PublicationChoices = { apply: boolean; approve: boolean; allowUncertain: boolean; approveMigrations: boolean };
 export type PublicationIntent = {
   choices: PublicationChoices; target: ReviewSnapshot["target"]; headSha: string; baseSha: string;
   event: "COMMENT" | "APPROVE"; body: string; fingerprint: string;
 };
-type PublicationResult = { url: string };
+// A null URL hands a stale approval back to assessment, rather than recording a submission.
+export type PublicationResult = { url: string | null };
+type ReassessmentRequest = Pick<PublicationIntent, "target" | "choices" | "fingerprint"> & { author: string | null };
+const Reassessments = defineDoc<{ pending: Record<string, ReassessmentRequest> }>({
+  kind: "app.audit-reassessments", version: 1, scope: "session",
+  initial: () => ({ pending: {} }),
+});
+
+/** Requests survive the gap between retiring a stale publication and admitting fresh evidence. */
+export async function pendingReassessments(harness: Harness, context: Context): Promise<Record<string, ReassessmentRequest>> {
+  return (await harness.snapshot(Reassessments, context))?.pending ?? {};
+}
+
+export async function completeReassessment(tx: Tx, pr: string, request: ReassessmentRequest | undefined): Promise<void> {
+  if (!request) return;
+  const reassessments = await tx.doc(Reassessments);
+  if (reassessments.pending[pr]?.fingerprint === request.fingerprint) delete reassessments.pending[pr];
+}
 export const SubmittedAuditReviews = defineDocFamily<{
   reviews: Record<string, { headSha: string; event: "COMMENT" | "APPROVE"; url: string; recordedAt: string }>;
 }, null>({
@@ -68,6 +85,19 @@ const PublishReview = defineTask<PublicationIntent, { phase: "publish" }, Public
         }, context);
       } catch (error) {
         if (runtime.signal.aborted) throw error; // Closing leaves the task recoverable, not failed.
+        if (error instanceof StaleReviewSnapshotError) {
+          await runtime.commit(async (tx) => {
+            const publications = await tx.doc(Publications, pr, null);
+            const pending = publications.pending[intent.fingerprint];
+            if (pending?.taskId !== task.id) throw new Error("Publication intent is missing or superseded");
+            (await tx.doc(Reassessments)).pending[pr] = {
+              target: intent.target, choices: intent.choices, fingerprint: intent.fingerprint, author: pending.author,
+            };
+            delete publications.pending[intent.fingerprint];
+            return { status: "terminal", outcome: { status: "completed", result: { url: null } } };
+          }, context);
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         await runtime.commit(async (tx) => {
           const pending = (await tx.doc(Publications, pr, null)).pending[intent.fingerprint];
@@ -132,7 +162,7 @@ export async function recoverPublications(harness: Harness, context: Context): P
   return [...new Map(pending.map((item) => [item.taskId, item])).values()];
 }
 
-export async function waitForPublication(harness: Harness, taskId: TaskId<PublicationResult>, context: Context): Promise<string> {
+export async function waitForPublication(harness: Harness, taskId: TaskId<PublicationResult>, context: Context): Promise<string | null> {
   const outcome = (await harness.waitForTask(taskId, context)).state.outcome;
   if (outcome.status === "completed") return outcome.result.url;
   throw new Error(outcome.status === "failed" || outcome.status === "faulted" ? outcome.error.message : `Verdict publication ${outcome.status}`);

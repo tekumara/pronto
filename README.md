@@ -67,7 +67,7 @@ The goal is less time chasing review feedback and waiting for another review rou
 
 In serve mode, Pronto saves accepted audit requests before returning `202`. Waiting work and one queued rerun per PR survive restarts. Delivery deduplication also survives restarts, within the last 1000 accepted delivery IDs per repository.
 
-With `--apply`, Pronto saves verdict and skip-reason publication as durable tasks. Startup resumes pending publications without running the model again, including assessments first published from the cache. Preview-only assessments do not become pending writes when the server restarts with different flags.
+With `--apply`, Pronto saves verdict and skip-reason publication as durable tasks. Startup resumes pending publications without running the model again, including assessments first published from the cache. If an approval's head or base commit has changed, Pronto retires that publication and runs a fresh assessment with its saved publication choices. Preview-only assessments do not become pending writes when the server restarts with different flags.
 
 GitHub submission and local storage are not one transaction. After an ambiguous POST, Pronto checks remote reviews for the saved author, head, review type, body and fingerprint before retrying. This reduces duplicates but does not guarantee exactly-once publication. See [serve mode recovery and limits](GUIDE.md#stopping-and-restarting).
 

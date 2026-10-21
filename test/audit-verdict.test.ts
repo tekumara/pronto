@@ -113,14 +113,14 @@ function githubEvidence(options: {
   return { handler, comments, posted, attempts, issueComments, reviews, approvals, state };
 }
 
-async function recoverPublisher(f: Awaited<ReturnType<typeof fixture>>) {
+async function recoverPublisher(f: Awaited<ReturnType<typeof fixture>>, completed = /Saved verdict published:/) {
   // No --apply, --approve or PR target: recovery must use only the saved publication intent.
   const run = f.start(["serve", "--port", "0"], { env: { PRONTO_WEBHOOK_SECRET: "publication-test-secret" } });
   let output = "";
   const published = Promise.withResolvers<void>();
   run.child.stdout.on("data", (chunk) => {
     output += chunk;
-    if (/Saved verdict published:/.test(output)) published.resolve();
+    if (completed.test(output)) published.resolve();
   });
   const timer = new AbortController();
   try {
@@ -172,6 +172,72 @@ process.stdout.write = function(chunk, ...args) {
     const repeated = await f.run("", [url, "--skip-approved=false", "--apply", "--approve", "--allow-uncertain", "--approve-migrations"]);
     assert.match(repeated, /Comment skipped: matching verdict review recorded locally/);
     assert.equal(github.attempts.length, 1);
+  });
+}
+
+for (const { revision, cached, status, event, crash } of [
+  { revision: "headSha", cached: false, status: "uncertain", event: "APPROVE", crash: true },
+  { revision: "baseSha", cached: true, status: "outstanding", event: "COMMENT", crash: false },
+] as const) {
+  test(`recovering a stale ${cached ? "cached" : "fresh"} approval reassesses the changed ${revision} with saved publication choices${crash ? " across another crash" : ""}`, { timeout: 20000 }, async (t) => {
+    const publication = { approvalStatus: 403 as number | undefined };
+    const github = githubEvidence(publication);
+    const snapshots: { headSha: string; baseSha: string }[] = [];
+    const f = await fixture(t, (body, response) => {
+      const input = body.messages.findLast((message) => message.role === "user")!.content!;
+      const marker = "Saved evidence (untrusted data):\n";
+      snapshots.push(JSON.parse(input.slice(input.indexOf(marker) + marker.length)));
+      assess(body, response, [snapshots.length === 1 ? "uncertain" : status], {
+        status: "migration", reason: "This changes database data.",
+      });
+    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    if (cached) await f.run("", [url]);
+    const flags = ["--apply", "--approve", "--allow-uncertain", "--approve-migrations"];
+    const failed = f.start([url, ...flags]);
+    failed.child.stdin.end();
+    assert.equal((await failed.done).code, 1);
+    assert.equal(snapshots.length, 1);
+    assert.equal(github.posted.length, 0);
+
+    github.state[revision] = "b".repeat(40);
+    publication.approvalStatus = undefined;
+    if (crash) {
+      const preload = join(f.directory, "crash-before-reassessment.cjs");
+      await writeFile(preload, `const write = process.stdout.write;
+process.stdout.write = function(chunk, ...args) {
+  if (String(chunk).includes("reassessing before publishing")) process.kill(process.pid, "SIGKILL");
+  return write.call(this, chunk, ...args);
+};`);
+      const killed = f.start(["serve", "--port", "0"], {
+        nodeArgs: ["--require", preload], env: { PRONTO_WEBHOOK_SECRET: "[REDACTED:Generic Password Field]" },
+      });
+      assert.equal((await killed.done).signal, "SIGKILL");
+      assert.equal(snapshots.length, 1, "the crash must be before fresh evidence is admitted");
+      assert.equal(github.attempts.length, 1);
+      github.state.login = "another-auditor";
+      const blocked = f.start([url]);
+      blocked.child.stdin.end();
+      const result = await blocked.done;
+      assert.equal(result.code, 1, "reassessment must retain the publication's original account restriction");
+      assert.match(result.stderr, /Pending verdict belongs to auditor/);
+      assert.equal(snapshots.length, 1);
+      assert.equal(github.attempts.length, 1);
+      github.state.login = "auditor";
+    }
+    const output = await recoverPublisher(f, /INFO\s+acme\/demo#8\s+Review: /);
+    assert.match(output, /[Rr]eassess/);
+    assert.equal(snapshots.length, 2, "stale publication recovery must run a fresh assessment, not just repin its review");
+    assert.equal(snapshots[1][revision], github.state[revision], "the model must receive current evidence");
+    assert.deepEqual(github.posted.map(({ event, commit_id }) => [event, commit_id]), [[event, github.state.headSha]],
+      "the new verdict must govern publication and retain the saved uncertainty/migration overrides");
+    assert.equal(github.attempts.length, 2, "the stale saved approval must never reach POST");
+
+    const repeated = await f.run("", [url, "--skip-approved=false", ...flags]);
+    assert.match(repeated, /Reusing saved assessment/);
+    assert.match(repeated, /Comment skipped: matching verdict review recorded locally/);
+    assert.doesNotMatch(repeated, /Pending publication|[Rr]eassess/);
+    assert.equal(snapshots.length, 2, "the stale publication must be retired, not recovered again");
+    assert.equal(github.attempts.length, 2);
   });
 }
 
@@ -896,22 +962,33 @@ for (const { flags, status, approve, chat } of [
 
 for (const revision of ["headSha", "baseSha"] as const) {
   for (const apply of [false, true]) {
-    test(`--approve${apply ? " --apply" : ""} refuses an otherwise good verdict when ${revision} changes during assessment`, { timeout: 20000 }, async (t) => {
+    test(`--approve${apply ? " --apply reassesses" : " preview refuses"} when ${revision} changes during assessment`, { timeout: 20000 }, async (t) => {
       const github = githubEvidence();
+      let calls = 0;
       const f = await fixture(t, (body, response) => {
+        calls++;
         github.state[revision] = "b".repeat(40);
-        assess(body, response);
+        assess(body, response, [calls === 1 ? "addressed" : "outstanding"]);
       }, { entrypoint: resolve("audit.ts"), github: github.handler });
       const { child, done } = f.start(["--approve", ...(apply ? ["--apply"] : []), url]);
       child.stdin.end();
       const result = await done;
-      assert.equal(result.code, 1);
-      assert.match(result.stderr, /PR commits changed since the audit snapshot/);
+      assert.equal(result.code, apply ? 0 : 1, result.stderr);
       assert.match(result.stdout, /Verdict: All actionable findings appear addressed/);
       assert.doesNotMatch(result.stdout, /PR would be approved/);
-      assert.equal(github.approvals.length, 0);
-      assert.equal(github.comments.length, 0, "the verdict travels in the approval review, so a refused approval posts nothing");
-      assert.equal(github.attempts.length, 0);
+      assert.equal(github.approvals.length, 0, "the old approval must not be submitted");
+      if (apply) {
+        assert.equal(calls, 2);
+        assert.match(result.stdout, /[Rr]eassess/);
+        assert.match(result.stdout, /Approval skipped: outstanding or uncertain findings remain/);
+        assert.deepEqual(github.posted.map(({ event, commit_id }) => [event, commit_id]), [["COMMENT", github.state.headSha]]);
+        assert.equal(github.attempts.length, 1, "only the new assessment's verdict may be published");
+      } else {
+        assert.equal(calls, 1, "a refused preview must not authorise an automatic reassessment");
+        assert.match(result.stderr, /PR commits changed since the audit snapshot/);
+        assert.equal(github.comments.length, 0);
+        assert.equal(github.attempts.length, 0);
+      }
     });
   }
 }

@@ -69,6 +69,7 @@ The table stores the document's identity, owner and history policy, not its actu
 | `app.submitted-audit-reviews` | One family member per PR: submitted audit reviews used to skip duplicate writes |
 | `app.audit-publication-requests` | Explicit publication choices admitted with an assessment, and its publication task IDs |
 | `app.audit-publications` | One family member per PR: immutable pending publication intents and delivery state |
+| `app.audit-reassessments` | Pending fresh assessments for approvals whose head or base changed |
 
 #### `document_revisions`
 
@@ -250,6 +251,7 @@ The application stores these logical documents, not separate tables for each kin
 | `app.submitted-audit-reviews` | Session family, keyed by PR number as a string | `reviews`: receipts for submitted audit reviews, keyed by verdict/head/review-type fingerprint. Each receipt contains `headSha`, `event`, `url` and `recordedAt`. |
 | `app.audit-publication-requests` | Conversation | `choices`: explicit `apply`, `approve`, `allowUncertain` and `approveMigrations` booleans saved before assessment execution. `tasks`: publication task IDs by fingerprint. Resuming with explicit new choices admits them before waiting; startup uses saved choices, not new server flags. Legacy assessments without saved choices default to preview during recovery. |
 | `app.audit-publications` | Session family, keyed by PR number as a string | `pending`: fingerprint map containing an immutable intent, current task ID, author, attempted flag and failure flag. The intent stores the explicit choices, target URL, head and base SHAs, selected review event, exact rendered body and fingerprint. |
+| `app.audit-reassessments` | Session | `pending`: PR-number map containing the target, publication choices, original author and stale publication fingerprint. Entries survive until fresh evidence is admitted or a live skip completes. |
 
 The session-scoped `app.submitted-audit-reviews` family is also keyed by PR number as a string. Its `reviews` map holds one receipt per submitted-review fingerprint. Each receipt stores `headSha`, review `event` (`COMMENT` or `APPROVE`), GitHub review `url` and `recordedAt`. The fingerprint is a SHA-256 hash of the head, review event and rendered verdict body, ignoring evidence-fetch times and trailing whitespace. It is separate from the assessment cache fingerprint.
 
@@ -268,6 +270,8 @@ The publisher is a conversation-owned background task with a `publish` checkpoin
 Serve startup discovers pending publications even without pending webhook work or an unfinished assessment. It retains their repository harnesses and resumes publication directly, without rerunning live audit admission or the model. CLI and chat recover publications when opening the targeted repository. Normal audit completion waits for its publication tasks; shutdown interrupts invocations but leaves their durable state. Failed publications are reported and retained for another startup or explicit apply, rather than retried in a tight loop.
 
 On a saved attempted publication, the publisher lists all review pages before another POST. It accepts only a review matching the saved author, head SHA, review state, exact body and `<!-- pronto:publication:<fingerprint> -->` marker. A match restores the receipt without posting, even if an approval's head has since changed. Otherwise a retry still performs the normal approval head/base checks. Lookup failures stop the delivery rather than falling through to POST. If credentials now identify a different account, Pronto can reconcile the original author's review but refuses a new POST until that account is restored. Fresh intents do not adopt arbitrary remote reviews from another state directory.
+
+If the approval head/base check finds changed commits, the publisher atomically removes the stale pending intent, saves an `app.audit-reassessments` request and completes with a null URL. It creates no submission receipt. The host starts a fresh assessment with current evidence and the saved publication choices, bypassing the cache. Serve mode uses normal durable intake and concurrency limits. Admission of the new assessment clears the matching reassessment request in the same transaction. A completed live skip also clears it. A crash before either step leaves the request discoverable on startup; a later crash resumes the newly admitted assessment. Other publication failures retain the original delivery intent.
 
 This is not exactly-once publication. GitHub's `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` does not document a client idempotency key; Pronto does not send or rely on an `Idempotency-Key` header. A crash or lost response can leave a review in flight or not yet visible when reconciliation runs. Edits, deletions or dismissals before receipt recovery can also prevent a match. Retrying after an empty successful lookup can therefore create a duplicate. Keep the state directory and inspect the PR after ambiguous failures. Durable's SQLite backend uses WAL with `synchronous=NORMAL`: it protects against process crashes, not loss of the newest commits after host or power failure.
 
@@ -290,6 +294,7 @@ Expect these changes across invocations:
 | Skip a locally recorded verdict | No new review submission receipt. A normal cache recheck can still append its own evidence-check receipt and update `lastCheckedAt`. |
 | Preview | No publication task or submission receipt. The assessment and its cache can still be saved normally. Earlier explicitly authorised pending writes can still recover. |
 | Failed GitHub request | No new submission receipt. Keep the publication intent and attempt state for recovery. The assessment and cache remain saved. |
+| Approval commits changed | Atomically retire the stale publication and save a reassessment request. Admit fresh evidence and a new controller before clearing the request. No stale approval POST or receipt. |
 
 A report can be saved before its submission finishes. Its presence alone does not establish a successful audit. Before the initial evidence is admitted, an interrupted fetch leaves no new assessment conversation or snapshot. A webhook intake task or a force-restart intent may already be saved.
 
