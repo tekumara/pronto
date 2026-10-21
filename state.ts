@@ -9,13 +9,13 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 
 type StateTarget = { kind: "chat"; cwd: string } | { kind: "repo"; host: string; name: string };
 
-function stateDirectory(): string {
-  const override = process.env.PRONTO_STATE_DIR;
+export function stateDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.PRONTO_STATE_DIR;
   if (override) {
     if (!isAbsolute(override)) throw new Error("PRONTO_STATE_DIR must be an absolute path.");
     return override;
   }
-  const xdg = process.env.XDG_STATE_HOME;
+  const xdg = env.XDG_STATE_HOME;
   return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "state"), "pronto");
 }
 
@@ -23,8 +23,8 @@ function stateDirectory(): string {
  * Repository databases saved in the state directory, as the `host` and `name` that openStateHarness takes. Only
  * `repos/<host>/<name>.sqlite` counts: earlier hash-named databases in `repos/` and lock files are not repositories.
  */
-export async function listRepositoryDatabases(): Promise<{ host: string; name: string }[]> {
-  const repos = join(stateDirectory(), "repos");
+export async function listRepositoryDatabases(root = stateDirectory()): Promise<{ host: string; name: string }[]> {
+  const repos = join(root, "repos");
   const databases: { host: string; name: string }[] = [];
   let hosts;
   try {
@@ -39,6 +39,21 @@ export async function listRepositoryDatabases(): Promise<{ host: string; name: s
     }
   }
   return databases;
+}
+
+/** Canonical identity shared by local storage, remote inventory and term-bound durability barriers. */
+export function repositoryDatabaseIdentity(host: string, name: string): string {
+  const relative = `repos/${host}/${name}.sqlite`;
+  repositoryDatabasePath("/validation", relative);
+  return relative;
+}
+
+/** Treat remote names as untrusted. Never decode escapes into a filesystem path. */
+export function repositoryDatabasePath(root: string, relative: string): string {
+  if (!isAbsolute(root) || !/^repos\/(?:[a-z0-9._!~*'()-]|%[0-9a-fA-F]{2})+\/[a-z0-9_.-]+~[a-z0-9_.-]+\.sqlite$/.test(relative)
+    || relative.split("/").some((p) => p === "." || p === "..")
+    || /%(?![0-9a-fA-F]{2})/.test(relative)) throw new Error("Invalid repository database path");
+  return join(root, relative);
 }
 
 async function lockDatabase(path: string): Promise<() => void> {
@@ -66,13 +81,12 @@ async function lockDatabase(path: string): Promise<() => void> {
 }
 
 /** Open private user state. Closing the harness releases ownership. */
-export async function openStateHarness(target: StateTarget, options: HarnessOptions, context: Context): Promise<Harness> {
-  const root = stateDirectory();
+export async function openStateHarness(target: StateTarget, options: HarnessOptions, context: Context, root = stateDirectory()): Promise<Harness> {
   const key = target.kind === "chat"
     ? createHash("sha256").update(await realpath(target.cwd)).digest("hex").slice(0, 20)
     : undefined;
   const path = target.kind === "repo"
-    ? join(root, "repos", target.host, `${target.name}.sqlite`)
+    ? repositoryDatabasePath(root, repositoryDatabaseIdentity(target.host, target.name))
     : join(root, "chats", `${key}.sqlite`);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const release = await lockDatabase(path);

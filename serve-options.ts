@@ -10,10 +10,16 @@ const valueFlags = ["--port", "--host", "--concurrency", "--webhook-path"];
 /** Serve-only flags, then the audit flags that apply to every audit the server runs. */
 export function parseServeOptions(args: string[]) {
   let verbose = false;
+  let replicatedState = false;
   const values = new Map<string, string>();
   const rest: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
+    if (arg === "--replicated-state") {
+      if (replicatedState) throw new Error(`--replicated-state can be supplied only once\n${SERVE_USAGE}`);
+      replicatedState = true;
+      continue;
+    }
     if (arg === "--verbose") {
       if (verbose) throw new Error(`--verbose can be supplied only once\n${SERVE_USAGE}`);
       verbose = true;
@@ -35,8 +41,8 @@ export function parseServeOptions(args: string[]) {
   const port = integer("--port", DEFAULT_PORT, 0, 65535, "an integer from 0 to 65535");
   const concurrency = integer("--concurrency", DEFAULT_CONCURRENCY, 1, Number.MAX_SAFE_INTEGER, "a positive integer");
   const path = values.get("--webhook-path") ?? DEFAULT_WEBHOOK_PATH;
-  if (!/^\/[^\s?#]*$/.test(path) || path === "/healthz") {
-    throw new Error(`--webhook-path must start with / and cannot contain spaces, ? or #, and /healthz is reserved for health checks\n${SERVE_USAGE}`);
+  if (!/^\/[^\s?#]*$/.test(path) || path === "/healthz" || path === "/readyz") {
+    throw new Error(`--webhook-path must start with / and cannot contain spaces, ? or #, and /healthz is reserved for health checks (/readyz is also reserved)\n${SERVE_USAGE}`);
   }
-  return { ...parseAuditOptions(rest, "serve"), port, host: values.get("--host") ?? DEFAULT_HOST, concurrency, path, verbose };
+  return { ...parseAuditOptions(rest, "serve"), port, host: values.get("--host") ?? DEFAULT_HOST, concurrency, path, verbose, replicatedState };
 }

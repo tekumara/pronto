@@ -39,7 +39,8 @@ const Publications = defineDocFamily<{
   initial: () => ({ pending: {} }),
 });
 
-const PublishReview = defineTask<PublicationIntent, { phase: "publish" }, PublicationResult>({
+function publicationTask(beforePublish?: () => Promise<void>) {
+  return defineTask<PublicationIntent, { phase: "publish" }, PublicationResult>({
   name: "app.publish-audit-review", version: 1,
   initial: () => ({ phase: "publish" }),
   phases: {
@@ -69,6 +70,9 @@ const PublishReview = defineTask<PublicationIntent, { phase: "publish" }, Public
               delivery.attempted = true;
               return undefined;
             }, context);
+            // The attempt marker must be remotely durable and this term still ready before the POST.
+            await beforePublish?.();
+            context.abortSignal?.throwIfAborted();
             url = (await submitAuditReview(intent, intent.body, {
               approve: intent.event === "APPROVE", apply: true, signal: context.abortSignal,
             }))!;
@@ -114,8 +118,12 @@ const PublishReview = defineTask<PublicationIntent, { phase: "publish" }, Public
       return { status: "terminal", outcome: { status: "aborted" } };
     }, context);
   },
-});
-export const Publisher = defineExtension({ name: "audit-publisher", tasks: [PublishReview] });
+  });
+}
+const PublishReview = publicationTask();
+export function createPublisher(beforePublish?: () => Promise<void>) {
+  return defineExtension({ name: "audit-publisher", tasks: [publicationTask(beforePublish)] });
+}
 
 /** Atomic handoff for verdict and skip reviews. Skips use the root conversation. */
 export async function enqueuePublication(tx: Tx, conversationId: ConversationId, intent: PublicationIntent): Promise<TaskId<PublicationResult> | null> {

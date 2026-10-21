@@ -27,6 +27,25 @@ test("reports health", async (t) => {
   assert.deepEqual(await response.json(), { status: "ok" });
 });
 
+test("readiness gates all application routes but not liveness, including an admission already in flight", async (t) => {
+  let ready = false;
+  const admitted = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<Accepted>();
+  const { base, enqueued } = await start(t, { ready: () => ready, enqueue: async () => { admitted.resolve(); return finish.promise; } });
+  assert.equal((await fetch(`${base}/healthz`)).status, 200);
+  assert.equal((await fetch(`${base}/readyz`)).status, 503);
+  assert.equal((await deliver(base, reviewRequested())).status, 503);
+  assert.equal((await fetch(`${base}/elsewhere`)).status, 503);
+  assert.deepEqual(enqueued, []);
+  ready = true;
+  assert.equal((await fetch(`${base}/readyz`)).status, 200);
+  const pending = deliver(base, reviewRequested());
+  await admitted.promise;
+  ready = false;
+  finish.resolve("duplicate");
+  assert.equal((await pending).status, 503, "losing readiness before sending a duplicate must not return 202");
+});
+
 test("rejects unknown paths and methods", async (t) => {
   const { base, enqueued } = await start(t);
   assert.equal((await fetch(`${base}/elsewhere`)).status, 404);

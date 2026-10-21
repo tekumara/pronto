@@ -66,3 +66,5 @@ The goal is less time chasing review feedback and waiting for another review rou
 ## Technical guide
 
 See the [technical guide](GUIDE.md) for setup, usage, audit behaviour and development details.
+
+Serve also has an opt-in `--replicated-state` experiment using stock Litestream and S3-compatible storage. It defaults to off. See [replicated state setup and safety limits](REPLICATED_STATE.md), including the real RustFS integration command. It is not production hard fencing.

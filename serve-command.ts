@@ -17,12 +17,15 @@ function printServeHelp(): void {
   console.log(`--concurrency <n> sets how many audits run at once (default: ${DEFAULT_CONCURRENCY}).`);
   console.log("--webhook-path <path> sets the path that receives deliveries (default: /webhook). GET /healthz reports health.");
   console.log("--verbose includes ignored deliveries, delivery IDs, tool calls, cache changes and full reports.");
+  console.log("--replicated-state enables experimental term-isolated S3 state (default: off). Requires PRONTO_REPLICA_URL, PRONTO_LITESTREAM_BIN, AWS_REGION and AWS credentials. See REPLICATED_STATE.md. GET /readyz reports admission readiness; /healthz is liveness.");
   console.log("The audit flags apply to every audit and work as they do for pronto. --force and --pr are not supported. Without --apply, new audits only log previews. Previously authorised publications can still recover.");
 }
 
 export async function runServe(args: string[]): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) return printServeHelp();
-  const { requested, port, host, concurrency, path, verbose, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply } = parseServeOptions(args);
+  const { requested, port, host, concurrency, path, verbose, replicatedState, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply } = parseServeOptions(args);
+  // Do not even load the S3 SDK or inspect replica configuration in ordinary serve.
+  const replica = replicatedState ? await import("./s3-control.ts").then(({ replicaConfig }) => replicaConfig()) : undefined;
   const secret = process.env.PRONTO_WEBHOOK_SECRET;
   if (!secret) throw new Error("PRONTO_WEBHOOK_SECRET is required: set it to the secret configured on the GitHub webhook.");
   // Resolve credentials before listening, so a missing token or model fails at startup rather than on the first delivery.
@@ -30,6 +33,28 @@ export async function runServe(args: string[]): Promise<void> {
   const { models, model } = await createModelRuntime(process.cwd(), requested);
   const options: AuditOptions = { model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply };
   const log = createServeLogger({ verbose });
+  if (replica) {
+    const { createPrimaryRuntime } = await import("./primary-runtime.ts");
+    const runtime = await createPrimaryRuntime(replica, { models, audit: options, concurrency, log });
+    let stopping = false;
+    const server = createWebhookServer({ secret, login, enqueue: (url, id) => runtime.enqueue(url, id),
+      ready: () => !stopping && runtime.ready(), path, log });
+    const stopped = Promise.withResolvers<NodeJS.Signals>();
+    const stop = (signal: NodeJS.Signals) => { stopping = true; stopped.resolve(signal); void runtime.close().catch(() => {}); };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    try {
+      const address = await server.listen(port, host);
+      log("info", "serve", `Listening on http://${host}:${address.port}${path} · replicated state · standby until owned-ready`);
+      await stopped.promise;
+    } finally {
+      stopping = true;
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      await Promise.all([server.close(), runtime.close()]);
+    }
+    return;
+  }
   const auditor = createAuditor(models, { log, webhooks: { concurrency, options } });
   let stopping = false;
   const server = createWebhookServer({ secret, login, enqueue: async (url, id) => {

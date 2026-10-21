@@ -12,9 +12,10 @@ const Queue = defineDoc<{ recent: string[]; pending: Record<string, Pending> }>(
 export type Accepted = Enqueued | "duplicate";
 
 /** Durable admission per repository; the ordinary queue only dispatches task invocations across repositories. */
-export function createWebhookQueue({ concurrency, audit, onError }: {
+export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch }: {
   concurrency: number;
   audit(url: string): Promise<void>;
+  beforeDispatch?(url: string): Promise<void>;
   onError(url: string, error: unknown): void;
 }) {
   type Scheduled = { id: string; ready: ReturnType<typeof Promise.withResolvers<() => Promise<void>>> };
@@ -72,6 +73,10 @@ export function createWebhookQueue({ concurrency, audit, onError }: {
               pending.running = true;
               return undefined;
             }, context);
+            // An already-running harness can invoke this task before the HTTP admission finishes.
+            // Confirm the committed running/intake intent independently at the worker, before external work.
+            await beforeDispatch?.(task.input.url);
+            context.abortSignal?.throwIfAborted();
             try {
               await audit(task.input.url);
             } catch (error) {

@@ -7,8 +7,8 @@ import {
   AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, UsageDoc, watchEvents,
   type Conversation, type ConversationId, type Cursor, type Harness, type ModelRef, type SubmissionId, type TaskId, type UsageState,
 } from "@earendil-works/pi-durable";
-import { listRepositoryDatabases, openStateHarness } from "./state.ts";
-import { Publisher, SubmittedAuditReviews, completeReassessment, enqueuePublication, pendingReassessments, recoverPublications, waitForPublication, type PublicationChoices, type PublicationIntent, type PublicationResult } from "./publication.ts";
+import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "./state.ts";
+import { createPublisher, SubmittedAuditReviews, completeReassessment, enqueuePublication, pendingReassessments, recoverPublications, waitForPublication, type PublicationChoices, type PublicationIntent, type PublicationResult } from "./publication.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { createWebhookQueue } from "./webhook-queue.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
@@ -673,9 +673,10 @@ export type AuditOptions = {
 };
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
-export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output, webhooks }: {
+export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output, webhooks, state }: {
   labelOutput?: boolean; log?: Log;
   webhooks?: { concurrency: number; options: AuditOptions };
+  state?: { root: string; enroll(relative: string): Promise<void>; confirm(relative: string): Promise<void>; strictRecovery: boolean };
 } = {}) {
   const repositories = new Map<string, Promise<RepositoryAudit>>();
   const requests = new Set<string>();
@@ -687,6 +688,10 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   const webhookQueue = webhooks ? createWebhookQueue({
     concurrency: webhooks.concurrency,
     audit: (url) => auditor.audit(url, webhooks.options),
+    beforeDispatch: state ? async (url) => {
+      const repository = await repositoryFor(parseReviewTarget(url));
+      await state.confirm(repository.database);
+    } : undefined,
     onError: (url, error) => {
       const target = parseReviewTarget(url);
       output?.("error", `${target.owner}/${target.repo}#${target.pr}`, `Audit failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -697,8 +702,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
 
   /** Opens a repository's database, which takes its process lock. `host` and `name` are the path components in openStateHarness. */
   function openRepository(host: string, name: string): Promise<RepositoryAudit> {
+    const database = repositoryDatabaseIdentity(host, name);
     const registry = createRegistry();
-    registry.install(Publisher);
+    registry.install(createPublisher(state ? () => state.confirm(database) : undefined));
     if (webhookQueue) registry.install(webhookQueue.extension);
     const gate = createAuditExecutionGate(models);
     registry.install(defineExtension({ ...Auditor, tools: [{
@@ -714,12 +720,13 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       models: gate.models, registry, settings: auditSettings,
       onReport: (error) => output ? output("error", `${host}/${name}`, error instanceof Error ? error.message : String(error)) : console.error(error),
       // No execution environment or coding tools: audits cannot access local files.
-    }, BACKGROUND_CONTEXT).then(async (harness) => {
+    }, BACKGROUND_CONTEXT, state?.root).then(async (harness) => {
       gate.attach(harness);
       try {
+        await state?.enroll(database);
         const publications = await recoverPublications(harness, BACKGROUND_CONTEXT);
         return {
-          harness, publications,
+          harness, publications, database,
           allow: async (id: ConversationId, diagnostics: AuditDiagnostics, context: Context) => {
             const provider = await harness.snapshot(ProviderDoc, id, context);
             if (!provider) throw new Error("Audit provider session identity is missing");
@@ -755,8 +762,10 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       if (closing) return "closed" as const;
       if (recovering) await recovering;
       if (closing) return "closed" as const;
-      const { harness } = await repositoryFor(parseReviewTarget(url));
+      const { harness, database } = await repositoryFor(parseReviewTarget(url));
       const outcome = await webhookQueue.admit(harness, url, deliveryId);
+      // Includes duplicate and coalesced admissions: every 202 needs fresh remote confirmation.
+      if (outcome !== "closed") await state?.confirm(database);
       // Admission is already durable. Scheduler startup is reconstructible, not acceptance.
       if (!closing) harness.resume();
       return outcome;
@@ -834,7 +843,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       return recovering = (async () => {
         const urls: string[] = [];
         const skipped: { database: string; error: unknown }[] = [];
-        for (const { host, name } of await listRepositoryDatabases()) {
+        for (const { host, name } of await listRepositoryDatabases(state?.root)) {
           if (closing) throw new Error("Auditor is closed");
           let repository: RepositoryAudit | undefined;
           try {
@@ -869,7 +878,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
             urls.push(...selected.values());
           } catch (error) {
             await repository?.harness.close(BACKGROUND_CONTEXT).catch(() => {});
-            if (closing) throw error;
+            if (closing || state?.strictRecovery) throw error;
             skipped.push({ database: `${host}/${name}`, error });
           }
         }
@@ -934,6 +943,7 @@ export async function runAudits(urls: string[], options: AuditOptions & { models
 }
 
 type RepositoryAudit = {
+  database: string;
   harness: Harness;
   publications: Awaited<ReturnType<typeof recoverPublications>>;
   allow(id: ConversationId, diagnostics: AuditDiagnostics, context: Context): Promise<void>;

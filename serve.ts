@@ -15,6 +15,8 @@ export type WebhookServerOptions = {
   login: string;
   /** Resolves only after durable admission (including delivery deduplication) commits. */
   enqueue: (url: string, deliveryId?: string) => Promise<Accepted>;
+  /** Application admission gate. Health stays live while standby or bootstrapping. */
+  ready?: () => boolean;
   path?: string;
   maxBodyBytes?: number;
   log?: Log;
@@ -56,7 +58,7 @@ function send(res: ServerResponse, status: number, body?: object, headers: Recor
 }
 
 /** Receives GitHub deliveries. Waits for durable admission, not audit execution: GitHub gives up on a slow response. */
-export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
+export function createWebhookServer({ secret, login, enqueue, ready = () => true, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
   if (!secret) throw new Error("A webhook secret is required.");
   if (!login) throw new Error("The reviewer login is required.");
   let stopping = false;
@@ -69,6 +71,9 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
       return send(res, 400, { error: "malformed request target" });
     }
     if (pathname === "/healthz" && (req.method === "GET" || req.method === "HEAD")) return send(res, 200, { status: "ok" });
+    const available = !stopping && ready();
+    if (pathname === "/readyz" && (req.method === "GET" || req.method === "HEAD")) return send(res, available ? 200 : 503, { status: available ? "ready" : "unready" });
+    if (!available) return send(res, 503, { status: "unready" });
     if (pathname !== path) return send(res, 404, { error: "not found" });
     if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { Allow: "POST" });
     const body = await readBody(req, maxBodyBytes);
@@ -94,7 +99,7 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
       log("debug", "webhook", `Ignored: ${delivery.reason} (${formatDeliveryContext(event, payload)})`, detail);
       return send(res, 204);
     }
-    if (stopping) return send(res, 503, { status: "closed" });
+    if (stopping || !ready()) return send(res, 503, { status: "closed" });
     let outcome: Accepted;
     try {
       outcome = await enqueue(delivery.url, id);
@@ -102,7 +107,7 @@ export function createWebhookServer({ secret, login, enqueue, path = DEFAULT_WEB
       log("error", auditLabel(delivery.url), `Admission failed: ${error instanceof Error ? error.message : String(error)}`, detail);
       return send(res, 503, { error: "durable admission failed" });
     }
-    if (stopping) return send(res, 503, { status: "closed" });
+    if (stopping || !ready()) return send(res, 503, { status: "closed" });
     if (outcome === "duplicate") {
       log("debug", auditLabel(delivery.url), "Duplicate delivery", detail);
       return send(res, 202, { status: outcome });

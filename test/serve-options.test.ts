@@ -6,7 +6,7 @@ test("serve defaults to a local server that only previews", () => {
   assert.deepEqual(parseServeOptions([]), {
     selectors: [], requested: undefined, skipLabels: [], skipDrafts: true, skipApproved: true, exclude: [], force: false,
     approve: false, allowUncertain: false, approveMigrations: false, apply: false,
-    port: 8080, host: "127.0.0.1", concurrency: 4, path: "/webhook", verbose: false,
+    port: 8080, host: "127.0.0.1", concurrency: 4, path: "/webhook", verbose: false, replicatedState: false,
   });
 });
 
@@ -46,6 +46,9 @@ for (const [args, message] of [
   [["--unknown"], /Unknown audit option: --unknown/],
   [["--apply", "--apply"], /--apply can be supplied only once/],
   [["--verbose", "--verbose"], /--verbose can be supplied only once/],
+  [["--replicated-state", "--replicated-state"], /--replicated-state can be supplied only once/],
+  [["--replicated-state=false"], /Unknown audit option/],
+  [["--webhook-path", "/readyz"], /\/readyz is also reserved/],
   [["--port"], /--port requires a value/],
   [["--port", "--apply"], /--port requires a value/],
   [["--port="], /--port requires a value/],

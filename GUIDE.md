@@ -175,6 +175,8 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 
 `--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup and apply to every audit, as described in the [quick start](#quick-start). Without `--apply`, the server only logs previews.
 
+`--replicated-state` enables experimental term-isolated S3 state. It defaults to off; ordinary serve, audits and chat do not need replica configuration or start replication. See [replicated state setup, RustFS tests and safety limits](REPLICATED_STATE.md) before enabling it. `GET /readyz` reports admission readiness separately from `/healthz` liveness. An unready replicated process returns 503 for application requests, without forwarding them.
+
 `--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
 
 ### Logs
