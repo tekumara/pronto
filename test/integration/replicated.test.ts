@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, request, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -286,42 +286,27 @@ test("a crashed owner is replaced only after lease expiry, without reusing its s
   await successor.stop();
 });
 
-// Faults are injected on actual signed traffic; a delayed old upload is not an acknowledgement.
-test("upload delayed across takeover returns 503 and cannot dispatch external work", { timeout: 50_000 }, async (t) => {
+// The protocol gate executes these same abstract schedules in TLC and the original
+// Python graph. Here the schedule chooses the actual signed transport boundary.
+// SQLite commits, daemon IPC and cleanup add unmodelled steps; this is trace
+// correspondence at two observation points, not implementation refinement.
+const admissionSchedules: { name: string; actions: string[]; acknowledges: boolean }[] =
+  JSON.parse(await readFile(new URL("../../protocol/schedules.json", import.meta.url), "utf8"));
+for (const schedule of admissionSchedules) test(schedule.name, { timeout: 70_000 }, async (t) => {
   const { config, storage } = await store(t);
   const p = await proxy(t);
   const a = await app(t, config, p.endpoint);
   const run = await a.start(); await ready(run.base);
-  const uploading = Promise.withResolvers<void>();
+  const boundary = Promise.withResolvers<void>();
   const unblock = Promise.withResolvers<void>();
-  t.after(() => unblock.resolve());
-  p.intercept = async (req) => {
-    if (req.method === "PUT" && req.url!.includes(".ltx")) { uploading.resolve(); await unblock.promise; }
-    return false;
-  };
-  const request = deliver(run.base, body, { id: "old-delayed-upload" });
-  await uploading.promise;
-  const next = await replaceOwner(storage);
-  unblock.resolve();
-  assert.equal((await request).status, 503);
-  assert.equal((await fetch(`${run.base}/readyz`)).status, 503);
-  assert.equal((await fetch(`${run.base}/healthz`)).status, 200);
-  assert.deepEqual(a.gh.requests, ["GET /github/user"], "unconfirmed admission cannot begin GitHub evidence fetches");
-  await until(async () => /Owner term ended/.test(run.output));
-  assert.equal((await storage.read())!.record.owner, next.record.owner, "old cleanup cannot release a successor");
-  await run.stop();
-});
-
-test("ownership confirmation before takeover permits delayed 202 and successor restores the delivery", { timeout: 70_000 }, async (t) => {
-  const { config, storage } = await store(t);
-  const p = await proxy(t);
-  const a = await app(t, config, p.endpoint);
-  const run = await a.start(); await ready(run.base);
-  const confirmed = Promise.withResolvers<void>();
-  const unblock = Promise.withResolvers<void>();
+  const holdObservation = schedule.actions.includes("Observe(0)");
   let held = false;
   t.after(() => unblock.resolve());
   p.intercept = async (req, res) => {
+    if (!holdObservation) {
+      if (req.method === "PUT" && req.url!.includes(".ltx")) { boundary.resolve(); await unblock.promise; }
+      return false;
+    }
     if (held || req.method !== "GET" || !req.url!.includes("control.json") || !p.events.some((e) => e.method === "PUT" && e.path.includes(".ltx"))) return false;
     held = true;
     // Read RustFS NOW, delay only its already-successful response to the old owner.
@@ -334,24 +319,32 @@ test("ownership confirmation before takeover permits delayed 202 and successor r
       call.on("error", reject); call.end();
     });
     assert.equal(response.status, 200);
-    confirmed.resolve();
+    boundary.resolve();
     await unblock.promise;
     res.writeHead(response.status, response.headers).end(response.body);
     return true;
   };
-  const admission = deliver(run.base, body, { id: "confirmed-before-takeover" });
-  await confirmed.promise;
-  await replaceOwner(storage);
+  const admission = deliver(run.base, body, { id: "model-scheduled-delivery" });
+  await boundary.promise;
+  const next = await replaceOwner(storage);
   unblock.resolve();
-  assert.equal((await admission).status, 202);
+  assert.equal((await admission).status, schedule.acknowledges ? 202 : 503);
+  if (!schedule.acknowledges) {
+    assert.equal((await fetch(`${run.base}/readyz`)).status, 503);
+    assert.equal((await fetch(`${run.base}/healthz`)).status, 200);
+    assert.deepEqual(a.gh.requests, ["GET /github/user"], "unconfirmed admission cannot begin GitHub evidence fetches");
+    assert.equal((await storage.read())!.record.owner, next.record.owner, "old cleanup cannot release a successor");
+  }
   await run.stop();
-  await releaseForeign(storage);
-  const b = await app(t, config);
-  const successor = await b.start(); await ready(successor.base);
-  const duplicate = await deliver(successor.base, body, { id: "confirmed-before-takeover" });
-  assert.equal(duplicate.status, 202);
-  assert.deepEqual(await duplicate.json(), { status: "duplicate" });
-  await successor.stop();
+  if (schedule.acknowledges) {
+    await releaseForeign(storage);
+    const b = await app(t, config);
+    const successor = await b.start(); await ready(successor.base);
+    const duplicate = await deliver(successor.base, body, { id: "model-scheduled-delivery" });
+    assert.equal(duplicate.status, 202);
+    assert.deepEqual(await duplicate.json(), { status: "duplicate" });
+    await successor.stop();
+  }
 });
 
 // The GitHub POST itself is the observation point: independent remote restore must already contain attempted=true.
@@ -551,3 +544,80 @@ test("ambiguous renewal makes serve unready, aborts active work, stops its child
   assert.equal(retained.record.recovery, before.record.recovery);
   await run.stop();
 });
+
+// Authoring gate: no existing case covers promotion uncertainty or a same-owner
+// revision conflict (a tempting fresh-ETag retry would succeed). Use real CAS and
+// real lost responses, not a fake that declares stale requests rejected. The
+// existing ambiguous-renewal test remains the owner of active-work cancellation.
+for (const fault of ["promotion-conflict", "promotion-ambiguous", "renewal-conflict"] as const) {
+  test(`${fault} ends the term without rebasing a stale control mutation`, { timeout: 90_000 }, async (t) => {
+    const { config, storage } = await store(t);
+    const seed = await app(t, config);
+    const first = await seed.start(); await ready(first.base);
+    assert.equal((await deliver(first.base, body, { id: "before-control-fault" })).status, 202);
+    await first.stop();
+    const source = (await storage.read())!.record.recovery!;
+    const p = await proxy(t);
+    const injected = Promise.withResolvers<{ owner: string; recovery: string; revision: string }>();
+    const mutations: { owner: string | null; phase: string; revision: string; status: number }[] = [];
+    let faultOwner: string | undefined;
+    let faultIndex = -1;
+    p.intercept = async (req, res) => {
+      if (req.method !== "PUT" || !req.url!.includes("control.json")) return false;
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+      const bytes = Buffer.concat(chunks);
+      const record = JSON.parse(bytes.toString());
+      // Do not let the runtime hide a fail-open term by promptly acquiring a new one.
+      if (faultOwner && record.owner && record.owner !== faultOwner) { res.writeHead(503).end(); return true; }
+      const previous = (await storage.read())!;
+      const target = !faultOwner && previous.record.owner === record.owner && record.phase === "ready"
+        && previous.record.phase === (fault === "renewal-conflict" ? "ready" : "bootstrapping");
+      if (target) {
+        faultOwner = record.owner;
+        faultIndex = mutations.length;
+        if (fault !== "promotion-ambiguous") {
+          // Change ONLY the revision under the same owner. Blind rebasing would
+          // now be allowed by S3, so rejection cannot be credited to term checks.
+          await storage.write({ ...previous.record, revision: randomUUID() }, previous);
+        }
+      }
+      const backend = new URL(process.env.PRONTO_S3_ENDPOINT!);
+      const reply = await new Promise<{ status: number; headers: any; body: Buffer }>((resolve, reject) => {
+        const call = request({ hostname: backend.hostname, port: backend.port, method: req.method, path: req.url, headers: req.headers }, (response) => {
+          const parts: Buffer[] = []; response.on("data", (part: Buffer) => parts.push(part));
+          response.on("end", () => resolve({ status: response.statusCode!, headers: response.headers, body: Buffer.concat(parts) }));
+        });
+        call.on("error", reject); call.end(bytes);
+      });
+      mutations.push({ owner: record.owner, phase: record.phase, revision: record.revision, status: reply.status });
+      if (target) {
+        assert.equal(reply.status, fault === "promotion-ambiguous" ? 200 : 412);
+        const actual = (await storage.read())!.record;
+        injected.resolve({ owner: record.owner, recovery: actual.recovery!, revision: actual.revision });
+        if (fault === "promotion-ambiguous") { res.destroy(); return true; }
+      }
+      res.writeHead(reply.status, reply.headers).end(reply.body);
+      return true;
+    };
+    const a = await app(t, config, p.endpoint);
+    const run = await a.start();
+    if (fault === "renewal-conflict") await ready(run.base);
+    const actual = await injected.promise;
+    await until(async () => (await fetch(`${run.base}/readyz`)).status === 503);
+    assert.equal((await deliver(run.base, body)).status, 503);
+    await until(async () => { try { await exec("pgrep", ["-P", String(run.child.pid)]); return false; } catch { return true; } });
+    await run.stop();
+    assert.equal(mutations.slice(faultIndex).filter((m) => m.owner === actual.owner && m.phase !== "idle").length, 1,
+      "an uncertain mutation must not re-read/retry; fresh-read idle cleanup is a separate operation");
+    assert.equal((await storage.read())!.record.recovery, actual.recovery);
+    if (fault === "promotion-ambiguous") assert.notEqual(actual.recovery, source, "successful promotion really committed before its response was lost");
+    else if (fault === "promotion-conflict") assert.equal(actual.recovery, source);
+    if (process.env.PRONTO_INTEGRATION_ARTIFACTS) await writeFile(join(process.env.PRONTO_INTEGRATION_ARTIFACTS, `${fault}.json`), JSON.stringify(mutations, null, 2));
+    const b = await app(t, config);
+    const successor = await b.start(); await ready(successor.base);
+    const duplicate = await deliver(successor.base, body, { id: "before-control-fault" });
+    assert.equal(duplicate.status, 202);
+    assert.deepEqual(await duplicate.json(), { status: "duplicate" });
+    await successor.stop();
+  });
+}

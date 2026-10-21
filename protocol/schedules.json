@@ -1,0 +1,12 @@
+[
+  {
+    "name": "upload delayed across takeover returns 503 and cannot dispatch external work",
+    "actions": ["Commit(0)", "Takeover", "Upload(0)"],
+    "acknowledges": false
+  },
+  {
+    "name": "ownership confirmation before takeover permits delayed 202 and successor restores the delivery",
+    "actions": ["Commit(0)", "Upload(0)", "Observe(0)", "Takeover", "Acknowledge(0)", "Restore(1)", "Baseline(1)", "PreparePromotion(1)", "CAS(1)"],
+    "acknowledges": true
+  }
+]

@@ -15,7 +15,8 @@
     "audit": "node --experimental-strip-types audit.ts",
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "test:replicated": "node test/integration/run-rustfs.mjs"
+    "test:replicated": "node test/integration/run-rustfs.mjs",
+    "test:protocol": "python3 protocol/check.py"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1154.0",

@@ -133,6 +133,17 @@ source: ccd326c175b583b5e82893a6078f06dcef5fba3f
 binary SHA-256: 205b4c315d61a7f5709c4ab9001084eadfa8c9d36e1c198f9887417c2d88bb73
 ```
 
+## Check the bounded protocol model
+
+Run `npm run test:protocol` separately with Python and a Java runtime. It uses a
+checksum-pinned official TLC jar, preserves the original Python checker, compares
+complete common state and successor sets, and checks expected counterexamples.
+It also checks a more detailed control lifecycle with separate CAS responses.
+Normal application startup and ordinary tests do not require Java or TLC.
+
+See [the model and assumptions](protocol/README.md) and [validation evidence](protocol/VALIDATION.md).
+These bounded checks are not a proof of TypeScript correctness or production approval.
+
 ## Limits and deployment requirements
 
 Do not interpret local RustFS results as AWS consistency, IAM or production approval.
