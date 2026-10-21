@@ -1,0 +1,3 @@
+[tools]
+"github:benbjohnson/litestream" = "0.5.17"
+"github:rustfs/rustfs" = "1.0.3"

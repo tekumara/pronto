@@ -94,20 +94,13 @@ Any ownership uncertainty immediately disables readiness, aborts work and stops 
 
 ## Run the RustFS integration tests
 
-Ordinary `npm test` and `npm run check` need no Docker, storage service or tool downloads. The explicit integration command requires a Unix host, Docker, `pgrep` and a locally supplied official Litestream executable:
+Ordinary `npm test` and `npm run check` need no Docker, storage service or tool downloads. The explicit integration command requires a Unix host, `rustfs` and stock Litestream v0.5.17 on `PATH`, and `pgrep`:
 
 ```bash
-PRONTO_LITESTREAM_BIN=/absolute/path/to/litestream npm run test:replicated
+npm run test:replicated
 ```
 
-Missing prerequisites fail the command. Important tests are not silently skipped. The runner pulls only this pinned image:
-
-```text
-RustFS 1.0.3
-rustfs/rustfs@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
-```
-
-It creates a disposable localhost-only container, random local credentials, an anonymous data volume and unique buckets. It removes only that container and its anonymous volume, and stops its own test process group, including orphaned descendants. It never starts MinIO or reuses an existing object service. Test artifacts, service identities and process logs are written to a printed temporary directory. Set `PRONTO_INTEGRATION_ARTIFACTS` to an existing absolute directory to choose its location. No credentials are written to the evidence files.
+Missing prerequisites fail the command. Important tests are not silently skipped. The runner resolves stock Litestream v0.5.17 from `PATH` (including mise shims) and passes its absolute path to Pronto for the test run. It starts `rustfs server` from `PATH` on a randomly selected localhost port, with random credentials and a temporary data directory. It records the RustFS version but does not enforce one. It never uses Docker or reuses an existing object service. On exit it stops its RustFS and test process groups and removes only its temporary RustFS data. Test artifacts, service identities and process logs are written to a printed temporary directory. Set `PRONTO_INTEGRATION_ARTIFACTS` to an existing absolute directory to choose its location. No credentials are written to the evidence files.
 
 The tests exercise actual RustFS conditional requests and stock Litestream. They use signed HTTP responses, independent restored SQLite contents and integrity checks as oracles. A fault proxy delays or fails real requests; it does not implement storage semantics. GitHub and the model remain external HTTP fixtures, so tests do not post actual reviews or call paid models.
 
@@ -135,8 +128,7 @@ This first implementation does not provide per-term credential vending, automati
 
 ## Upstream references
 
-- [RustFS Docker setup](https://docs.rustfs.com/en/installation/container/docker)
-- [RustFS 1.0.3 release](https://github.com/rustfs/rustfs/releases/tag/1.0.3)
+- [RustFS releases](https://github.com/rustfs/rustfs/releases)
 - [Litestream v0.5.17 source](https://github.com/benbjohnson/litestream/tree/ccd326c175b583b5e82893a6078f06dcef5fba3f)
 - [Litestream sync reference](https://litestream.io/reference/sync/)
 - [Litestream restore reference](https://litestream.io/reference/restore/)
