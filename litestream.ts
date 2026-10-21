@@ -11,7 +11,7 @@ import { replicaURL, type ReplicaConfig, type RestorePoint } from "./s3-control.
 const exec = promisify(execFile);
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Stock v0.5.17 only. A daemon is never restarted or reset within an incarnation. */
+/** A daemon is never restarted or reset within an incarnation. */
 export class Litestream {
   private child?: ChildProcess;
   private ipcDirectory?: string;
@@ -29,10 +29,6 @@ export class Litestream {
     this.config = config; this.root = root; this.prefix = prefix; this.signal = signal; this.failed = failed;
   }
 
-  static async validate(binary: string): Promise<void> {
-    const { stdout } = await exec(binary, ["version"], { timeout: 5_000 });
-    if (!/^v?0\.5\.17(?:\s|$)/.test(stdout.trim())) throw new Error("Replicated state requires stock Litestream v0.5.17");
-  }
   async restore(source: string, plan: RestorePoint[]): Promise<void> {
     for (const { relative, txid } of plan) {
       this.signal.throwIfAborted();

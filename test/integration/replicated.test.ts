@@ -21,7 +21,7 @@ const exec = promisify(execFile);
 const relative = "repos/github.com/acme~demo.sqlite";
 const url = "https://github.com/acme/demo/pull/7";
 const body = reviewRequested("me", url);
-if (!process.env.PRONTO_S3_ENDPOINT || !process.env.PRONTO_LITESTREAM_BIN) throw new Error("Use npm run test:replicated with a stock v0.5.17 executable; real RustFS is mandatory");
+if (!process.env.PRONTO_S3_ENDPOINT || !process.env.PRONTO_LITESTREAM_BIN) throw new Error("Use npm run test:replicated; real RustFS and Litestream are mandatory");
 
 async function until<T>(check: () => Promise<T | false>, timeout = 25_000): Promise<T> {
   const end = Date.now() + timeout;

@@ -34,7 +34,7 @@ export function replicaConfig(env: NodeJS.ProcessEnv = process.env): ReplicaConf
   }
   if (env.PRONTO_S3_PATH_STYLE && !["true", "false"].includes(env.PRONTO_S3_PATH_STYLE)) throw new Error("PRONTO_S3_PATH_STYLE must be true or false");
   const binary = env.PRONTO_LITESTREAM_BIN;
-  if (!binary || !isAbsolute(binary)) throw new Error("PRONTO_LITESTREAM_BIN must be the absolute path to stock Litestream v0.5.17");
+  if (!binary || !isAbsolute(binary)) throw new Error("PRONTO_LITESTREAM_BIN must be the absolute path to a Litestream executable");
   // stateDirectory validates the override, without changing the process environment for a term.
   return { bucket: bucket!, prefix, region, endpoint, pathStyle: env.PRONTO_S3_PATH_STYLE ? env.PRONTO_S3_PATH_STYLE === "true" : !!endpoint,
     stateBase: stateDirectory(env), binary };

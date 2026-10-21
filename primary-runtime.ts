@@ -127,8 +127,6 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
     }, RENEW_MS);
     try {
       live(term);
-      await Litestream.validate(config.binary);
-      live(term);
       await mkdir(root, { recursive: false, mode: 0o700 });
       const source = acquired.record.recovery;
       const plan = source ? await storage.inventory(source) : [];

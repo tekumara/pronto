@@ -1,12 +1,12 @@
 # Experimental replicated state
 
-Use `pronto serve --replicated-state` to test term-isolated SQLite replication with stock Litestream v0.5.17 and S3-compatible storage. This is an experimental durability and ownership protocol, not production hard fencing.
+Use `pronto serve --replicated-state` to test term-isolated SQLite replication with stock Litestream and S3-compatible storage. This is an experimental durability and ownership protocol, not production hard fencing.
 
 The flag defaults to off. Without it, serve, one-shot audits and chat keep their existing local state behaviour. They do not validate replica configuration, call S3, poll a lease or start Litestream. There is no automatic migration from an existing local database into replicated mode.
 
 ## Enable the experiment
 
-Create the bucket separately. Use a new, dedicated base prefix and an absolute local state directory. Install the official Litestream v0.5.17 executable in a location you control and verify its release checksum. Pronto checks its reported version after acquisition, before recovery or replication. Standbys do not execute the binary, even for a version probe. Pronto does not verify its provenance or binary hash.
+Create the bucket separately. Use a new, dedicated base prefix and an absolute local state directory. Install an official Litestream executable in a location you control and verify its release checksum. Pronto does not require a specific version or verify its provenance or binary hash. Standbys do not execute the binary.
 
 For a disposable RustFS instance on localhost:
 
@@ -36,11 +36,11 @@ Configuration has one source of truth:
 | `PRONTO_S3_ENDPOINT` | Optional HTTP or HTTPS origin, without credentials, path or query; omit for AWS S3 |
 | `PRONTO_S3_PATH_STYLE` | Optional `true` or `false`; defaults to true with a custom endpoint, otherwise false |
 | `PRONTO_STATE_DIR` | Absolute local state base; otherwise the existing XDG state directory is used |
-| `PRONTO_LITESTREAM_BIN` | Required absolute path to stock Litestream v0.5.17 |
+| `PRONTO_LITESTREAM_BIN` | Required absolute path to a Litestream executable |
 
 This first implementation deliberately requires environment credentials. Unset `AWS_PROFILE` and `AWS_DEFAULT_PROFILE`; flagged mode rejects them so the SDK and Litestream cannot select different credential sources. It does not refresh expiring credentials or support profiles, role discovery or per-term credential vending. Credential expiry makes operations fail closed. The SDK, restore commands and dynamic replica URLs all use the same region, endpoint and addressing style. No credential is embedded in a URL or generated config.
 
-Missing or invalid environment configuration, or a missing executable, fails startup. A version mismatch prevents owned bootstrap and leaves the process unready. Storage errors also leave it unready; they never switch it into local-only operation. A missing bucket is an error, not an invitation to create infrastructure.
+Missing or invalid environment configuration, or a missing executable, fails startup. An incompatible Litestream executable or a storage error leaves the process unready; neither switches it into local-only operation. A missing bucket is an error, not an invitation to create infrastructure.
 
 ## Health and admission
 
@@ -94,19 +94,22 @@ Any ownership uncertainty immediately disables readiness, aborts work and stops 
 
 ## Run the RustFS integration tests
 
-Ordinary `npm test` and `npm run check` need no Docker, storage service or tool downloads. The explicit integration command requires a Unix host, `rustfs` and stock Litestream v0.5.17 on `PATH`, and `pgrep`:
+Ordinary `npm test` and `npm run check` need no Docker, storage service or tool downloads. The explicit integration command requires a Unix host, `mise` on `PATH`, the tools configured in `mise.toml`, and `pgrep`. Install the tools once, then run the tests:
 
 ```bash
+mise install
 npm run test:replicated
 ```
 
-Missing prerequisites fail the command. Important tests are not silently skipped. The runner resolves stock Litestream v0.5.17 from `PATH` (including mise shims) and passes its absolute path to Pronto for the test run. It starts `rustfs server` from `PATH` on a randomly selected localhost port, with random credentials and a temporary data directory. It records the RustFS version but does not enforce one. It never uses Docker or reuses an existing object service. On exit it stops its RustFS and test process groups and removes only its temporary RustFS data. Test artifacts, service identities and process logs are written to a printed temporary directory. Set `PRONTO_INTEGRATION_ARTIFACTS` to an existing absolute directory to choose its location. No credentials are written to the evidence files.
+Missing prerequisites fail the command. Important tests are not silently skipped. The runner resolves both executables with `mise which` and passes Litestream's absolute path to Pronto. `mise.toml` selects the latest Litestream release without an exact-version pin. It starts RustFS on a randomly selected localhost port, with random credentials and a temporary data directory. It never uses Docker or reuses an existing object service. On exit it stops the test process group, then RustFS, and removes only its temporary RustFS data.
+
+Logs stream directly to the terminal. Use shell redirection or CI log capture to retain them. The runner does not create an evidence directory, record binary hashes or write service identities and duplicate log files. To retain individual application-process logs, set `PRONTO_INTEGRATION_ARTIFACTS` to an existing absolute directory before running the tests.
 
 The tests exercise actual RustFS conditional requests and stock Litestream. They use signed HTTP responses, independent restored SQLite contents and integrity checks as oracles. A fault proxy delays or fails real requests; it does not implement storage semantics. GitHub and the model remain external HTTP fixtures, so tests do not post actual reviews or call paid models.
 
 The suite covers competing contenders, standby inactivity, fresh repository enrollment and restored deduplication, live compaction/fixed restores, independent baselines, interrupted bootstrap, source restore refusal, both handoff acknowledgement races, worker gating, parent crash with lease expiry, child death, ambiguous renewal and publication intent before POST. Local focused tests cover parsing, configuration refusal, path validation and HTTP admission gating.
 
-The verified Darwin arm64 Litestream release used during development has:
+Development verification used the following Darwin arm64 Litestream release. This is a record of the tested binary, not a version requirement:
 
 ```text
 version: 0.5.17
