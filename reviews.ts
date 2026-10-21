@@ -195,11 +195,11 @@ export async function fetchPullRequest(target: ReviewTarget, signal?: AbortSigna
 }
 
 /**
- * Returns an approver's login when any reviewer's latest approve, request-changes or dismiss review
+ * Returns every reviewer's login whose latest approve, request-changes or dismiss review
  * approves the PR's current head. Comment-only reviews do not change an approval.
  * An approval of an older head does not count: later commits are unreviewed.
  */
-export async function findApproval(target: ReviewTarget, headSha: string, signal?: AbortSignal): Promise<string | null> {
+export async function findApprovals(target: ReviewTarget, headSha: string, signal?: AbortSignal): Promise<string[]> {
   const client = github(signal);
   // GitHub lists reviews chronologically.
   const reviews = await client.pages<RawComment>(`/repos/${target.owner}/${target.repo}/pulls/${target.pr}/reviews?per_page=100`);
@@ -209,8 +209,9 @@ export async function findApproval(target: ReviewTarget, headSha: string, signal
       latestByReviewer.set(review.user.login.toLowerCase(), review);
     }
   }
-  const approval = [...latestByReviewer.values()].find((review) => review.state === "APPROVED" && review.commit_id === headSha);
-  return approval?.user?.login ?? null;
+  return [...latestByReviewer.values()]
+    .filter((review) => review.state === "APPROVED" && review.commit_id === headSha)
+    .map((review) => review.user!.login);
 }
 
 /** Login of the account the token belongs to: the one that receives review requests and submits audit reviews. */

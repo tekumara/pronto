@@ -175,11 +175,12 @@ process.stdout.write = function(chunk, ...args) {
   });
 }
 
-for (const { revision, cached, status, event, crash } of [
-  { revision: "headSha", cached: false, status: "uncertain", event: "APPROVE", crash: true },
-  { revision: "baseSha", cached: true, status: "outstanding", event: "COMMENT", crash: false },
+for (const { revision, cached, status, event, crash, alreadyApproved } of [
+  { revision: "headSha", cached: false, status: "uncertain", event: "APPROVE", crash: true, alreadyApproved: false },
+  { revision: "baseSha", cached: true, status: "outstanding", event: "COMMENT", crash: false, alreadyApproved: false },
+  { revision: "headSha", cached: false, status: "addressed", event: "APPROVE", crash: false, alreadyApproved: true },
 ] as const) {
-  test(`recovering a stale ${cached ? "cached" : "fresh"} approval reassesses the changed ${revision} with saved publication choices${crash ? " across another crash" : ""}`, { timeout: 20000 }, async (t) => {
+  test(`recovering a stale ${cached ? "cached" : "fresh"} approval ${alreadyApproved ? "quietly skips an already-approved head" : `reassesses the changed ${revision} with saved publication choices${crash ? " across another crash" : ""}`}`, { timeout: 20000 }, async (t) => {
     const publication = { approvalStatus: 403 as number | undefined };
     const github = githubEvidence(publication);
     const snapshots: { headSha: string; baseSha: string }[] = [];
@@ -201,6 +202,18 @@ for (const { revision, cached, status, event, crash } of [
 
     github.state[revision] = "b".repeat(40);
     publication.approvalStatus = undefined;
+    if (alreadyApproved) {
+      github.reviews.push({ ...issueComment(200, "A later audit already approved this head."), state: "APPROVED", commit_id: github.state.headSha });
+      const skipped = await f.run("", [url, ...flags]);
+      assert.match(skipped, /Skipping .*already approved by auditor/);
+      assert.doesNotMatch(skipped, /Skip comment|Review audit · Skipped|Verdict:/);
+      assert.equal(snapshots.length, 1, "recovery must not reassess an already-approved head");
+      assert.equal(github.attempts.length, 1, "recovery must retire the stale approval without posting a skip review");
+      assert.equal(github.posted.length, 0);
+      const restarted = await recoverPublisher(f, /Listening on/);
+      assert.doesNotMatch(restarted, /Recovering/, "a completed approved skip must clear its reassessment request");
+      return;
+    }
     if (crash) {
       const preload = join(f.directory, "crash-before-reassessment.cjs");
       await writeFile(preload, `const write = process.stdout.write;

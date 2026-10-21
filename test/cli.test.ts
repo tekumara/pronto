@@ -51,6 +51,8 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
         data = { html_url: discovery?.url ?? `https://github.com/acme/demo/pull/${path.split("/").at(-1)}`, title: "Selected PR", body: "", merged: false, draft, labels: labels.map((name) => ({ name })), changed_files: 0,
           head: { sha: "a".repeat(40), repo: { full_name: "acme/demo" } },
           base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } };
+      } else if (path === "/github/user") {
+        data = { login: "auditor" };
       } else if (path === "/github/graphql") {
         const chunks = [];
         for await (const chunk of request) chunks.push(chunk);
@@ -201,6 +203,8 @@ for (const { name, reviews, args, approver } of [
     if (approver) {
       assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR is already approved by ${approver} at ${headSha}.`));
       assert.doesNotMatch(output, /PR title:|Verdict:/, "an approved PR must not fetch evidence or reach the model");
+      if (approver === "auditor") assert.doesNotMatch(output, /Skip comment|Review audit · Skipped/);
+      else assert.match(output, /Skip comment would be posted/, "only your current, active approval silences the skip comment");
     } else {
       assert.match(output, /Verdict:/);
       assert.doesNotMatch(output, /Skipping/);

@@ -14,7 +14,7 @@ import { createWebhookQueue } from "./webhook-queue.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { compileExclusions } from "./exclusions.ts";
 import type { Log, LogLevel } from "./logging.ts";
-import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, fetchViewerLogin, findApproval, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
+import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, fetchViewerLogin, findApprovals, isAuditComment, parseReviewTarget, submitAuditReview, readGithubFile, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "./reviews.ts";
 
 /** The optional CLI text preserves its detailed transcript; null marks serve-only summaries. */
 type AuditLog = (level: LogLevel, message: string, cliText?: string | null) => void;
@@ -1005,8 +1005,12 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     const startedAt = new Date().toISOString();
     log("info", "Preparing · fetching GitHub evidence", null);
     const pr = await fetchPullRequest(target, context.abortSignal);
-    const skip = async (reason: string) => {
-      await outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
+    const skip = async (reason: string, { publish = true } = {}) => {
+      if (publish) await outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
+      else {
+        reason = stripControlCharacters(reason);
+        log("info", `Skipped · ${reason}`, `[audit] Skipping ${target.url}: ${reason}`);
+      }
       if (reassessment) await harness.commit((tx) => completeReassessment(tx, prKey, reassessment), context);
     };
     if (pr.merged) {
@@ -1044,9 +1048,12 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       return;
     }
     if (options.skipApproved ?? true) {
-      const approver = await findApproval(target, pr.head.sha, context.abortSignal);
-      if (approver) {
-        await skip(`PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`);
+      const approvers = await findApprovals(target, pr.head.sha, context.abortSignal);
+      if (approvers.length) {
+        const viewer = await fetchViewerLogin(context.abortSignal);
+        const ownApproval = approvers.find((login) => login.toLowerCase() === viewer.toLowerCase());
+        const approver = ownApproval ?? approvers[0]!;
+        await skip(`PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`, { publish: !ownApproval });
         return;
       }
     }

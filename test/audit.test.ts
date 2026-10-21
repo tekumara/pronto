@@ -100,17 +100,19 @@ function assessments() {
   ] };
 }
 
-for (const { name, metadata, flags = [] as string[], reason, approved = false } of [
+for (const { name, metadata, flags = [] as string[], reason, approved = false, ownApproval = false } of [
   { name: "merged", metadata: { merged: true, draft: true }, reason: "PR has already been merged." },
   { name: "draft", metadata: { draft: true, additions: 20_000 }, flags: ["--exclude", "generated"],
     reason: "PR is a draft. Use --skip-drafts=false to audit anyway." },
   { name: "labelled", metadata: { labels: [{ name: "Skip-Audit" }], additions: 20_000 },
     flags: ["--skip", "unmatched", "--skip=skip-audit", "--skip", "skip-audit"], reason: 'PR has matching skip label: "Skip-Audit".' },
   { name: "oversized", metadata: { additions: 6_000, deletions: 4_001 }, reason: "PR changes 10001 lines, more than the 10000 line limit." },
-  { name: "approved", metadata: {}, approved: true,
+  { name: "approved by another reviewer", metadata: {}, approved: true,
     reason: `PR is already approved by reviewer at ${headSha}. Use --skip-approved=false to audit anyway.` },
+  { name: "approved by you and another reviewer", metadata: {}, approved: true, ownApproval: true,
+    reason: `PR is already approved by AuDiToR at ${headSha}. Use --skip-approved=false to audit anyway.` },
 ]) {
-  for (const chat of [false, true]) test(`${chat ? "chat" : "CLI"} previews the skip reason for a ${name} PR and posts it only with --apply`, { timeout: 20000 }, async (t) => {
+  for (const chat of [false, true]) test(`${chat ? "chat" : "CLI"} ${ownApproval ? "logs your approval without posting, even when another reviewer also approved" : `previews the skip reason for a PR that is ${name} and posts it only with --apply`}`, { timeout: 20000 }, async (t) => {
     const requests: string[] = [];
     const posted: { event: string; commit_id: string; body: string }[] = [];
     const f = await fixture(t, () => assert.fail("Skipped PRs must not reach the model"), {
@@ -127,7 +129,8 @@ for (const { name, metadata, flags = [] as string[], reason, approved = false } 
           json({ html_url: `${prUrl}#pullrequestreview-1` });
         } else if (path === "/github/user") json({ login: "auditor" });
         else if (path === "/github/repos/acme/demo/pulls/7/reviews" && approved) {
-          json([{ user: { login: "reviewer" }, state: "APPROVED", commit_id: headSha }]);
+          json([{ user: { login: "reviewer" }, state: "APPROVED", commit_id: headSha },
+            ...(ownApproval ? [{ user: { login: "AuDiToR" }, state: "APPROVED", commit_id: headSha }] : [])]);
         } else {
           assert.equal(path, "/github/repos/acme/demo/pulls/7", "skipped PRs need no review or code evidence");
           json({ ...metadata, head: { sha: headSha, repo: null }, base: { sha: baseSha, repo: null } });
@@ -140,19 +143,28 @@ for (const { name, metadata, flags = [] as string[], reason, approved = false } 
     };
     const preview = await run(false);
     assert.ok(preview.includes(`[audit] Skipping ${prUrl}: ${reason}`));
-    assert.ok(preview.includes(`## Review audit · Skipped\n\n${reason}`));
-    assert.match(preview, /Skip comment would be posted/);
-    assert.deepEqual(requests, ["GET /github/repos/acme/demo/pulls/7", ...(approved ? ["GET /github/repos/acme/demo/pulls/7/reviews"] : [])]);
+    if (ownApproval) assert.doesNotMatch(preview, /Review audit · Skipped|Skip comment/);
+    else {
+      assert.ok(preview.includes(`## Review audit · Skipped\n\n${reason}`));
+      assert.match(preview, /Skip comment would be posted/);
+    }
+    assert.deepEqual(requests, ["GET /github/repos/acme/demo/pulls/7", ...(approved ? ["GET /github/repos/acme/demo/pulls/7/reviews", "GET /github/user"] : [])]);
     assert.equal(posted.length, 0);
 
     const applied = await run(true);
     assert.doesNotMatch(applied, /Verdict:|Resuming saved snapshot|Reusing saved assessment|PR approved/);
-    assert.ok(applied.includes(`Skip comment posted to the PR: ${prUrl}#pullrequestreview-1`));
-    assert.equal(posted.length, 1);
-    assert.equal(posted[0]!.event, "COMMENT", "--approve must never approve a skipped PR");
-    assert.equal(posted[0]!.commit_id, headSha);
-    assert.ok(posted[0]!.body.includes(`## Review audit · Skipped\n\n${reason}`));
-    assert.match(posted[0]!.body, /<!-- pronto:publication:[a-f0-9]{64} -->\n<!-- pronto:review-audit -->$/);
+    assert.ok(applied.includes(`[audit] Skipping ${prUrl}: ${reason}`));
+    if (ownApproval) {
+      assert.equal(posted.length, 0, "your existing approval must not cause a skip review");
+      assert.doesNotMatch(applied, /Review audit · Skipped|Skip comment/);
+    } else {
+      assert.ok(applied.includes(`Skip comment posted to the PR: ${prUrl}#pullrequestreview-1`));
+      assert.equal(posted.length, 1);
+      assert.equal(posted[0]!.event, "COMMENT", "--approve must never approve a skipped PR");
+      assert.equal(posted[0]!.commit_id, headSha);
+      assert.ok(posted[0]!.body.includes(`## Review audit · Skipped\n\n${reason}`));
+      assert.match(posted[0]!.body, /<!-- pronto:publication:[a-f0-9]{64} -->\n<!-- pronto:review-audit -->$/);
+    }
   });
 }
 

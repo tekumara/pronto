@@ -38,7 +38,9 @@ function github(user: (response: ServerResponse) => void = (response) => respons
         head: { sha: headSha, repo: { full_name: "acme/demo" } }, base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
     }
     assert.ok([`${pull}/comments`, `${pull}/reviews`, `${pull}/files`, `${repository}/issues/${number}/comments`].includes(path), path);
-    json(path === `${repository}/issues/${number}/comments` ? comments : []);
+    json(path === `${pull}/reviews` ? reviews.map((review, index) => ({
+      ...review, id: index + 1, user: { login: "Me" }, state: review.event === "APPROVE" ? "APPROVED" : "COMMENTED",
+    })) : path === `${repository}/issues/${number}/comments` ? comments : []);
   };
   return { handler, reviews, requests, state };
 }
@@ -156,21 +158,35 @@ for (const { migration, apply, verbose, outcome } of [
     const gh = github(undefined, [{ id: 1, body: "Please check compatibility and failure handling.", html_url: evidence,
       user: { login: "reviewer" }, created_at: "2026-01-01T00:00:00Z" }]);
     const statuses = migration ? ["addressed", "outstanding", "uncertain", "not-actionable"] : ["addressed", "not-actionable"];
-    const f = await fixture(t, (_body, response) => tool(response, "report_review_assessment", {
-      databaseMigration: migration ? { status: "migration", reason: "Adds a database column." } : noDatabaseMigration,
-      assessments: [{ commentKey: "comment:1", findings: statuses.map((status) => ({
-        summary: `A ${status} finding`, status, reason: "Assessment supplied by the model fixture.", awaiting: "reviewer", evidence: [evidence],
-      })) }],
-    }), { entrypoint: resolve("audit.ts"), github: gh.handler });
+    let modelCalls = 0;
+    const f = await fixture(t, (_body, response) => {
+      modelCalls++;
+      tool(response, "report_review_assessment", {
+        databaseMigration: migration ? { status: "migration", reason: "Adds a database column." } : noDatabaseMigration,
+        assessments: [{ commentKey: "comment:1", findings: statuses.map((status) => ({
+          summary: `A ${status} finding`, status, reason: "Assessment supplied by the model fixture.", awaiting: "reviewer", evidence: [evidence],
+        })) }],
+      });
+    }, { entrypoint: resolve("audit.ts"), github: gh.handler });
     const run = f.start(["serve", "--port", "0", "--approve", ...(apply ? ["--apply"] : []), ...(verbose ? ["--verbose"] : [])], { env });
     const out = watchOutput(run.child);
     const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
     assert.equal((await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).status, 202);
     await out.until(new RegExp(`INFO\\s+acme/demo#7\\s+${outcome}`));
+    if (apply) {
+      const mention = JSON.stringify({ action: "created", sender: { login: "author" }, comment: { body: "Another look, @me?", user: { login: "author" } },
+        issue: { html_url: prUrl, pull_request: { html_url: prUrl } } });
+      assert.equal((await deliver(`http://127.0.0.1:${port}`, mention, { event: "issue_comment" })).status, 202);
+      await out.until(/Skipped · PR is already approved/);
+      assert.equal((await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).status, 202);
+      // The second skip cannot run until the first finishes, so a stray skip POST is observable.
+      await out.until(/Skipped · PR is already approved[\s\S]*Skipped · PR is already approved/);
+    }
     run.child.kill("SIGTERM");
     const result = await run.done;
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(gh.reviews.length, apply ? 1 : 0);
+    assert.equal(gh.reviews.length, apply ? 1 : 0, "later mentions and review requests must not post skip reviews after approval");
+    assert.equal(modelCalls, 1, "an approved head must not be reassessed for later requests");
     if (apply) assert.equal(gh.reviews[0]!.event, "APPROVE");
     else assert.match(result.stdout, /previews only, add --apply to submit reviews/);
     assert.match(result.stdout, migration
