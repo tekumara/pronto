@@ -92,6 +92,22 @@ If takeover precedes the post-upload GET, an old-prefix upload cannot produce a 
 
 Any ownership uncertainty immediately disables readiness, aborts work and stops the child. Shutdown closes owned storage and conditionally releases ownership while retaining recovery information. There is no required final flush: acknowledged durability does not depend on a graceful exit. Control writes are not blindly retried with a new ETag. A lost write response ends the local term; cleanup can release only its own unique term after a fresh read.
 
+## Check a live failover
+
+For a manual CLI smoke test, start RustFS separately (for example, `make s3`) and create the bucket first. Export a fresh base prefix and the same S3 credentials used by RustFS, along with Pronto's usual GitHub/model credentials and webhook secret. Then run:
+
+```bash
+export PRONTO_REPLICA_URL=s3://pronto-test/failover
+export PRONTO_S3_ENDPOINT=http://127.0.0.1:9000
+export PRONTO_S3_PATH_STYLE=true
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=pronto-local
+export AWS_SECRET_ACCESS_KEY=pronto-local-secret
+node test/integration/check-live-failover.mjs
+```
+
+The script starts two real `pronto serve --replicated-state` processes with separate local state directories, checks that one is ready and the other is standby, then force-kills the owner and waits up to 45 seconds for takeover. It sends no webhook. Each run appends a unique remote prefix beneath `PRONTO_REPLICA_URL`; remote data is retained. It resolves Litestream from `PATH` (or accepts `PRONTO_LITESTREAM_BIN`) and leaves process logs in a printed temporary directory.
+
 ## Run the RustFS integration tests
 
 Ordinary `npm test` and `npm run check` need no Docker, storage service or tool downloads. The explicit integration command requires a Unix host, `mise` on `PATH`, the tools configured in `mise.toml`, and `pgrep`. Install the tools once, then run the tests:

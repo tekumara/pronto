@@ -19,6 +19,31 @@ type Term = {
   serial: Promise<unknown>; child: Litestream; auditor?: Auditor; timer?: NodeJS.Timeout;
 };
 
+/** Summarize SDK/transport causes without dumping request objects, credentials or signed URLs. */
+function controlErrorDetails(error: unknown): string {
+  const pending = [error];
+  const seen = new Set<unknown>();
+  const details: string[] = [];
+  while (pending.length && seen.size < 10) {
+    const failure = pending.shift();
+    if (seen.has(failure)) continue;
+    seen.add(failure);
+    if (!(failure instanceof Error)) { details.push(String(failure)); continue; }
+    const fields = failure as NodeJS.ErrnoException & { $metadata?: { httpStatusCode?: number } };
+    const metadata = [fields.code ? `code=${fields.code}` : "", fields.$metadata?.httpStatusCode ? `HTTP ${fields.$metadata.httpStatusCode}` : ""].filter(Boolean);
+    details.push(`${failure.name}: ${failure.message}${metadata.length ? ` (${metadata.join(", ")})` : ""}`);
+    if (failure.cause !== undefined) pending.push(failure.cause);
+    if (failure instanceof AggregateError) pending.push(...failure.errors.slice(0, 10));
+  }
+  let text = details.join("; caused by: ");
+  for (const key of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]) {
+    const secret = process.env[key];
+    if (secret) text = text.replaceAll(secret, "[REDACTED]");
+  }
+  return text.replace(/\b(?:https?|s3):\/\/[^\s"'<>]+/gi, "[REDACTED URL]")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 2_000);
+}
+
 /**
  * Experimental single-primary lifecycle. Standby has no auditor, database or child.
  * Every callback captures a Term; no old callback reads the next term's root or socket.
@@ -158,7 +183,7 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
   const loop = (async () => {
     while (!stopping) {
       try { await attempt(); }
-      catch { options.log("warn", "replication", "Control storage unavailable; remaining unready"); }
+      catch (error) { options.log("warn", "replication", `Control storage unavailable; remaining unready: ${controlErrorDetails(error)}`); }
       if (!stopping) await new Promise<void>((resolve) => {
         const done = () => { clearTimeout(timer); stopped.signal.removeEventListener("abort", done); resolve(); };
         const timer = setTimeout(done, 1_000);
