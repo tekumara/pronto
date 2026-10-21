@@ -195,6 +195,14 @@ Add `--verbose` to include ignored deliveries, duplicates, coalesced requests, d
 
 Retries, failures, recovery and shutdown messages remain visible without `--verbose`. Warnings and errors go to stderr; activity and debug messages go to stdout. For example, capture both with `pronto serve --apply 2>&1 | tee -a pronto.log`.
 
+### Webhook reliability
+
+In serve mode, Pronto saves accepted audit requests before returning `202`. Waiting work and one queued rerun per PR survive restarts. Delivery deduplication also survives restarts, within the last 1000 accepted delivery IDs per repository.
+
+With `--apply`, Pronto saves verdict and skip-reason publication as durable tasks. Startup resumes pending publications without running the model again, including assessments first published from the cache. If an approval's head or base commit has changed, Pronto retires that publication and runs a fresh assessment with its saved publication choices. Preview-only assessments do not become pending writes when the server restarts with different flags.
+
+GitHub submission and local storage are not one transaction. After an ambiguous POST, Pronto checks remote reviews for the saved author, head, review type, body and fingerprint before retrying. This reduces duplicates but does not guarantee exactly-once publication. See [serve mode recovery and limits](#stopping-and-restarting).
+
 ### How deliveries are handled
 
 - **Verification.** The server checks the `X-Hub-Signature-256` signature over the raw body, in constant time, before it reads the payload. Bodies over 5 MiB are refused. GitHub's signature has no timestamp, so a captured delivery can be replayed. A replay only repeats an audit that GitHub reported, and the cache and verdict history stop it posting again.
