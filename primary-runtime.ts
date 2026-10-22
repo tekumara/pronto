@@ -111,14 +111,18 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
     await term.serial;
     // Stop writing first. Preserve the complete pointer, even if promotion's response was lost.
     // A fresh read may authorize this NEW operation only for our unique, never-reused term.
+    // Do not retry an uncertain release; takeover can use the current control record or lease expiry.
     try {
       const current = await storage.read();
       if (current?.record.owner === term.id
         && ((current.record.phase === "ready" && current.record.recovery === term.prefix)
           || (current.record.phase === "bootstrapping" && current.record.recovery === term.head.record.recovery))) {
         await storage.write({ ...current.record, revision: randomUUID(), owner: null, phase: "idle", expires: 0 }, current);
+        options.log("info", "replication", `Released owner term ${term.id}`);
       }
-    } catch { /* Never clobber a successor or retry an uncertain release. Expiry permits takeover. */ }
+    } catch (error) {
+      options.log("warn", "replication", `Could not confirm release of owner term ${term.id}; takeover will rely on the current control record or lease expiry: ${controlErrorDetails(error)}`);
+    }
     if (active === term) active = undefined;
   }
   async function attempt(): Promise<void> {
@@ -138,6 +142,7 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
       cancellation, lost: Promise.withResolvers<void>(), serial: Promise.resolve(),
       child: new Litestream(config, root, prefix, cancellation.signal, (error) => lose(term, error), options.log) };
     active = term;
+    options.log("info", "replication", `Acquired owner term ${id}; bootstrapping`);
     term.timer = setInterval(() => {
       try { live(term); } catch { return; }
       // Serialize renewal with promotion; a failed mutation ends the term rather than rebasing a stale update.
