@@ -8,18 +8,20 @@ GitHub recovery alone does not retry a terminal failed publication.
 
 ## Run the checks
 
-Use Python 3.10 or later and Java 17 through 29. Normal application startup,
-`npm test` and `npm run check` do not load Java or download TLC.
+Use Python 3.10 or later and mise. The project pins Temurin Java 21 in
+`mise.toml`. `tlc.py` uses `JAVA_HOME`, falling back to `java` on `PATH`; the
+protocol npm scripts do not activate mise themselves. Run them from a mise-activated
+shell or prefix them with `mise exec java --` to supply the pinned runtime. Mise
+installs Java on first use; run `mise install java` to install it ahead of time.
+Normal application startup, `npm test` and `npm run check` do not load Java or
+download TLC.
 
 ```bash
-# Probe a real runtime: macOS /usr/bin/java may only be a launcher.
-java -version
-# Optional overrides. Neither changes global configuration.
-export PRONTO_PROTOCOL_JAVA=/absolute/path/to/java
+# Optional: choose a dedicated cache for TLC and generated evidence.
 export PRONTO_PROTOCOL_CACHE=/absolute/path/to/dedicated/cache
-npm run test:protocol
+mise exec java -- npm run test:protocol
 # Optional shorter run: only the conditional liveness companion.
-npm run test:protocol:liveness
+mise exec java -- npm run test:protocol:liveness
 
 export PRONTO_LITESTREAM_BIN=/absolute/path/to/official/litestream
 npm run check
@@ -37,8 +39,8 @@ Official release SHA-1: ed814d7792505bbd141096ae66a0c4c5d878d951
 ```
 
 The SHA-256 was measured after matching the release's published SHA-1. This pins
-bytes; it is not independent release-signature verification. Supply Java yourself.
-The report records the isolated, checksum-verified Temurin runtime used here.
+bytes; it is not independent release-signature verification. Mise supplies the
+project-pinned Temurin runtime from its managed tool directory.
 
 The gate uses breadth-first TLC model checking, one worker, fingerprint polynomial
 0 and a 2 GB heap. It does not use simulation, depth caps, state constraints,

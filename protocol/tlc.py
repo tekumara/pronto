@@ -32,10 +32,10 @@ def command(out):
             require(sha(download) == JAR_SHA, "Official TLC download integrity failure")
             download.replace(jar)
     require(sha(jar) == JAR_SHA, f"TLC cache integrity failure: {jar}")
-    java = os.environ.get("PRONTO_PROTOCOL_JAVA") or (
-        str(Path(os.environ["JAVA_HOME"]) / "bin/java") if os.environ.get("JAVA_HOME") else "java")
+    java = str(Path(os.environ["JAVA_HOME"]) / "bin/java") if os.environ.get("JAVA_HOME") else "java"
     probe = subprocess.run([java, "-version"], text=True, capture_output=True, timeout=15)
-    require(probe.returncode == 0, "No usable Java runtime. Set PRONTO_PROTOCOL_JAVA; see protocol/README.md")
+    require(probe.returncode == 0,
+            "No usable Java runtime. Run `mise install java`; see protocol/README.md")
     version = probe.stdout + probe.stderr
     require(re.search(r'version "(?:17|18|19|2\d)(?:\.|\")', version), "Use Java 17 through 29")
     (out / "toolchain.json").write_text(json.dumps({"java": version, "jar": JAR_URL, "sha256": JAR_SHA}, indent=2))

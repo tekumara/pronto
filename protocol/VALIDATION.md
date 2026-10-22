@@ -37,10 +37,10 @@ credential belongs in the repository.
 ## Commands and tool identity
 
 ```bash
+mise install java
 export PRONTO_PROTOCOL_CACHE=/tmp/pronto-protocol-cache
-export PRONTO_PROTOCOL_JAVA=/tmp/pronto-tla-tools/jdk-21.0.12.1+1-jre/Contents/Home/bin/java
 export PRONTO_LITESTREAM_BIN=/tmp/pronto-litestream-validation.yliWyM/bin/litestream
-npm run test:protocol
+mise exec java -- npm run test:protocol
 npm run check
 npm test
 npm run test:replicated
@@ -52,6 +52,9 @@ initially failed because no runtime was installed. An isolated official Temurin
 21.0.12.1+1 JRE was downloaded into `/tmp/pronto-tla-tools`, without global changes.
 Its `OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12.1_1.tar.gz` SHA-256 matched the
 Adoptium metadata: `dec50fc6f9fcd4fe3ae8cabf5a5fa68f6afc48841f7698e468e9aa5d54beed84`.
+The protocol npm scripts invoke Python directly. For these recorded runs, mise
+supplied the project-pinned Temurin 21 through `JAVA_HOME`; the checker no longer
+needs a separate Java path override.
 The pinned v1.8.0 TLC jar identified itself as
 `TLC2 Version 2026.10.20.183001 (rev: d2e1472)`. Its SHA-256 and official published
 SHA-1 matched those in [the reproduction instructions](README.md).

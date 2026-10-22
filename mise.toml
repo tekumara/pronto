@@ -1,3 +1,4 @@
 [tools]
+java = "temurin-21"
 "github:benbjohnson/litestream" = "latest"
 "github:rustfs/rustfs" = "1.0.3"
