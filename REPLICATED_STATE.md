@@ -50,7 +50,17 @@ Missing or invalid environment configuration, or a missing executable, fails sta
 
 There is no request forwarding, redirect, discovery address or proxy-header protocol. Send requests only to a ready process using your own deployment arrangement. Both health paths are reserved from `--webhook-path`.
 
-A standby does not create an auditor, open repository databases, start Litestream or resume tasks. It polls the control record once a second. An owner renews every 5 seconds with a 30-second lease and a conservative 5-second local margin. Ownership changes at the successful conditional control write, not when another process decides that a clock has expired. Deployment clocks must be synchronised. These constants are intentionally not a configurable election framework.
+A standby does not create an auditor, open repository databases, start Litestream or resume tasks. It polls the control record and tries to acquire ownership only after the stored lease expires. An owner renews while bootstrapping and while ready. The current timings are:
+
+| Timing | Value | Code |
+| --- | --- | --- |
+| Lease duration | 30 seconds | `LEASE_MS` |
+| Owner renewal interval | 5 seconds | `RENEW_MS` |
+| Local owner deadline | 25 seconds after a renewal starts | `Term.deadline`, calculated as `start + LEASE_MS - MARGIN_MS` |
+| Safety margin | 5 seconds | `MARGIN_MS` |
+| Standby poll wait | 1 second between attempts, plus S3 request time | Inline `1_000` delay; no named constant |
+
+If an owner reaches its local deadline without a confirmed renewal, it treats ownership as uncertain and stops admission and work. The standby waits for the stored S3 expiry before trying to acquire ownership. Ownership changes at the successful conditional control write, not just when another process decides that a clock has expired. Deployment clocks must be synchronised. These timings are fixed in code, not a configurable election framework.
 
 ## Ownership and recovery
 
