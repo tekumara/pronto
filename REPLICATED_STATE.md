@@ -138,10 +138,15 @@ binary SHA-256: 205b4c315d61a7f5709c4ab9001084eadfa8c9d36e1c198f9887417c2d88bb73
 Run `npm run test:protocol` separately with Python and a Java runtime. It uses a
 checksum-pinned official TLC jar, preserves the original Python checker, compares
 complete common state and successor sets, and checks expected counterexamples.
-It also checks a more detailed control lifecycle with separate CAS responses.
+It also checks a more detailed control lifecycle with separate CAS responses,
+plus conditional liveness under explicit recovery and scheduling assumptions.
+Use `npm run test:protocol:liveness` to run only the liveness companion.
 Normal application startup and ordinary tests do not require Java or TLC.
 
-See [the model and assumptions](protocol/README.md) and [validation evidence](protocol/VALIDATION.md).
+See [the model and assumptions](protocol/README.md), [safety evidence](protocol/VALIDATION.md)
+and [conditional liveness results](protocol/LIVENESS.md). A failed publication is
+not automatically retried just because GitHub recovers; it needs another eligible
+audit request or startup recovery.
 These bounded checks are not a proof of TypeScript correctness or production approval.
 
 ## Limits and deployment requirements

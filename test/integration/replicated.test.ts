@@ -81,7 +81,9 @@ async function proxy(t: TestContext) {
 
 function github() {
   const posts: object[] = [];
+  const attempts: object[] = [];
   const requests: string[] = [];
+  let reviewStatus = 200;
   let beforePost: (() => Promise<void>) | undefined;
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
     const path = req.url!.split("?")[0]!;
@@ -92,14 +94,20 @@ function github() {
     if (req.method === "POST" && path.endsWith("/reviews")) {
       await beforePost?.();
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
-      posts.push(JSON.parse(Buffer.concat(chunks).toString()));
+      const review = JSON.parse(Buffer.concat(chunks).toString());
+      attempts.push(review);
+      res.statusCode = reviewStatus;
+      if (reviewStatus >= 300) return json({ message: "GitHub temporarily unavailable" });
+      posts.push(review);
       return json({ html_url: `${url}#pullrequestreview-${posts.length}` });
     }
     if (/\/pulls\/\d+$/.test(path)) return json({ title: "Replicated PR", body: "", merged: false, draft: false, labels: [], changed_files: 0,
       head: { sha: "a".repeat(40), repo: { full_name: "acme/demo" } }, base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
     return json([]);
   };
-  return { handler, posts, requests, set beforePost(value: typeof beforePost) { beforePost = value; } };
+  return { handler, posts, attempts, requests,
+    set reviewStatus(value: number) { reviewStatus = value; },
+    set beforePost(value: typeof beforePost) { beforePost = value; } };
 }
 async function app(t: TestContext, config: ReplicaConfig, endpoint = config.endpoint,
   respond: Parameters<typeof fixture>[1] = (_body, response) => tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] })) {
@@ -347,6 +355,21 @@ for (const schedule of admissionSchedules) test(schedule.name, { timeout: 70_000
   }
 });
 
+// Reads actual committed application state, never supplies receipts or callback ordering.
+async function publications(path: string) {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.equal(db.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
+    const document = db.prepare("SELECT id FROM documents WHERE json_extract(record, '$.kind')='app.audit-publications'").get();
+    if (!document) return undefined;
+    const revisions = db.prepare("SELECT kind, content FROM document_revisions WHERE document_id=? ORDER BY seq").all(document.id!);
+    const { apply } = await import("@earendil-works/chord/delta");
+    let value: any;
+    for (const revision of revisions) value = revision.kind === "base" ? JSON.parse(String(revision.content)) : apply(value, JSON.parse(String(revision.content)));
+    return Object.values(value.pending) as { attempted: boolean; failed: boolean; intent: { choices: { apply: boolean } } }[];
+  } finally { db.close(); }
+}
+
 // The GitHub POST itself is the observation point: independent remote restore must already contain attempted=true.
 test("publication attempt marker is independently restorable before GitHub POST", { timeout: 70_000 }, async (t) => {
   const { config, storage, directory } = await store(t);
@@ -356,22 +379,14 @@ test("publication attempt marker is independently restorable before GitHub POST"
     const head = (await storage.read())!;
     const point = (await storage.inventory(head.record.recovery!))[0]!;
     const path = await restore(config, head.record.recovery!, relative, point.txid, join(directory, "before-post"));
-    const db = new DatabaseSync(path, { readOnly: true });
     try {
-      assert.equal(db.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
-      const document = db.prepare("SELECT id FROM documents WHERE json_extract(record, '$.kind')='app.audit-publications'").get();
-      assert.ok(document, JSON.stringify(db.prepare("SELECT kind, record FROM documents").all()));
-      const revisions = db.prepare("SELECT kind, content FROM document_revisions WHERE document_id=? ORDER BY seq").all(document.id!);
-      const { apply } = await import("@earendil-works/chord/delta");
-      let value: any;
-      for (const revision of revisions) value = revision.kind === "base" ? JSON.parse(String(revision.content)) : apply(value, JSON.parse(String(revision.content)));
-      const pending = Object.values(value.pending) as { attempted: boolean; intent: { choices: { apply: boolean } } }[];
+      const pending = await publications(path);
+      assert.ok(pending, "independently restored database must contain the publication");
       assert.equal(pending.length, 1);
       assert.equal(pending[0]!.attempted, true);
       assert.equal(pending[0]!.intent.choices.apply, true);
       checked.resolve();
     } catch (error) { checked.reject(error); throw error; }
-    finally { db.close(); }
   };
   const run = await a.start(true); await ready(run.base);
   assert.equal((await deliver(run.base, body)).status, 202);
@@ -395,15 +410,47 @@ test("an unconfirmed publication attempt cannot send the GitHub review POST", { 
   const owner = (await storage.read())!.record.owner!;
   assert.equal((await deliver(run.base, body)).status, 202);
   await until(async () => (await fetch(`${run.base}/readyz`)).status === 503);
-  const db = new DatabaseSync(repositoryDatabasePath(join(a.f.stateDir, "terms", owner), relative), { readOnly: true });
-  try {
-    const revisions = db.prepare("SELECT r.kind, r.content FROM document_revisions r JOIN documents d ON d.id=r.document_id WHERE json_extract(d.record, '$.kind')='app.audit-publications' ORDER BY r.seq").all();
-    const { apply } = await import("@earendil-works/chord/delta");
-    let value: any;
-    for (const revision of revisions) value = revision.kind === "base" ? JSON.parse(String(revision.content)) : apply(value, JSON.parse(String(revision.content)));
-    assert.ok(value && Object.values(value.pending).some((item: any) => item.attempted === true), "the attempted marker really committed locally before the failed barrier");
-  } finally { db.close(); }
+  const pending = await publications(repositoryDatabasePath(join(a.f.stateDir, "terms", owner), relative));
+  assert.ok(pending?.some((item) => item.attempted), "the attempted marker really committed locally before the failed barrier");
   assert.equal(a.gh.posts.length, 0);
+  await run.stop();
+});
+
+// Authoring gate: startup-retry CLI tests do not exercise a live primary whose
+// GitHub outage heals without restart. A terminal publication stays pending;
+// another actual webhook re-admits it. No production retry seam or fake receipt.
+test("GitHub recovery alone leaves failed publication pending; a new webhook retries it in the same term", { timeout: 70_000 }, async (t) => {
+  const { config, storage } = await store(t);
+  let modelCalls = 0;
+  const a = await app(t, config, config.endpoint, (_body, response) => {
+    modelCalls++;
+    tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
+  });
+  a.gh.reviewStatus = 503;
+  const run = await a.start(true); await ready(run.base);
+  const owner = (await storage.read())!.record.owner!;
+  const path = repositoryDatabasePath(join(a.f.stateDir, "terms", owner), relative);
+  assert.equal((await deliver(run.base, body, { id: "failed-publication" })).status, 202);
+  await until(async () => (await publications(path))?.some((item) => item.failed && item.attempted) ?? false);
+  assert.equal(a.gh.attempts.length, 1);
+  assert.equal(a.gh.posts.length, 0);
+
+  // Observe a real successful lease renewal after GitHub heals, not just a sleep.
+  a.gh.reviewStatus = 200;
+  const before = (await storage.read())!;
+  await until(async () => (await storage.read())!.record.revision !== before.record.revision);
+  const after = (await storage.read())!;
+  assert.equal(after.record.owner, owner);
+  assert.equal((await fetch(`${run.base}/readyz`)).status, 200);
+  assert.equal(a.gh.attempts.length, 1, "a healthy primary does not automatically rerun a terminal publisher");
+  assert.ok((await publications(path))?.some((item) => item.failed));
+
+  assert.equal((await deliver(run.base, body, { id: "retry-publication" })).status, 202);
+  await until(async () => a.gh.posts.length === 1);
+  await until(async () => (await publications(path))?.length === 0);
+  assert.equal(a.gh.attempts.length, 2);
+  assert.equal(modelCalls, 1, "re-admission publishes the saved assessment rather than requiring a new model result");
+  assert.equal((await storage.read())!.record.owner, owner);
   await run.stop();
 });
 

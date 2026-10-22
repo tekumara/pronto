@@ -5,68 +5,34 @@ Authoring gate: independent safety contract and cross-language transition relati
 regressions include reordered observation, missing baseline and rebased stale CAS.
 No production seam, source greps or simulated S3. DOT is TLC's actual state graph.
 """
-import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 import re
 import sys
 import subprocess
 import tempfile
-import urllib.request
 from collections import deque
+
+sys.dont_write_bytecode = True
+from tlc import command, require, sha
 
 ROOT = Path(__file__).resolve().parent
 ORACLE_SHA = "7f4d1337fb39411d96988f4ae3fa332267e4293d6673d82c939cb0f014337374"
-JAR_SHA = "5bd7b64db99ae4c6c35f290de5e809c0ee41af43f8699cf696099ffb6452b1e2"
-JAR_URL = "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar"
-CACHE = Path(os.environ.get("PRONTO_PROTOCOL_CACHE", Path.home() / ".cache/pronto-protocol"))
 OUT = Path(tempfile.mkdtemp(prefix="pronto-protocol-"))
 # Only tool results go in OUT. Never put generated graphs/Java/jars in the repo.
 print(f"Protocol evidence: {OUT}", flush=True)
 
 
-def require(condition, message):
-    if not condition:
-        raise RuntimeError(message)
-
-
-def sha(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 require(len(sys.argv) == 1, "test:protocol accepts no arguments; edit the reviewed finite .cfg files for a new bound")
 require(sha(ROOT / "oracle/check_protocol.py") == ORACLE_SHA, "Original oracle changed")
-INPUTS = [ROOT / "PrefixProtocol.tla", ROOT / "check.py", ROOT / "schedules.json", ROOT / "oracle/check_protocol.py", *sorted(ROOT.glob("*.cfg"))]
+INPUTS = [ROOT / "PrefixProtocol.tla", ROOT / "check.py", ROOT / "tlc.py", ROOT / "schedules.json", ROOT / "oracle/check_protocol.py", *sorted(ROOT.glob("*.cfg"))]
 INPUT_HASHES = {str(p.relative_to(ROOT)): sha(p) for p in INPUTS}
 spec = importlib.util.spec_from_file_location("oracle", ROOT / "oracle/check_protocol.py")
 oracle = importlib.util.module_from_spec(spec)
 sys.dont_write_bytecode = True
 sys.modules[spec.name] = oracle
 spec.loader.exec_module(oracle)
-
-
-def tool():
-    CACHE.mkdir(parents=True, exist_ok=True)
-    jar = CACHE / "tla2tools-1.8.0.jar"
-    if not jar.exists():
-        # Download to a private temporary file, verify BEFORE publishing cache entry.
-        with tempfile.TemporaryDirectory(dir=CACHE) as directory:
-            download = Path(directory) / "download.jar"
-            urllib.request.urlretrieve(JAR_URL, download)
-            require(sha(download) == JAR_SHA, "Official TLC download integrity failure")
-            download.replace(jar)
-    require(sha(jar) == JAR_SHA, f"TLC cache integrity failure: {jar}")
-    java = os.environ.get("PRONTO_PROTOCOL_JAVA") or (
-        str(Path(os.environ["JAVA_HOME"]) / "bin/java") if os.environ.get("JAVA_HOME") else "java")
-    probe = subprocess.run([java, "-version"], text=True, capture_output=True, timeout=15)
-    require(probe.returncode == 0, "No usable Java runtime. Set PRONTO_PROTOCOL_JAVA; see protocol/README.md")
-    version = probe.stdout + probe.stderr
-    require(re.search(r'version "(?:17|18|19|2\d)(?:\.|\")', version), "Use Java 17 through 29")
-    (OUT / "toolchain.json").write_text(json.dumps({"java": version, "jar": JAR_URL, "sha256": JAR_SHA}, indent=2))
-    return [java, "-XX:+UseParallelGC", "-Xmx2g", "-cp", str(jar), "tlc2.TLC",
-            "-workers", "1", "-fp", "0", "-noGenerateSpecTE"]
 
 
 # Strict parser for the value subset emitted by this spec's DOT labels. No eval.
@@ -202,7 +168,7 @@ def same_graph(expected_states, expected_edges, actual_states, actual_edges):
 
 
 COUNTS = []
-CMD = tool()
+CMD = command(OUT)
 
 
 def tlc(name, expected=None, graph=False):

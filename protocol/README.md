@@ -1,8 +1,10 @@
 # Replicated-state protocol validation
 
-This directory checks bounded safety of Pronto's opt-in replicated-state protocol.
-It does not prove the TypeScript implementation correct or approve a deployment.
-See [the validation report](VALIDATION.md) for results, counts and qualifications.
+This directory checks bounded safety and conditional liveness of Pronto's opt-in
+replicated-state protocol. It does not prove the TypeScript implementation correct
+or approve a deployment. See the [safety validation report](VALIDATION.md) and
+[conditional liveness checks](LIVENESS.md) for results and assumptions. In particular,
+GitHub recovery alone does not retry a terminal failed publication.
 
 ## Run the checks
 
@@ -16,6 +18,8 @@ java -version
 export PRONTO_PROTOCOL_JAVA=/absolute/path/to/java
 export PRONTO_PROTOCOL_CACHE=/absolute/path/to/dedicated/cache
 npm run test:protocol
+# Optional shorter run: only the conditional liveness companion.
+npm run test:protocol:liveness
 
 export PRONTO_LITESTREAM_BIN=/absolute/path/to/official/litestream
 npm run check
@@ -39,8 +43,10 @@ The report records the isolated, checksum-verified Temurin runtime used here.
 The gate uses breadth-first TLC model checking, one worker, fingerprint polynomial
 0 and a 2 GB heap. It does not use simulation, depth caps, state constraints,
 symmetry reduction or `-continue`. Each invocation has a 900-second timeout.
-Safe runs require exit 0, the completion message and an empty queue. Unsafe runs
-require exit 12, exactly the named invariant error and a machine-readable trace.
+In the safety runner, safe runs require exit 0, the completion message and an empty
+queue. Unsafe runs require exit 12, exactly the named invariant error and a
+machine-readable trace. The [liveness runner](LIVENESS.md) additionally requires
+completed temporal checks, named temporal failures and a deadlock control.
 Tool errors, unsupported assumptions, timeouts, concurrent input changes and
 unexpected outcomes fail the gate. The runner accepts no command-line arguments;
 unsupported flags fail rather than silently running different bounds. A counterexample run intentionally stops early; it is not exhaustive.
@@ -53,8 +59,11 @@ remove their working state stores. A killed run may leave its own temporary file
 The flags and formats follow the [official CLI guide](https://github.com/tlaplus/tlaplus/blob/v1.8.0/general/docs/current-tools.md),
 the pinned jar's `tlc2.TLC -help`, and the [TLC configuration guide](https://docs.tlapl.us/using:tlc:config_file).
 In particular, `-deadlock` disables deadlock checks; it does not enable them.
-Our configurations use `CHECK_DEADLOCK FALSE` because finite terminal states and
-indefinite pauses are allowed. We check safety, not progress or deadlock freedom.
+The original safety configurations use `CHECK_DEADLOCK FALSE` because finite
+terminal states and indefinite pauses are allowed. They check safety, not progress
+or deadlock freedom. The separate `Liveness.tla` companion adds explicit fairness
+and availability assumptions and enables deadlock checks. `npm run test:protocol`
+runs both gates; see [the liveness scope and counterexamples](LIVENESS.md).
 
 ## State and atomic actions
 

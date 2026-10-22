@@ -5,6 +5,11 @@ state and successor sets within their finite bounds. Real RustFS scenarios check
 selected implementation obligations. This is bounded safety evidence, not
 production approval or a proof of the TypeScript implementation.
 
+This report records the original safety validation. Later [conditional liveness
+checks](LIVENESS.md) add explicit assumptions and expected waiting cycles without
+changing the original safety specification. `npm run test:protocol` now runs both
+gates; the original results below concern `check.py` only.
+
 ## Base and working tree
 
 - exact base and HEAD when validation ran: `f5fd8a505b35ce720773ec9cc466d63f14af0a32`
@@ -61,8 +66,8 @@ contact AWS or validate IAM. RustFS was not replaced with MinIO.
 
 ## Finite checks and executable correspondence
 
-Every model has 2 or 3 unique terms, one operation per term and one renewal per
-term. Detailed mode adds at most one release, one acquisition attempt per new term,
+Every safety model below has 2 or 3 unique terms, one operation per term and one
+renewal per term. Detailed mode adds at most one release, one acquisition attempt per new term,
 separate responses and a fixed selection step. Failed attempts consume terms.
 One acquisition contender is in flight at a time. There is no depth cap or
 fairness assumption. No arbitrary-history safety or liveness claim follows.
