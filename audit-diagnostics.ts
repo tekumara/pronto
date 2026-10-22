@@ -1,31 +1,16 @@
 import type { Api, Model, StreamOptions } from "@earendil-works/pi-ai";
 
-function endpoint(value: string): string {
-  try {
-    const url = new URL(value);
-    return `${url.origin}${url.pathname}`; // No credentials, query parameters or fragments.
-  } catch { return "[invalid URL]"; }
+/** Keep diagnostic lines bounded and strip terminal controls. */
+function diagnosticText(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 4_000);
 }
 
-/** Provider errors are untrusted: keep each log line bounded and strip common credentials and terminal controls. */
-function diagnosticText(value: unknown, secrets: Set<string>): string {
-  const raw = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
-  const text = [...secrets].reduce((text, secret) => text.replaceAll(secret, "[REDACTED]"), raw);
-  return text
-    .replace(/https?:\/\/[^\s"'<>]+/g, endpoint)
-    .replace(/\b(Bearer|Basic)\s+[\w.~+\/=-]+/gi, "$1 [REDACTED]")
-    .replace(/((?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|cookie)\b["']?\s*[:=]\s*["']?)[^\s"',;}&]+/gi, "$1[REDACTED]")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 4_000);
-}
-
-/** Share redactions across transport errors, retry events and the final failure for one audit. */
+/** Format transport errors, retry events and the final failure consistently for one audit. */
 export function createAuditDiagnostics(output: (message: string) => void) {
-  const secrets = new Set<string>();
-  const text = (value: unknown) => diagnosticText(value, secrets);
   return {
-    text,
-    warn: (message: string) => output(text(message)),
-    rememberSecrets(values: string[]): void { for (const value of values) if (value) secrets.add(value); },
+    text: diagnosticText,
+    warn: (message: string) => output(diagnosticText(message)),
   };
 }
 export type AuditDiagnostics = ReturnType<typeof createAuditDiagnostics>;
@@ -69,13 +54,7 @@ export function modelDiagnosticOptions(model: Model<Api>, options: StreamOptions
     const started = Date.now();
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
-    const headers = new Headers(input instanceof Request ? input.headers : undefined);
-    new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-    diagnostics.rememberSecrets(["authorization", "x-api-key", "api-key", "cookie"].flatMap((key) => {
-      const value = headers.get(key);
-      return value ? [value, value.replace(/^(Bearer|Basic)\s+/i, "")] : [];
-    }));
-    const context = () => `${model.provider}/${model.id} api=${model.api} ${method} ${endpoint(url)} elapsedMs=${Date.now() - started}`;
+    const context = () => `${model.provider}/${model.id} api=${model.api} ${method} ${url} elapsedMs=${Date.now() - started}`;
     let response: Response;
     try {
       response = await fetcher(input, init);

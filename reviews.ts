@@ -85,13 +85,10 @@ function github(signal?: AbortSignal) {
   const graphql = process.env.GITHUB_GRAPHQL_URL?.trim().replace(/\/+$/, "")
     || (base.endsWith("/api/v3") ? base.replace(/\/api\/v3$/, "/api/graphql") : `${base}/graphql`);
   const proxyFetch = getProxyFetch();
-  // Error bodies and transport messages are untrusted and may echo request credentials.
-  const diagnostic = (value: string) => value.replaceAll(token, "[REDACTED]")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 2_000);
+  // Keep error details bounded and line-oriented.
+  const diagnostic = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 2_000);
   const checkedFetch: typeof fetch = async (input, options = {}) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    url.username = "";
-    url.password = "";
     const method = options.method ?? (input instanceof Request ? input.method : "GET");
     const endpoint = `${method} ${diagnostic(url.href)}`;
     let response: Response;

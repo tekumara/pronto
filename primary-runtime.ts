@@ -19,7 +19,7 @@ type Term = {
   serial: Promise<unknown>; child: Litestream; auditor?: Auditor; timer?: NodeJS.Timeout;
 };
 
-/** Summarize SDK/transport causes without dumping request objects, credentials or signed URLs. */
+/** Summarize SDK/transport errors and their nested causes. */
 function controlErrorDetails(error: unknown): string {
   const pending = [error];
   const seen = new Set<unknown>();
@@ -35,13 +35,7 @@ function controlErrorDetails(error: unknown): string {
     if (failure.cause !== undefined) pending.push(failure.cause);
     if (failure instanceof AggregateError) pending.push(...failure.errors.slice(0, 10));
   }
-  let text = details.join("; caused by: ");
-  for (const key of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]) {
-    const secret = process.env[key];
-    if (secret) text = text.replaceAll(secret, "[REDACTED]");
-  }
-  return text.replace(/\b(?:https?|s3):\/\/[^\s"'<>]+/gi, "[REDACTED URL]")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 2_000);
+  return details.join("; caused by: ").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 2_000);
 }
 
 /**

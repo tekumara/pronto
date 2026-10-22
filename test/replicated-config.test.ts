@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
-import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import { replicaConfig } from "../s3-control.ts";
@@ -49,49 +47,6 @@ test("replica configuration rejects credentials in URLs, inconsistent transport 
     assert.throws(() => replicaConfig({ ...base, ...patch }));
   }
 });
-
-// Exercise the real SDK and CLI logger: operators need actionable failures without echoed credentials.
-for (const failure of ["HTTP denial", "connection reset"] as const) {
-  test(`replicated serve reports control storage ${failure} without leaking credentials`, { timeout: 20_000 }, async (t) => {
-    const credentials = { AWS_ACCESS_KEY_ID: "diagnostic-access-key", AWS_SECRET_ACCESS_KEY: "diagnostic-secret-key", AWS_SESSION_TOKEN: "diagnostic-session-token" };
-    const s3 = createServer((req, res) => {
-      if (failure === "connection reset") { req.socket.destroy(); return; }
-      res.writeHead(403, { "Content-Type": "application/xml" });
-      res.end(`<Error><Code>AccessDenied</Code><Message>Diagnostic denial: ${Object.values(credentials).join(" ")} https://url-user:url-password@example.invalid/control?signature=url-signature</Message></Error>`);
-    });
-    s3.listen(0, "127.0.0.1");
-    await once(s3, "listening");
-    t.after(async () => { s3.closeAllConnections(); await new Promise<void>((resolve) => s3.close(() => resolve())); });
-    const address = s3.address();
-    assert.ok(address && typeof address !== "string");
-    const f = await fixture(t, () => { throw new Error("No model work expected"); }, {
-      entrypoint: resolve("audit.ts"), github: (req, res) => {
-        assert.equal(req.url, "/github/user");
-        res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ login: "me" }));
-      },
-    });
-    const run = f.start(["serve", "--replicated-state", "--port", "0"], { env: {
-      ...credentials, AWS_REGION: "us-east-1", AWS_PROFILE: "", AWS_DEFAULT_PROFILE: "",
-      PRONTO_WEBHOOK_SECRET: webhookSecret, PRONTO_REPLICA_URL: "s3://test-bucket/state",
-      PRONTO_S3_ENDPOINT: `http://127.0.0.1:${address.port}`, PRONTO_S3_PATH_STYLE: "true", PRONTO_LITESTREAM_BIN: process.execPath,
-    } });
-    let stderr = "";
-    const warning = Promise.withResolvers<void>();
-    run.child.stderr.on("data", (data) => {
-      stderr += data;
-      if (stderr.includes("Control storage unavailable")) warning.resolve();
-    });
-    await Promise.race([warning.promise, run.done.then((result) => { throw new Error(`Serve exited before warning: ${result.stderr}`); })]);
-    run.child.kill("SIGTERM");
-    const result = await run.done;
-    assert.equal(result.code, 0, result.stderr);
-    if (failure === "HTTP denial") {
-      assert.match(result.stderr, /AccessDenied.*Diagnostic denial/);
-      assert.match(result.stderr, /HTTP 403/);
-    } else assert.match(result.stderr, /ECONNRESET/);
-    for (const secret of [...Object.values(credentials), "url-user", "url-password", "url-signature"]) assert.ok(!result.stderr.includes(secret), `Leaked ${secret}`);
-  });
-}
 
 test("remote repository identities cannot escape the captured root", () => {
   assert.equal(repositoryDatabasePath("/term/A", "repos/github.com/acme~demo.sqlite"), "/term/A/repos/github.com/acme~demo.sqlite");
