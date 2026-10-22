@@ -58,8 +58,7 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
     term.ready = false;
     term.cancellation.abort(new Error("Replicated-state ownership is uncertain", { cause: error }));
     term.lost.resolve();
-    // Do not log errors containing URLs, request headers or child command environments.
-    options.log("warn", "replication", "Owner term ended; admission disabled and work interrupted");
+    options.log("warn", "replication", `Owner term ended; admission disabled and work interrupted: ${controlErrorDetails(error)}`);
     void term.auditor?.close().catch(() => {});
     void term.child.close().catch(() => {});
   }

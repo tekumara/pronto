@@ -468,6 +468,7 @@ test("Litestream death ends the term and creates a fresh independently recoverab
   await until(async () => { const current = await storage.read(); return current?.record.phase === "ready" && current.record.owner !== before.record.owner; });
   const after = (await storage.read())!;
   assert.notEqual(after.record.recovery, before.record.recovery);
+  assert.match(run.output, /Owner term ended; admission disabled and work interrupted: Error: Litestream child exited; ending owner term/);
   const duplicate = await deliver(run.base, body, { id: "survive-child" });
   assert.equal(duplicate.status, 202);
   assert.deepEqual(await duplicate.json(), { status: "duplicate" });
@@ -585,6 +586,7 @@ test("ambiguous renewal makes serve unready, aborts active work, stops its child
   await until(async () => (await fetch(`${run.base}/readyz`)).status === 503);
   assert.equal((await deliver(run.base, body)).status, 503);
   await until(async () => modelAborted);
+  assert.match(run.output, /Owner term ended; admission disabled and work interrupted: .*ECONNRESET/);
   assert.equal(a.gh.posts.length, 0);
   await until(async () => { try { await exec("pgrep", ["-P", String(run.child.pid)]); return false; } catch { return true; } });
   const retained = (await storage.read())!;
