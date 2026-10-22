@@ -136,7 +136,7 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
     const cancellation = new AbortController();
     const term: Term = { id, prefix, root, head: acquired, deadline: start + LEASE_MS - MARGIN_MS, ready: false,
       cancellation, lost: Promise.withResolvers<void>(), serial: Promise.resolve(),
-      child: new Litestream(config, root, prefix, cancellation.signal, (error) => lose(term, error)) };
+      child: new Litestream(config, root, prefix, cancellation.signal, (error) => lose(term, error), options.log) };
     active = term;
     term.timer = setInterval(() => {
       try { live(term); } catch { return; }

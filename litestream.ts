@@ -5,6 +5,7 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import type { Log } from "./logging.ts";
 import { repositoryDatabasePath } from "./state.ts";
 import { replicaURL, type ReplicaConfig, type RestorePoint } from "./s3-control.ts";
 
@@ -25,8 +26,9 @@ export class Litestream {
   readonly prefix: string;
   private signal: AbortSignal;
   private failed: (error: Error) => void;
-  constructor(config: ReplicaConfig, root: string, prefix: string, signal: AbortSignal, failed: (error: Error) => void) {
-    this.config = config; this.root = root; this.prefix = prefix; this.signal = signal; this.failed = failed;
+  private log: Log;
+  constructor(config: ReplicaConfig, root: string, prefix: string, signal: AbortSignal, failed: (error: Error) => void, log: Log = () => {}) {
+    this.config = config; this.root = root; this.prefix = prefix; this.signal = signal; this.failed = failed; this.log = log;
   }
 
   async restore(source: string, plan: RestorePoint[]): Promise<void> {
@@ -117,8 +119,14 @@ export class Litestream {
       const child = this.child;
       if (child?.pid && child.exitCode === null && child.signalCode === null) {
         const exited = once(child, "close").catch(() => {});
+        this.log("info", "replication", "Sending SIGTERM to Litestream", `pid=${child.pid}`);
         child.kill("SIGTERM");
-        const force = setTimeout(() => child.kill("SIGKILL"), 3_000);
+        const force = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            this.log("warn", "replication", "Litestream did not stop after SIGTERM; sending SIGKILL", `pid=${child.pid} grace_period_ms=3000`);
+            child.kill("SIGKILL");
+          }
+        }, 3_000);
         await exited;
         clearTimeout(force);
       }
