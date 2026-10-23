@@ -318,11 +318,13 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.match(policy, /Mark it addressed unless available evidence contradicts the explanation,\s+an explicit requirement remains unmet, or a human objection remains unresolved\./);
   assert.match(policy, /Cite the reply and disclose that the documentation was not independently\s+inspected; do not claim runtime verification\./);
   assert.match(policy, /Bare acknowledgements,\s+unrelated links and re-review pings do not qualify\./);
-  assert.match(policy, /"Confluence backlink is now correct"[\s\S]*?Mark the external-documentation finding addressed/);
-  assert.match(policy, /Do not require the reply to restate the destination, provide\s+a link-check result or supply a new URL/);
-  assert.match(policy, /Cite the author comment and say\s+the external edit was not independently inspected/);
-  assert.match(policy, /Do not use that report to resolve separate PR-description or repository-file findings/);
-  assert.match(policy, /Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient\./);
+  assert.match(policy, /discrete, non-code change to an external artifact[\s\S]*?the finding identifies the requested\s+change/);
+  assert.match(policy, /Do not require the reply to restate the target or provide independent proof/);
+  assert.match(policy, /mark\s+only the matching finding addressed/);
+  assert.match(policy, /cite the reply and state that the external change was\s+not independently verified/);
+  assert.match(policy, /Verify claims about accessible code and PR\s+metadata against the fetched evidence/);
+  assert.match(policy, /Testing and deployment reports still require specific\s+outcomes/);
+  assert.match(policy, /Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient\s+for testing or accessible-code findings\./);
   assert.match(policy, /If available evidence contradicts the claimed outcome, keep the unresolved concern outstanding\./);
   assert.match(policy, /Accept an explicit author decision not to make the requested change because of effort,/);
   assert.match(policy, /A concise cost-benefit judgment can suffice when the original\s+finding supplies the context/);

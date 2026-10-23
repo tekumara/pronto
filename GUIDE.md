@@ -283,7 +283,7 @@ Findings appear in saved source order, then in the order within each source's as
 
 ### What addressed means
 
-`addressed` can mean a code fix, an adequate explanation, an explicit future-work deferral, specific reported testing or an author-reported external documentation correction. A scope or trade-off decision can address a finding without implementing the requested change.
+`addressed` can mean a code fix, an adequate explanation, an explicit future-work deferral, specific reported testing or an author-reported external artifact change. A scope or trade-off decision can address a finding without implementing the requested change.
 
 An explicit author decision not to fix a finding because of effort, complexity, likelihood or scope can qualify. A concise reply can be enough when the original finding supplies the context. Risk acceptance is not risk elimination: the auditor does not require a new safeguard, quantified probability or code change merely because a known bug remains possible.
 
@@ -303,11 +303,13 @@ A relevant authoritative documentation link from a human author or maintainer co
 
 Bare acknowledgements and dismissals without a rationale do not qualify. A contradicted claim about an explanation or current fix remains `outstanding`. So does an unmet mandatory requirement or a concern outside the explanation or deferral. For example, code showing that a failure can occur contradicts “this cannot happen”, but not “this is not worth fixing”. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
 
-### External documentation corrections
+### Reported external changes
 
-When a human PR author or maintainer reports a specific correction to an external document in response to a matching review finding, the auditor accepts that report as evidence of the edit. For example, “Confluence backlink is now correct” addresses a finding that identifies the stale backlink and its intended destination. The author need not repeat the destination, supply a new URL or report a link check. The auditor marks the external-documentation finding `addressed` unless available evidence contradicts the report, an explicit requirement remains unmet or a human reviewer rejects the correction. Its reason cites the author's comment and says the external edit was not independently inspected. A generic “fixed” without an identifiable external concern is not enough.
+Pronto reads an author's or maintainer's reply alongside the finding it answers. If they confirm a discrete, non-code change to an external artifact Pronto cannot inspect, that confirmation can address the finding. The finding must identify the requested change. The reply need not repeat the target or provide independent proof.
 
-This does not address separate claims about the PR description or repository files. The auditor checks those against available GitHub evidence; an incorrect PR-description path stays `outstanding` even if the Confluence backlink is reported fixed.
+Pronto marks only the matching finding `addressed`. It cites the reply and says it did not independently verify the external change. Contradictory evidence, an unmet explicit requirement or an unresolved human objection still blocks it. A generic “fixed” without an identifiable external change is not enough.
+
+For example, “Confluence backlink is now correct” addresses a finding that identifies the stale backlink and its intended destination. It does not fix a separate, incorrect path in the PR description. Pronto checks accessible code and PR metadata against GitHub evidence. Reports of testing or deployment still need the specific outcomes described below.
 
 ### Reported testing and deployment evidence
 
@@ -317,7 +319,7 @@ For example, a report can describe held-lock failure with rollout skipped, recov
 
 The auditor checks consistency with available code and discussion. It does not mark a finding `uncertain` solely because it cannot open external results. When reported testing addresses a finding, the reason identifies that basis and states that the results were not independently inspected. The evidence cites the PR URL or the human comment or reply containing the report.
 
-Claims such as “fixed”, “tests passed” or “everything passed” are not enough. Contradictions remain `outstanding`; reports that do not establish the relevant outcome can remain `uncertain`. This policy does not replace code inspection for claimed fixes to accessible code.
+For testing, claims such as “fixed”, “tests passed” or “everything passed” do not establish what was exercised and observed. Contradictions remain `outstanding`; reports that do not establish the relevant outcome can remain `uncertain`. This policy does not replace code inspection for claimed fixes to accessible code.
 
 Reported testing counts as `addressed` for approval eligibility. This relies on the author's or human commenter's account; it does not establish that Pronto checked CI.
 

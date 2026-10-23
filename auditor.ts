@@ -98,8 +98,8 @@ A reply saying "fixed", a resolved thread, an outdated diff hunk, or an approval
 Assess concerns in replies too, and consider later PR-level discussion as possible explanations.
 Separate multiple findings in one comment. For each finding choose:
 - addressed: current code fixes it, or an evidence-supported explanation adequately addresses it,
-  including specific reported testing, a reported external documentation correction, a reasonable
-  trade-off or an explicit future-work deferral
+  including specific reported testing, a reported external artifact change, a reasonable trade-off
+  or an explicit future-work deferral
 - outstanding: the actionable concern is neither fixed nor adequately addressed by an explanation
 - uncertain: evidence is insufficient or unreadable to assess the code or explanation
 - not-actionable: praise, boilerplate, summaries without requests, or a duplicate linked to another finding
@@ -160,7 +160,8 @@ For example, a report of held-lock failure with rollout skipped, recovery and su
 of the final implementation, with operator confirmation of diagnostics and removal of a region
 warning, can address a deployment-proof concern without opening the linked runs.
 If available evidence contradicts the claimed outcome, keep the unresolved concern outstanding.
-Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient.
+Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient
+for testing or accessible-code findings.
 This acceptance applies only to external results, not claims about accessible code behaviour.
 Inspect available code to verify claimed code fixes; do not substitute a testing report for a fix.
 Accept a human author's or maintainer's relevant authoritative documentation
@@ -171,18 +172,15 @@ an explicit requirement remains unmet, or a human objection remains unresolved.
 Cite the reply and disclose that the documentation was not independently
 inspected; do not claim runtime verification. Bare acknowledgements,
 unrelated links and re-review pings do not qualify.
-Accept a human PR author's or maintainer's explicit report of a specific externally hosted
-documentation edit in response to the matching review finding. For example,
-"Confluence backlink is now correct" addresses a review that identifies the stale backlink
-and the intended destination. Do not require the reply to restate the destination, provide
-a link-check result or supply a new URL; inability to inspect the external page alone is not
-reason to mark it uncertain. Mark the external-documentation finding addressed as an
-author-reported edit unless available evidence contradicts the report, an explicit requirement
-remains unmet, or a human reviewer rejects the correction. Cite the author comment and say
-the external edit was not independently inspected. This narrow exception to bare "fixed" claims
-requires a matching, specific external concern; a generic "fixed" without one is insufficient.
-Do not use that report to resolve separate PR-description or repository-file findings; verify
-those against the fetched evidence.
+Judge a human PR author's or maintainer's reply together with the finding it answers.
+For a discrete, non-code change to an external artifact you cannot inspect, accept the
+human's explicit confirmation as reported evidence if the finding identifies the requested
+change. Do not require the reply to restate the target or provide independent proof; mark
+only the matching finding addressed, cite the reply and state that the external change was
+not independently verified. Contradictory evidence, an unmet explicit requirement or an
+unresolved human objection still blocks it. Verify claims about accessible code and PR
+metadata against the fetched evidence. Testing and deployment reports still require specific
+outcomes as described above.
 Bare acknowledgements and dismissals without a rationale are not enough.
 A factual claim about the explanation or a claimed fix contradicted by evidence,
 an unmet mandatory requirement, or a concern not covered by the explanation or deferral stays outstanding.
@@ -191,7 +189,7 @@ does not establish the relevant outcome, or inaccessible code needed to verify a
 Do not assume reviewer agreement.
 For every addressed finding, say in the reason whether it is addressed by a code fix, an
 explanation/scope decision (including future-work deferral), reported testing or an
-author-reported external documentation edit.
+author-reported external artifact change.
 Cite the author reply for a deferral, the PR URL for reports in its description,
 or the human comment or reply URL for reports in discussion.
 For reported testing, state that the results were not independently inspected.
