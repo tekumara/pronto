@@ -318,6 +318,10 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.match(policy, /Mark it addressed unless available evidence contradicts the explanation,\s+an explicit requirement remains unmet, or a human objection remains unresolved\./);
   assert.match(policy, /Cite the reply and disclose that the documentation was not independently\s+inspected; do not claim runtime verification\./);
   assert.match(policy, /Bare acknowledgements,\s+unrelated links and re-review pings do not qualify\./);
+  assert.match(policy, /"Confluence backlink is now correct"[\s\S]*?Mark the external-documentation finding addressed/);
+  assert.match(policy, /Do not require the reply to restate the destination, provide\s+a link-check result or supply a new URL/);
+  assert.match(policy, /Cite the author comment and say\s+the external edit was not independently inspected/);
+  assert.match(policy, /Do not use that report to resolve separate PR-description or repository-file findings/);
   assert.match(policy, /Bare claims such as "fixed", "tests passed" or "everything passed" are insufficient\./);
   assert.match(policy, /If available evidence contradicts the claimed outcome, keep the unresolved concern outstanding\./);
   assert.match(policy, /Accept an explicit author decision not to make the requested change because of effort,/);

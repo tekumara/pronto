@@ -283,7 +283,7 @@ Findings appear in saved source order, then in the order within each source's as
 
 ### What addressed means
 
-`addressed` can mean a code fix, an adequate explanation, an explicit future-work deferral or specific reported testing. A scope or trade-off decision can address a finding without implementing the requested change.
+`addressed` can mean a code fix, an adequate explanation, an explicit future-work deferral, specific reported testing or an author-reported external documentation correction. A scope or trade-off decision can address a finding without implementing the requested change.
 
 An explicit author decision not to fix a finding because of effort, complexity, likelihood or scope can qualify. A concise reply can be enough when the original finding supplies the context. Risk acceptance is not risk elimination: the auditor does not require a new safeguard, quantified probability or code change merely because a known bug remains possible.
 
@@ -302,6 +302,12 @@ For example, a setup PR for first-time users can explain that re-runs overwrite 
 A relevant authoritative documentation link from a human author or maintainer counts as an explanation when offered in response to a finding. The auditor does not require excerpts or mark the finding `uncertain` solely because it cannot inspect the link. It marks the finding `addressed` unless available evidence contradicts the explanation, an explicit requirement remains unmet, or a human objection remains unresolved. The report cites the reply and states that the documentation was not independently inspected; it does not claim runtime verification. Bare acknowledgements, unrelated links and re-review pings do not qualify.
 
 Bare acknowledgements and dismissals without a rationale do not qualify. A contradicted claim about an explanation or current fix remains `outstanding`. So does an unmet mandatory requirement or a concern outside the explanation or deferral. For example, code showing that a failure can occur contradicts “this cannot happen”, but not “this is not worth fixing”. Insufficient evidence leads to `uncertain`. An adequate explanation does not establish reviewer agreement or GitHub thread resolution.
+
+### External documentation corrections
+
+When a human PR author or maintainer reports a specific correction to an external document in response to a matching review finding, the auditor accepts that report as evidence of the edit. For example, “Confluence backlink is now correct” addresses a finding that identifies the stale backlink and its intended destination. The author need not repeat the destination, supply a new URL or report a link check. The auditor marks the external-documentation finding `addressed` unless available evidence contradicts the report, an explicit requirement remains unmet or a human reviewer rejects the correction. Its reason cites the author's comment and says the external edit was not independently inspected. A generic “fixed” without an identifiable external concern is not enough.
+
+This does not address separate claims about the PR description or repository files. The auditor checks those against available GitHub evidence; an incorrect PR-description path stays `outstanding` even if the Confluence backlink is reported fixed.
 
 ### Reported testing and deployment evidence
 
