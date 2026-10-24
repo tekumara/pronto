@@ -1,4 +1,9 @@
 [tools]
 java = "temurin-21"
+"npm:@informalsystems/quint" = "0.33.0"
 "github:benbjohnson/litestream" = "latest"
 "github:rustfs/rustfs" = "1.0.3"
+
+[tasks."quint:check"]
+description = "Check the bounded leader-election model and its negative controls"
+run = "python3 protocol/quint/check.py"

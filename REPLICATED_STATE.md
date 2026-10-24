@@ -62,6 +62,8 @@ A standby does not create an auditor, open repository databases, start Litestrea
 
 If an owner reaches its local deadline without a confirmed renewal, it treats ownership as uncertain and stops admission and work. The standby waits for the stored S3 expiry before trying to acquire ownership. Ownership changes at the successful conditional control write, not just when another process decides that a clock has expired. Deployment clocks must be synchronised. These timings are fixed in code, not a configurable election framework.
 
+Exclusive readiness depends on that clock margin. With stable wall-clock offsets and equal-rate monotonic clocks, a takeover clock must not lead the lease writer by more than 5 seconds. The runtime does not measure or enforce this bound. A 10-second lead, or a clock adjustment after a lease grant, can leave 2 processes reporting ready. A fresh ownership check that observes the successor still rejects the old process's admission. See the [Quint analysis and real-process clock replays](protocol/quint/README.md).
+
 ## Ownership and recovery
 
 The base contains one persistent `control.json` record. It combines revision, unique owner term, expiry, phase and the last complete recovery prefix. Initial acquisition uses `If-None-Match: *`. Renewal, acquisition, promotion and release use `If-Match` on that same object. Ordinary operation never deletes it.
@@ -169,7 +171,7 @@ Prefix isolation is a naming rule, not permission enforcement. Stock Litestream 
 
 A production deployment needs independently enforced term write isolation, deletion protection, never-reused prefixes, strongly consistent GET/LIST, atomic conditional writes and unchanged retained source history. Do not deploy lifecycle deletion on referenced data. Do not delete or recreate `control.json`, replace a database inside a live term, run Litestream reset, or reuse a retired prefix. The application does not provision or verify those external permissions.
 
-This first implementation does not provide per-term credential vending, automatic garbage collection, warm standbys, routing, cloud provisioning, cross-database transactions or a general election/plugin system. Large-database recovery, broad partitions/crash matrices, clock skew and production storage permissions need further testing.
+This first implementation does not provide per-term credential vending, automatic garbage collection, warm standbys, routing, cloud provisioning, cross-database transactions or a general election/plugin system. Large-database recovery, broad partitions/crash matrices, arbitrary clock behaviour and production storage permissions need further testing. The focused Quint and controlled-clock replays do not establish those broader guarantees.
 
 ## Upstream references
 

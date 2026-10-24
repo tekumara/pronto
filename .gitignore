@@ -3,3 +3,5 @@ node_modules/
 # roborev snapshots
 /.roborev/
 .envrc
+# Quint's Apalache compiler/server output
+/_apalache-out/

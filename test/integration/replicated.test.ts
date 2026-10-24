@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, request, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -110,7 +110,8 @@ function github() {
     set beforePost(value: typeof beforePost) { beforePost = value; } };
 }
 async function app(t: TestContext, config: ReplicaConfig, endpoint = config.endpoint,
-  respond: Parameters<typeof fixture>[1] = (_body, response) => tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] })) {
+  respond: Parameters<typeof fixture>[1] = (_body, response) => tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] }),
+  launch: { nodeArgs?: string[]; env?: NodeJS.ProcessEnv } = {}) {
   const runs: { child: import("node:child_process").ChildProcess; done: Promise<unknown>; output(): string }[] = [];
   // Register BEFORE fixture cleanup: graceful parent shutdown must reap its owned Litestream child.
   t.after(async () => {
@@ -126,8 +127,9 @@ async function app(t: TestContext, config: ReplicaConfig, endpoint = config.endp
   const gh = github();
   const f = await fixture(t, respond, { entrypoint: resolve("audit.ts"), github: gh.handler });
   const start = async (apply = false) => {
-    const run = f.start(["serve", "--replicated-state", "--port", "0", ...(apply ? ["--apply"] : [])], { env: {
+    const run = f.start(["serve", "--replicated-state", "--port", "0", ...(apply ? ["--apply"] : [])], { nodeArgs: launch.nodeArgs, env: {
       PRONTO_WEBHOOK_SECRET: webhookSecret, PRONTO_REPLICA_URL: `s3://${config.bucket}/${config.prefix}`, PRONTO_S3_ENDPOINT: endpoint,
+      ...launch.env,
     } });
     let output = "";
     run.child.stdout.on("data", (data) => { output += data; });
@@ -164,6 +166,133 @@ test("RustFS rejects existing initialization and stale If-Match, including two c
   await assert.rejects(client.send(new PutObjectCommand({ ...input, Body: "stale", IfMatch: first.ETag })), (error: any) => error.$metadata?.httpStatusCode === 412);
   const final = await client.send(new GetObjectCommand(input));
   assert.ok(["A", "B"].includes(await final.Body!.transformToString()));
+});
+
+// Authoring gate: the existing crash/ambiguous-response tests use real, aligned clocks.
+// These replays protect the distinct lease-margin and post-await deadline contracts.
+// They run real serve, S3 CAS and Litestream; only JS clock/timer delivery is controlled.
+async function controlledClock(directory: string, name: string, wall: number) {
+  const path = join(directory, `${name}-clock.json`);
+  const set = async (mono: number, wallNow: number, intervals = 0) => {
+    // Atomic replacement prevents a child from observing a partially written JSON file.
+    await writeFile(`${path}.next`, JSON.stringify({ mono, wall: wallNow, intervals }));
+    await rename(`${path}.next`, path);
+  };
+  await set(0, wall);
+  return { set, launch: { nodeArgs: ["--import", resolve("test/integration/controlled-clock.mjs")], env: { PRONTO_TEST_CLOCK: path } } };
+}
+
+for (const [skew, jump] of [[5_000, false], [10_000, false], [10_000, true]] as const)
+  test(`Quint replay: ${skew}ms ${jump ? "forward clock jump" : "skew"} and the 5000ms local margin`, { timeout: 60_000 }, async (t) => {
+  const { config, storage, directory } = await store(t);
+  const base = Date.now();
+  const aClock = await controlledClock(directory, "a", base);
+  const bClock = await controlledClock(directory, "b", base);
+  const a = await app(t, config, config.endpoint, undefined, aClock.launch);
+  const first = await a.start(); await ready(first.base);
+  const old = (await storage.read())!;
+  assert.equal(old.record.expires, base + 30_000);
+  await aClock.set(20_000, base + 20_000);
+  await bClock.set(20_000, base + 20_000 + (jump ? 0 : skew));
+  const p = await proxy(t);
+  const b = await app(t, config, p.endpoint, undefined, bClock.launch);
+  const second = await b.start();
+  await until(async () => p.events.some((e) => e.method === "GET" && e.path.includes("control.json")));
+  if (jump) {
+    assert.equal((await fetch(`${second.base}/readyz`)).status, 503);
+    await bClock.set(20_000, base + 30_000);
+  }
+  if (skew === 5_000) {
+    assert.equal((await fetch(`${first.base}/readyz`)).status, 200);
+    assert.equal((await fetch(`${second.base}/readyz`)).status, 503);
+    assert.equal((await storage.read())!.record.owner, old.record.owner);
+    assert.deepEqual(await readdir(join(b.f.stateDir, "terms")), []);
+    // At the exact margin boundary, A fences itself before B becomes eligible.
+    await aClock.set(25_000, base + 25_000);
+    await bClock.set(25_000, base + 30_000);
+    assert.equal((await fetch(`${first.base}/readyz`)).status, 503);
+    await first.stop();
+    await ready(second.base);
+  } else {
+    await ready(second.base);
+    const successor = (await storage.read())!;
+    assert.notEqual(successor.record.owner, old.record.owner);
+    assert.equal((await fetch(`${first.base}/readyz`)).status, 200, "old term remains locally ready at monotonic 20s < 25s");
+    assert.equal((await fetch(`${second.base}/readyz`)).status, 200, "successor is also locally ready");
+    // This records a known limitation, not a guarantee of simultaneous protected effects.
+    // The old term's fresh ownership barrier must still reject a new admission.
+    assert.equal((await deliver(first.base, body, { id: "stale-ready-owner" })).status, 503);
+    assert.deepEqual(a.gh.requests, ["GET /github/user"], "no unconfirmed worker can fetch GitHub evidence");
+    assert.equal((await fetch(`${first.base}/readyz`)).status, 503);
+    assert.equal((await storage.read())!.record.owner, successor.record.owner, "old cleanup cannot release B");
+    await first.stop();
+  }
+  await second.stop();
+});
+
+test("Quint replay: an owner's backward wall-clock jump shortens the shared lease but not local authority", { timeout: 60_000 }, async (t) => {
+  const { config, storage, directory } = await store(t);
+  const base = Date.now();
+  const bClock = await controlledClock(directory, "backward", base);
+  const b = await app(t, config, config.endpoint, undefined, bClock.launch);
+  const first = await b.start(); await ready(first.base);
+  const old = (await storage.read())!;
+  // At monotonic 5s, wall time jumps backwards by 10s. Deliver one renewal timer.
+  await bClock.set(5_000, base - 5_000, 5_000);
+  await until(async () => (await storage.read())!.record.expires === base + 25_000);
+  await bClock.set(25_000, base + 15_000, 5_000);
+  const aClock = await controlledClock(directory, "normal", base);
+  await aClock.set(25_000, base + 25_000);
+  const a = await app(t, config, config.endpoint, undefined, aClock.launch);
+  const second = await a.start(); await ready(second.base);
+  assert.notEqual((await storage.read())!.record.owner, old.record.owner);
+  assert.equal((await fetch(`${first.base}/readyz`)).status, 200, "renewed local deadline is 30s, although shared expiry is 25s");
+  assert.equal((await fetch(`${second.base}/readyz`)).status, 200);
+  await first.stop(); await second.stop();
+});
+
+test("Quint replay: a successful renewal delivered at the old deadline cannot revive authority", { timeout: 60_000 }, async (t) => {
+  const { config, storage, directory } = await store(t);
+  const base = Date.now();
+  const clock = await controlledClock(directory, "renewal", base);
+  const p = await proxy(t);
+  const a = await app(t, config, p.endpoint, undefined, clock.launch);
+  const run = await a.start(); await ready(run.base);
+  const previous = (await storage.read())!;
+  const committed = Promise.withResolvers<void>();
+  const unblock = Promise.withResolvers<void>();
+  t.after(() => unblock.resolve());
+  let held = false;
+  p.intercept = async (req, res) => {
+    if (held || req.method !== "PUT" || !req.url!.includes("control.json")) return false;
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+    const bytes = Buffer.concat(chunks);
+    const record = JSON.parse(bytes.toString());
+    assert.equal(record.phase, "ready");
+    assert.equal(record.owner, previous.record.owner);
+    held = true;
+    const target = new URL(process.env.PRONTO_S3_ENDPOINT!);
+    const reply = await new Promise<{ status: number; headers: import("node:http").IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+      const upstream = request({ hostname: target.hostname, port: target.port, path: req.url, method: "PUT", headers: req.headers }, (response) => {
+        const data: Buffer[] = []; response.on("data", (chunk: Buffer) => data.push(chunk));
+        response.on("end", () => resolve({ status: response.statusCode!, headers: response.headers, body: Buffer.concat(data) }));
+      });
+      upstream.on("error", reject); upstream.end(bytes);
+    });
+    assert.equal(reply.status, 200, "real RustFS committed the conditional renewal");
+    committed.resolve();
+    await unblock.promise;
+    res.writeHead(reply.status, reply.headers).end(reply.body);
+    return true;
+  };
+  await clock.set(20_000, base + 20_000, 5_000);
+  await Promise.race([committed.promise, delay(10_000, undefined, { ref: false }).then(() => { throw new Error(`No renewal reached RustFS: ${run.output}`); })]);
+  assert.equal((await storage.read())!.record.expires, base + 50_000);
+  await clock.set(25_000, base + 25_000, 5_000);
+  unblock.resolve();
+  await until(async () => run.output.includes("Owner term ended"));
+  assert.equal((await fetch(`${run.base}/readyz`)).status, 503, "a successful PUT is not permission to extend an expired local deadline");
+  await run.stop();
 });
 
 // Strongest oracle: independent SQLite contents and integrity, restored from fixed remote endpoints.

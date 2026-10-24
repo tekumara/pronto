@@ -6,6 +6,11 @@ or approve a deployment. See the [safety validation report](VALIDATION.md) and
 [conditional liveness checks](LIVENESS.md) for results and assumptions. In particular,
 GitHub recovery alone does not retry a terminal failed publication.
 
+The separate [Quint leader-election analysis](quint/README.md) models clocks and
+concurrent acquisition contenders. It reproduces overlapping readiness beyond
+the local clock margin, while distinguishing that from successful durability
+acknowledgements. Run it with `mise run quint:check`.
+
 ## Run the checks
 
 Use Python 3.10 or later and mise. The project pins Temurin Java 21 in
