@@ -1,59 +1,34 @@
-// One tick = 5 seconds. Two terms and one operation per term keep the joint
-// leadership and recovery-history exploration finite.
+// One tick = 5 seconds. This models leadership, not the existing recovery-history model.
 module LeaseElection {
   const Skew: int
   const Jump: bool
   const BrokenCAS: bool
   const Revive: bool
   const CachedCheck: bool
-  const UnsafeAck: bool
-  const EarlyPromotion: bool
-  const WrongBaseline: bool
-  const RebaseMutation: bool
 
   pure val NODES = Set(0, 1)
   pure val TTL = 6
   pure val MARGIN = 1
   pure val MAX_TIME = 7
 
-  // Revision abstracts UUID/ETag identity as a generation counter. Owner IDs are not epoch order.
   type Control = { revision: int, owner: int, expires: int, phase: str, recovery: int }
   type Pending = { kind: str, expected: int, start: int, expires: int,
                    phase: str, recovery: int, outcome: str, resultRevision: int }
-  type History = int
   type Actor = { stage: str, head: int, headRecovery: int, deadline: int,
                  ready: bool, stopped: bool, acquired: bool, baseline: bool,
-                 selectedHistory: int, prefixHistory: int,
                  renewed: bool, released: bool, seen: Control, pending: Pending, barrier: str }
   type State = { now: int, offset: int, control: Control, actors: int -> Actor,
-                 acknowledged: History,
-                 badCAS: bool, badRevival: bool, badRecovery: bool, badObservation: bool,
-                 badControlDiscipline: bool }
+                 badCAS: bool, badRevival: bool, badRecovery: bool, badObservation: bool }
   var s: State
 
-  // A two-bit set represents operation IDs 0 and 1; histories are membership-only.
-  pure val emptyHistory: History = 0
-  pure def historyHas(history, i) =
-    if (i == 0) history == 1 or history == 3 else history == 2 or history == 3
-  pure def historyAdd(history, i) =
-    if (historyHas(history, i)) history else history + (if (i == 0) 1 else 2)
-  pure def historySubset(left, right) =
-    (not(historyHas(left, 0)) or historyHas(right, 0)) and
-      (not(historyHas(left, 1)) or historyHas(right, 1))
   pure val emptyControl: Control = { revision: 0, owner: -1, expires: 0, phase: "idle", recovery: -1 }
   pure val emptyPending: Pending = { kind: "", expected: 0, start: 0, expires: 0,
     phase: "idle", recovery: -1, outcome: "", resultRevision: 0 }
   pure val emptyActor: Actor = { stage: "new", head: 0, headRecovery: -1, deadline: 0,
-    ready: false, stopped: false, acquired: false, baseline: false,
-    selectedHistory: -1, prefixHistory: emptyHistory,
-    renewed: false, released: false, seen: emptyControl, pending: emptyPending, barrier: "idle" }
+    ready: false, stopped: false, acquired: false, baseline: false, renewed: false,
+    released: false, seen: emptyControl, pending: emptyPending, barrier: "idle" }
 
   def actor(i) = s.actors.get(i)
-  def localHistory(i) = if (actor(i).barrier == "idle") actor(i).selectedHistory
-    else historyAdd(actor(i).selectedHistory, i)
-  def hasUploaded(i) = actor(i).barrier.in(Set("uploaded", "synced", "observed", "returned", "failed", "rejected"))
-  def recoveryHistory = if (s.control.recovery == 0) actor(0).prefixHistory
-    else if (s.control.recovery == 1) actor(1).prefixHistory else emptyHistory
   def wall(i) = s.now + (if (i == 1) s.offset else 0)
   def live(i) = not(actor(i).stopped) and s.now < actor(i).deadline
   def locallyReady(i) = actor(i).ready and live(i)
@@ -63,9 +38,8 @@ module LeaseElection {
   }
 
   action init = s' = { now: 0, offset: if (Jump) 0 else Skew, control: emptyControl,
-    actors: NODES.mapBy(_ => emptyActor), acknowledged: emptyHistory,
-    badCAS: false, badRevival: false, badRecovery: false, badObservation: false,
-    badControlDiscipline: false }
+    actors: NODES.mapBy(_ => emptyActor), badCAS: false, badRevival: false,
+    badRecovery: false, badObservation: false }
 
   // Strong GET observation and its delayed delivery/preparation are separate.
   // An ineligible standby can poll again. Each node represents ONE unique incarnation.
@@ -90,16 +64,9 @@ module LeaseElection {
     val nextControl: Control = { revision: s.control.revision + 1,
       owner: if (p.kind == "release") -1 else i,
       expires: p.expires, phase: p.phase, recovery: p.recovery }
-    val resultingControl = if (succeeds) nextControl else s.control
-    // Recovery IDs name actors, not ordered terms; check applicable pointer transitions only.
-    val controlViolation = resultingControl.revision < s.control.revision or
-      (resultingControl.revision == s.control.revision and resultingControl != s.control) or
-      (resultingControl.phase == "bootstrapping" and
-        resultingControl.recovery != s.control.recovery) or
-      (p.expected != s.control.revision and resultingControl != s.control)
     all {
       p.outcome == "request",
-      s' = { ...s, control: resultingControl,
+      s' = { ...s, control: if (succeeds) nextControl else s.control,
         actors: s.actors.set(i, { ...a, pending: { ...p,
           outcome: if (succeeds) "ok" else "conflict",
           resultRevision: if (succeeds) nextControl.revision else s.control.revision } }),
@@ -107,7 +74,6 @@ module LeaseElection {
         badRecovery: s.badRecovery or (succeeds and
           (if (p.kind == "promote") not(a.baseline)
            else p.recovery != s.control.recovery)),
-        badControlDiscipline: s.badControlDiscipline or controlViolation,
       },
     }
   }
@@ -142,48 +108,19 @@ module LeaseElection {
     }
   }
 
-  // Selection freezes the source history. Baseline creates an independent prefix from it.
-  action selectSource(i) = {
-    val a = actor(i)
-    val selectedHistory = if (a.headRecovery == -1) emptyHistory
-      else actor(a.headRecovery).prefixHistory
-    all {
-      a.stage == "bootstrapping", live(i), a.selectedHistory == -1,
-      if (a.headRecovery == -1) true else actor(a.headRecovery).baseline,
-      s' = { ...s, actors: s.actors.set(i, { ...a, selectedHistory: selectedHistory }) },
-    }
-  }
-  action baseline(i) = {
-    val a = actor(i)
-    val installedHistory = if (WrongBaseline) emptyHistory else a.selectedHistory
-    all {
-      a.stage == "bootstrapping", live(i), a.selectedHistory >= 0, not(a.baseline),
-      s' = { ...s, actors: s.actors.set(i, { ...a,
-        baseline: true, prefixHistory: installedHistory }) },
-    }
-  }
-  // One logical operation per term. Its upload may finish after local loss.
-  action commit(i) = all {
-    locallyReady(i), actor(i).barrier == "idle",
-    s' = { ...s, actors: s.actors.set(i, { ...actor(i), barrier: "committed" }) },
-  }
-  action upload(i) = all {
-    actor(i).baseline, actor(i).barrier == "committed",
-    s' = { ...s, actors: s.actors.set(i, { ...actor(i),
-      prefixHistory: localHistory(i), barrier: "uploaded" }) },
-  }
-  action earlyAcknowledge(i) = all {
-    UnsafeAck, actor(i).barrier == "committed", not(historyHas(s.acknowledged, i)),
-    s' = { ...s, acknowledged: historyAdd(s.acknowledged, i) },
+  // Restore, child startup, recovery staging and baseline sync are condensed here.
+  // There is no task dispatch until promotion's successful response.
+  action baseline(i) = all {
+    actor(i).stage == "bootstrapping", live(i), not(actor(i).baseline),
+    s' = { ...s, actors: s.actors.set(i, { ...actor(i), baseline: true }) },
   }
   action prepareMutation(i, promote) = {
     val a = actor(i)
-    val expected = if (RebaseMutation) s.control.revision else a.head
     all {
       a.acquired, live(i), a.pending.kind == "",
-      if (promote) a.stage == "bootstrapping" and (a.baseline or EarlyPromotion) else not(a.renewed),
+      if (promote) a.stage == "bootstrapping" and a.baseline else not(a.renewed),
       s' = { ...s, actors: s.actors.set(i, { ...a, renewed: a.renewed or not(promote),
-        pending: { kind: if (promote) "promote" else "renew", expected: expected,
+        pending: { kind: if (promote) "promote" else "renew", expected: a.head,
           start: s.now, expires: wall(i) + TTL,
           phase: if (promote or a.ready) "ready" else "bootstrapping",
           recovery: if (promote) i else a.headRecovery, outcome: "request", resultRevision: 0 } }) },
@@ -207,7 +144,7 @@ module LeaseElection {
   // Sync, strong GET observation, and response delivery are NOT one atomic check.
   // A successful old-owner observation may be delivered after takeover; this is not hard fencing.
   action sync(i) = all {
-    locallyReady(i), actor(i).barrier == "uploaded",
+    locallyReady(i), actor(i).barrier == "idle",
     s' = { ...s, actors: s.actors.set(i, { ...actor(i), barrier: "synced" }) },
   }
   action observe(i) = {
@@ -218,16 +155,11 @@ module LeaseElection {
         actors: s.actors.set(i, { ...actor(i), barrier: if (accepted) "observed" else "failed" }) },
     }
   }
-  action deliver(i) = {
-    val accepted = actor(i).barrier == "observed" and locallyReady(i)
-    all {
-      actor(i).barrier.in(Set("observed", "failed")),
-      s' = { ...s,
-        acknowledged: if (accepted) historyAdd(s.acknowledged, i) else s.acknowledged,
-        actors: s.actors.set(i,
-          if (accepted) { ...actor(i), barrier: "returned" }
-          else { ...actor(i), barrier: "rejected", stopped: true, ready: false }) },
-    }
+  action deliver(i) = all {
+    actor(i).barrier.in(Set("observed", "failed")),
+    s' = { ...s, actors: s.actors.set(i,
+      if (actor(i).barrier == "observed" and locallyReady(i)) { ...actor(i), barrier: "returned" }
+      else { ...actor(i), barrier: "rejected", stopped: true, ready: false }) },
   }
   action tick = all { s.now < MAX_TIME, s' = { ...s, now: s.now + 1 } }
   action jumpClock = all {
@@ -238,32 +170,22 @@ module LeaseElection {
   action step = {
     nondet i = NODES.oneOf()
     any { readAcquisition(i), prepareAcquisition(i), cas(i), response(i, false), response(i, true),
-      selectSource(i), baseline(i), prepareMutation(i, true), prepareMutation(i, false),
-      commit(i), upload(i), earlyAcknowledge(i), lose(i), prepareRelease(i),
+      baseline(i), prepareMutation(i, true), prepareMutation(i, false), lose(i), prepareRelease(i),
       sync(i), observe(i), deliver(i), tick, jumpClock }
   }
 
-  // Joint election/history projection: no renewal or cleanup churn, but clocks,
-  // takeover, source selection, upload and delayed acknowledgement interleave.
-  action recoveryStep = {
-    nondet i = NODES.oneOf()
-    any { readAcquisition(i), prepareAcquisition(i), cas(i), response(i, false), response(i, true),
-      selectSource(i), baseline(i), prepareMutation(i, true), commit(i), upload(i),
-      sync(i), observe(i), deliver(i), tick }
-  }
-
-  // Focused projections retain source selection and baseline construction.
+  // Focused projections reduce independent bookkeeping, without changing any included action.
+  // Lease checks allow delayed/lost responses but omit cleanup and application barriers.
   action leaseStep = {
     nondet i = NODES.oneOf()
     any { readAcquisition(i), prepareAcquisition(i), cas(i), response(i, false), response(i, true),
-      selectSource(i), baseline(i), prepareMutation(i, true), prepareMutation(i, false), tick, jumpClock }
+      baseline(i), prepareMutation(i, true), prepareMutation(i, false), tick, jumpClock }
   }
-  // Control lifecycle and history barrier at fixed time, including cleanup.
+  // Control lifecycle and barriers at fixed time, including cancellation and conditional release.
   action controlStep = {
     nondet i = NODES.oneOf()
     any { readAcquisition(i), prepareAcquisition(i), cas(i), response(i, false), response(i, true),
-      selectSource(i), baseline(i), prepareMutation(i, true), prepareMutation(i, false),
-      commit(i), upload(i), earlyAcknowledge(i), lose(i), prepareRelease(i),
+      baseline(i), prepareMutation(i, true), prepareMutation(i, false), lose(i), prepareRelease(i),
       sync(i), observe(i), deliver(i) }
   }
 
@@ -271,61 +193,38 @@ module LeaseElection {
   val typeOK = and {
     s.now.in(0.to(MAX_TIME)), s.control.owner.in(NODES.union(Set(-1))),
     s.control.recovery.in(NODES.union(Set(-1))), s.control.revision.in(0.to(8)),
-    s.acknowledged.in(0.to(3)),
     (s.control.phase == "idle") == (s.control.owner == -1),
-    NODES.forall(i => actor(i).selectedHistory.in(Set(-1, 0, 1, 2, 3))),
-    NODES.forall(i => actor(i).prefixHistory.in(0.to(3))),
     NODES.forall(i => actor(i).ready implies (actor(i).acquired and actor(i).baseline)),
   }
-  val ackRecoverable = historySubset(s.acknowledged, recoveryHistory)
-  val completeBaseline = and {
-    NODES.forall(i => s.control.recovery != i or actor(i).baseline),
-    NODES.forall(i => s.control.phase != "ready" or s.control.owner != i or
-      (s.control.recovery == i and actor(i).baseline)),
-  }
-  val baselineContainsSelected = and {
-    NODES.forall(i => not(actor(i).baseline) or
-      (if (hasUploaded(i)) actor(i).prefixHistory == localHistory(i)
-       else actor(i).prefixHistory == actor(i).selectedHistory)),
-  }
-  val mutationUsesObservedHead = NODES.forall(i =>
-    not(actor(i).pending.kind.in(Set("promote", "renew"))) or
-      actor(i).pending.expected == actor(i).head)
-  val controlDiscipline = not(s.badControlDiscipline)
-  val protocolSafety = and {
-    typeOK, ackRecoverable, completeBaseline, baselineContainsSelected,
-    mutationUsesObservedHead, controlDiscipline,
-    not(s.badCAS), not(s.badRevival), not(s.badRecovery), not(s.badObservation),
-  }
+  val completePointer = s.control.phase == "ready" implies
+    (s.control.recovery == s.control.owner and actor(s.control.owner).baseline)
+  val protocolSafety = typeOK and completePointer and not(s.badCAS) and not(s.badRevival)
+    and not(s.badRecovery) and not(s.badObservation)
   val safety = protocolSafety and singleReady
 
 }
 
+module Synchronized {
+  import LeaseElection(Skew = 0, Jump = false, BrokenCAS = false, Revive = false, CachedCheck = false).*
+}
 module WithinMargin {
-  import LeaseElection(Skew = 1, Jump = false, BrokenCAS = false, Revive = false, CachedCheck = false,
-    UnsafeAck = false, EarlyPromotion = false, WrongBaseline = false, RebaseMutation = false).*
+  import LeaseElection(Skew = 1, Jump = false, BrokenCAS = false, Revive = false, CachedCheck = false).*
 }
 module ExcessSkew {
-  import LeaseElection(Skew = 2, Jump = false, BrokenCAS = false, Revive = false, CachedCheck = false,
-    UnsafeAck = false, EarlyPromotion = false, WrongBaseline = false, RebaseMutation = false).*
+  import LeaseElection(Skew = 2, Jump = false, BrokenCAS = false, Revive = false, CachedCheck = false).*
 }
 module ForwardJump {
-  import LeaseElection(Skew = 2, Jump = true, BrokenCAS = false, Revive = false, CachedCheck = false,
-    UnsafeAck = false, EarlyPromotion = false, WrongBaseline = false, RebaseMutation = false).*
+  import LeaseElection(Skew = 2, Jump = true, BrokenCAS = false, Revive = false, CachedCheck = false).*
 }
 module BackwardJump {
-  import LeaseElection(Skew = -2, Jump = true, BrokenCAS = false, Revive = false, CachedCheck = false,
-    UnsafeAck = false, EarlyPromotion = false, WrongBaseline = false, RebaseMutation = false).*
+  import LeaseElection(Skew = -2, Jump = true, BrokenCAS = false, Revive = false, CachedCheck = false).*
 }
 module NoCAS {
-  import LeaseElection(Skew = 0, Jump = false, BrokenCAS = true, Revive = false, CachedCheck = false,
-    UnsafeAck = false, EarlyPromotion = false, WrongBaseline = false, RebaseMutation = false).*
+  import LeaseElection(Skew = 0, Jump = false, BrokenCAS = true, Revive = false, CachedCheck = false).*
 }
 module LateRenewal {
-  import LeaseElection(Skew = 0, Jump = false, BrokenCAS = false, Revive = true, CachedCheck = false,
-    UnsafeAck = false, EarlyPromotion = false, WrongBaseline = false, RebaseMutation = false).*
+  import LeaseElection(Skew = 0, Jump = false, BrokenCAS = false, Revive = true, CachedCheck = false).*
 }
 module CachedConfirmation {
-  import LeaseElection(Skew = 2, Jump = false, BrokenCAS = false, Revive = false, CachedCheck = true,
-    UnsafeAck = false, EarlyPromotion = false, WrongBaseline = false, RebaseMutation = false).*
+  import LeaseElection(Skew = 2, Jump = false, BrokenCAS = false, Revive = false, CachedCheck = true).*
 }

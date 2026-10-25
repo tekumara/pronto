@@ -6,10 +6,10 @@ or approve a deployment. See the [safety validation report](VALIDATION.md) and
 [conditional liveness checks](LIVENESS.md) for results and assumptions. In particular,
 GitHub recovery alone does not retry a terminal failed publication.
 
-The [Quint election and recovery-history analysis](quint/README.md) models clocks,
-concurrent acquisition and bounded acknowledgement recoverability together. It
-reproduces overlapping readiness beyond the local clock margin without treating
-that as a successful durability acknowledgement. Run it with `mise run quint:check`.
+The separate [Quint leader-election analysis](quint/README.md) models clocks and
+concurrent acquisition contenders. It reproduces overlapping readiness beyond
+the local clock margin, while distinguishing that from successful durability
+acknowledgements. Run it with `mise run quint:check`.
 
 ## Run the checks
 
