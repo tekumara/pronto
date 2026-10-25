@@ -5,3 +5,5 @@ node_modules/
 .envrc
 # Quint's Apalache compiler/server output
 /_apalache-out/
+# Local k3d kubeconfig, credentials and verification evidence
+/.k3d/

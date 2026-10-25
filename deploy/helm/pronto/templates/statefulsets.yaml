@@ -1,0 +1,119 @@
+{{- if .Values.enabled }}
+{{- if lt (int .Values.replicaCount) 2 }}{{ fail "replicated deployment requires at least two contenders" }}{{ end }}
+{{- $root := . }}
+{{- range $index := until (int .Values.replicaCount) }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $root.Release.Name }}-{{ $index }}
+spec:
+  # Independent singleton controllers allow replacing either contender.
+  # OnDelete avoids owner-only readiness blocking a rolling update.
+  replicas: 1
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  serviceName: {{ $root.Release.Name }}-pods
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      pronto-contender: {{ $index | quote }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pronto
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+        pronto-contender: {{ $index | quote }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: {{ $root.Release.Name }}
+                    app.kubernetes.io/name: pronto
+      initContainers:
+        - name: seed-pi
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: ["node", "-e"]
+          args:
+            - "const fs=require('node:fs'); for(const f of ['auth.json','models.json','settings.json']) {fs.copyFileSync('/pi-source/'+f,'/pi/'+f); fs.chmodSync('/pi/'+f,0o600);}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: pi-source, mountPath: /pi-source, readOnly: true}
+            - {name: pi, mountPath: /pi}
+      containers:
+        - name: pronto
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          args: ["serve", "--replicated-state", "--host", "0.0.0.0", "--port", "8080"{{ if $root.Values.model }}, {{ $root.Values.model | quote }}{{ end }}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          envFrom:
+            - secretRef: {name: {{ $root.Values.appSecret }}}
+            - secretRef: {name: {{ $root.Values.s3Secret }}}
+          env:
+            - {name: PRONTO_REPLICA_URL, value: {{ printf "s3://%s/%s" $root.Values.replica.bucket $root.Values.replica.prefix | quote }}}
+            - {name: PRONTO_S3_ENDPOINT, value: {{ $root.Values.replica.endpoint | quote }}}
+            - {name: PRONTO_S3_PATH_STYLE, value: "true"}
+            - {name: AWS_REGION, value: {{ $root.Values.replica.region | quote }}}
+            - {name: HOME, value: /tmp}
+          ports:
+            - {name: http, containerPort: 8080}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 1
+            successThreshold: 1
+          resources:
+            {{- toYaml $root.Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: state, mountPath: /state}
+            - {name: pi, mountPath: /pi}
+            - {name: tmp, mountPath: /tmp}
+            {{- if $root.Values.verificationConfigMap }}
+            - {name: verification, mountPath: /app/verification, readOnly: true}
+            {{- end }}
+      volumes:
+        # No shared SQLite filesystem. Recovery comes from RustFS, not this cache.
+        - {name: state, emptyDir: {}}
+        - {name: pi, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+        - name: pi-source
+          secret:
+            secretName: {{ $root.Values.piSecret }}
+            defaultMode: 0440
+        {{- if $root.Values.verificationConfigMap }}
+        - name: verification
+          configMap: {name: {{ $root.Values.verificationConfigMap }}}
+        {{- end }}
+{{- end }}
+{{- end }}

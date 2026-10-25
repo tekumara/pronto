@@ -74,3 +74,5 @@ External agents can read and run audits and use the discussion skill through an 
 See the [technical guide](GUIDE.md) for setup, usage, audit behaviour and development details.
 
 Serve also has an opt-in `--replicated-state` experiment using stock Litestream and S3-compatible storage. It defaults to off. See [replicated state setup and safety limits](REPLICATED_STATE.md), including the real RustFS integration command. It is not production hard fencing.
+
+For a local Kubernetes deployment, see [replicated Pronto and RustFS on k3d with Helm](deploy/README.md). Host tools are managed with mise.

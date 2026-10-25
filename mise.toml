@@ -2,8 +2,11 @@
 node = "26"
 java = "temurin-21"
 "npm:@informalsystems/quint" = "0.33.0"
-"github:benbjohnson/litestream" = "latest"
+"github:benbjohnson/litestream" = "0.5.17"
 "github:rustfs/rustfs" = "1.0.3"
+k3d = "5.9.0"
+helm = "4.2.4"
+kubectl = "1.34.12"
 
 [tasks."quint:check"]
 description = "Check the bounded leader-election model and its negative controls"

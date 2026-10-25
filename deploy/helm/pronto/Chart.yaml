@@ -1,0 +1,6 @@
+apiVersion: v2
+name: pronto
+description: Experimental active/standby Pronto with stock Litestream
+type: application
+version: 0.1.0
+appVersion: "0.0.0"

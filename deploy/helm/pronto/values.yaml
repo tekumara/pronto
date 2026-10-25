@@ -1,0 +1,24 @@
+enabled: true
+replicaCount: 2
+image:
+  repository: pronto
+  tag: local
+  pullPolicy: IfNotPresent
+appSecret: pronto-app
+piSecret: pronto-pi
+# Passed explicitly so an unavailable model cannot silently fall back.
+model: ""
+s3Secret: pronto-s3
+replica:
+  bucket: pronto
+  # Never reset control.json or reuse a retired term prefix.
+  prefix: live
+  endpoint: http://rustfs-svc.pronto-storage.svc.cluster.local:9000
+  region: us-east-1
+verificationConfigMap: ""
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi

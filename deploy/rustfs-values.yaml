@@ -1,0 +1,40 @@
+# Official rustfs chart 1.0.3 from https://charts.rustfs.com.
+fullnameOverride: rustfs
+mode:
+  standalone:
+    enabled: true
+    strategy:
+      type: Recreate
+  distributed:
+    enabled: false
+replicaCount: 1
+image:
+  rustfs:
+    tag: "1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b"
+  initImage:
+    tag: "1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+secret:
+  existingSecret: rustfs-credentials
+serviceAccount:
+  automount: false
+service:
+  type: ClusterIP
+ingress:
+  enabled: false
+config:
+  rustfs:
+    console_enable: "false"
+    obs_log_directory: ""
+storageclass:
+  name: local-path
+  dataStorageSize: 2Gi
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1536Mi
+livenessProbe:
+  initialDelaySeconds: 10
+readinessProbe:
+  initialDelaySeconds: 3

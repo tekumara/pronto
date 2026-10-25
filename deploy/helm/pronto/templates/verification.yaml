@@ -1,0 +1,48 @@
+{{- if .Values.verificationConfigMap }}
+# Test-only external HTTP fixtures; Pronto, SQLite, Litestream and S3 remain real.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-fixture
+spec:
+  selector:
+    pronto-fixture: {{ .Release.Name }}
+  ports:
+    - {name: http, port: 8081, targetPort: 8081}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      pronto-fixture: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        pronto-fixture: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000}
+      containers:
+        - name: fixture
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["node", "/app/verification/fixture.mjs"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /stats, port: 8081}
+            periodSeconds: 1
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - {name: verification, mountPath: /app/verification, readOnly: true}
+      volumes:
+        - name: verification
+          configMap: {name: {{ .Values.verificationConfigMap }}}
+{{- end }}

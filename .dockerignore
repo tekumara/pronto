@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!src/
+!src/**
+!deploy/
+!deploy/container/
+!deploy/container/**
