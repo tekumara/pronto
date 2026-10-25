@@ -1,4 +1,43 @@
-# Recorded leader-election checks
+# Quint validation results
+
+## Integrated history run (24 October 2026)
+
+`mise run quint:check` passed with the bounded recovery-history model. It ran
+16 deterministic scenario executions, 1,000 seeded 50-step simulations and 12
+Quint/TLC checks. This is bounded evidence under the
+[model assumptions](README.md#bounds-and-assumptions), not proof of the application.
+
+| Configuration | Step | Invariant | Distinct states | Depth | Outcome |
+| --- | --- | --- | ---: | ---: | --- |
+| WithinMargin | `leaseStep` | `safety` | 173,658 | 32 | Complete, no violation |
+| WithinMargin | `controlStep` | `protocolSafety` | 35,957 | 43 | Complete, no violation |
+| WithinMargin | `recoveryStep` | `safety` | 39,015 | 36 | Complete, no violation |
+| ExcessSkew | `leaseStep` | `protocolSafety` | 230,972 | 32 | Complete, no violation |
+| ExcessSkew | `recoveryStep` | `protocolSafety` | 45,225 | 36 | Complete, no violation |
+| ExcessSkew | `recoveryStep` | `singleReady` | 35,340 | 23 | Expected overlapping-readiness trace |
+| ForwardJump | `leaseStep` | `singleReady` | 178,288 | 24 | Expected clock-jump trace |
+| BackwardJump | `leaseStep` | `singleReady` | 191,661 | 26 | Expected clock-jump trace |
+| NoCAS | `leaseStep` | `protocolSafety` | 136 | 7 | Expected stale-CAS failure |
+| NoCAS | `leaseStep` | `controlDiscipline` | 136 | 7 | Expected stale-control failure |
+| LateRenewal | `leaseStep` | `protocolSafety` | 6,383 | 13 | Expected revival failure |
+| CachedConfirmation | `step` | `protocolSafety` | 552,890 | 21 | Expected stale-observation failure |
+
+Safe searches completed with empty queues. Expected-failure searches stopped at
+the first counterexample. The runner parsed each trace and checked the named
+failure. Deterministic scenarios also exercised early acknowledgement, early
+promotion, wrong baselines and rebased mutations against their intended properties.
+
+`recoveryStep` jointly explores clocks, takeover, source selection, baseline
+creation, upload and delayed acknowledgement. It omits renewal and cleanup. The
+other projections check lease timing, barriers and cleanup separately. A broader
+`WithinMargin step` exploration did not complete within 10 minutes, so the runner
+does not claim exhaustive checking of that full product graph.
+
+The run used Quint 0.33.0 through mise and Apalache 0.62.1 with its bundled TLC.
+The checker recorded logs, traces and input hashes in its session-local evidence
+directory. It did not change production code.
+
+## Election-only run (22 October 2026)
 
 The 22 October 2026 run completed all 11 Quint/TLC checks. The combined
 WithinMargin model explored 12,690,979 distinct states with no invariant violation

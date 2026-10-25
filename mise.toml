@@ -5,5 +5,5 @@ java = "temurin-21"
 "github:rustfs/rustfs" = "1.0.3"
 
 [tasks."quint:check"]
-description = "Check the bounded leader-election model and its negative controls"
+description = "Check the bounded election and recovery-history model"
 run = "python3 protocol/quint/check.py"

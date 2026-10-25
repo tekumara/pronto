@@ -128,7 +128,8 @@ def verify(main, step, invariant, failure=None):
         if failure == "singleReady":
             require(all(len(ready(x["state"])) <= 1 for x in states[:-1]), "Earlier unreported readiness violation")
             require(len(ready(states[-1]["state"])) == 2, "Counterexample does not have two locally ready terms")
-            require(not any(states[-1]["state"][f] for f in ("badCAS", "badRevival", "badRecovery", "badObservation")),
+            require(not any(states[-1]["state"][f] for f in
+                    ("badCAS", "badRevival", "badRecovery", "badObservation", "badControlDiscipline")),
                     "Readiness counterexample depends on another protocol failure")
             if main in ("ForwardJump", "BackwardJump"):
                 require(any(before["state"]["offset"] == 0 and after["state"]["offset"] != 0
@@ -163,31 +164,37 @@ def main():
     require(code == 0, "Quint typecheck failed")
     code, _ = command("typecheck-scenarios", ["quint", "typecheck", str(HERE / "Scenarios.qnt")])
     require(code == 0, "Quint scenario typecheck failed")
-    for module, tests in [
-        ("Synchronized", "(competingInitialization|expiredAcquisition|delayedRenewal|ambiguousPromotion)Test"),
-        ("ExcessSkew", "(skewOverlap|staleCheck|delayedObservation)Test"),
-        ("ForwardJump", "forwardJumpTest"),
-        ("BackwardJump", "backwardJumpTest"),
-        ("LateRenewal", "lateRenewalMutationTest"),
+    for module, tests, expected in [
+        ("Synchronized", "(competingInitialization|expiredAcquisition|delayedRenewal|ambiguousPromotion)Test", 4),
+        ("ExcessSkew", "(skewOverlap|staleCheck|delayedObservation)Test", 3),
+        ("ForwardJump", "forwardJumpTest", 1),
+        ("BackwardJump", "backwardJumpTest", 1),
+        ("LateRenewal", "lateRenewalMutationTest", 1),
+        ("RecoveryHistory", "delayedObservationTest", 1),
+        ("EarlyAcknowledgement", "earlyAcknowledgementTest", 1),
+        ("EarlyPromotion", "earlyPromotionTest", 1),
+        ("WrongBaseline", "wrongBaselineTest", 1),
+        ("RebasedMutation", "rebasedMutationTest", 1),
+        ("NoCAS", "staleCASDisciplineTest", 1),
     ]:
         code, log = command(f"tests-{module}", ["quint", "test", str(HERE / "Scenarios.qnt"), f"--main={module}Tests",
             f"--match={tests}", "--backend=typescript", "--seed=1"])
-        expected = {"Synchronized": 4, "ExcessSkew": 3, "ForwardJump": 1, "BackwardJump": 1, "LateRenewal": 1}[module]
         require(code == 0 and f"{expected} passing" in log, f"Scenario tests failed or did not run: {module}")
     # Random simulation is supplementary coverage of the combined action set, not exhaustive evidence.
     code, log = command("simulation", ["quint", "run", str(MODEL), "--main=WithinMargin", "--invariant=safety",
         "--max-samples=1000", "--max-steps=50", "--seed=20261022", "--backend=typescript"])
     require(code == 0 and "No violation found" in log, "Combined simulation failed")
     rows = [
-        verify("Synchronized", "leaseStep", "safety"),
         verify("WithinMargin", "leaseStep", "safety"),
-        verify("WithinMargin", "controlStep", "safety"),
-        verify("WithinMargin", "step", "safety"),
+        verify("WithinMargin", "controlStep", "protocolSafety"),
+        verify("WithinMargin", "recoveryStep", "safety"),
         verify("ExcessSkew", "leaseStep", "protocolSafety"),
-        verify("ExcessSkew", "leaseStep", "singleReady", "singleReady"),
+        verify("ExcessSkew", "recoveryStep", "protocolSafety"),
+        verify("ExcessSkew", "recoveryStep", "singleReady", "singleReady"),
         verify("ForwardJump", "leaseStep", "singleReady", "singleReady"),
         verify("BackwardJump", "leaseStep", "singleReady", "singleReady"),
         verify("NoCAS", "leaseStep", "protocolSafety", "badCAS"),
+        verify("NoCAS", "leaseStep", "controlDiscipline", "badControlDiscipline"),
         verify("LateRenewal", "leaseStep", "protocolSafety", "badRevival"),
         verify("CachedConfirmation", "step", "protocolSafety", "badObservation"),
     ]

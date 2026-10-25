@@ -1,4 +1,4 @@
-# Leader-election analysis with Quint
+# Election and recovery-history analysis with Quint
 
 Pronto can report 2 ready processes if a contender's wall clock leads the lease
 writer by more than the 5-second local margin. A 10-second lead reproduces this
@@ -9,7 +9,8 @@ This is a confirmed implementation limitation outside an unenforced clock
 assumption, not evidence of 2 successful concurrent durability acknowledgements.
 In the replay, the old process rejects a new webhook with 503 when its fresh
 ownership GET observes the successor. No production behaviour was changed.
-See the [recorded results and tool identity](VALIDATION.md).
+The bounded Quint model also checks acknowledgement and recovery-baseline safety
+during takeover. See the [recorded results and tool identity](VALIDATION.md).
 
 ## Run the analysis
 
@@ -32,9 +33,9 @@ mise exec -- npm test
 ```
 
 `quint:check` requires Python 3.10 or later. It runs the actual mise-managed Quint
-CLI, not a Python implementation of the election. It typechecks, executes 10
-deterministic scenarios, simulates 1,000 seeded 50-step runs, and checks the finite
-models using Quint's TLC backend. The combined finite check takes several minutes.
+CLI, not a Python implementation of the election. It typechecks, executes 16
+deterministic scenario runs, simulates 1,000 seeded 50-step runs, and checks the
+finite models using Quint's TLC backend. The complete check may take several minutes.
 Each verification has a 600-second timeout. Timeout, parse failure, unexpected
 invariant failure, changed inputs or incomplete exploration fails the command.
 
@@ -45,6 +46,38 @@ backend jar SHA-256, Java version, Quint version, input hashes, full output and
 parsed counterexample states in a printed private temporary directory. It does
 not claim independent signature verification of the backend download.
 Apalache's generated `_apalache-out/` directory is ignored by Git.
+
+### Run a scenario in the REPL
+
+Run Quint from `protocol/quint` so the scenario file and its relative imports resolve:
+
+```bash
+cd protocol/quint
+mise exec -- quint -r Scenarios.qnt::SynchronizedTests
+```
+
+At the REPL prompt, run a scenario such as `acquireA`:
+
+```text
+>>> acquireA
+```
+
+`Scenarios` needs values for all nine `Cfg*` constants. Do not load it directly
+with `-r Scenarios.qnt::Scenarios`, which selects the unconfigured module. Use a
+configured wrapper such as `SynchronizedTests`, `RecoveryHistoryTests`,
+`ExcessSkewTests` or one of the mutation-test modules.
+
+To set your own values, load the file without selecting a module, then import
+`Scenarios` with every configuration value supplied:
+
+```bash
+mise exec -- quint -r Scenarios.qnt
+```
+
+```text
+>>> import Scenarios(CfgSkew = 0, CfgJump = false, CfgBrokenCAS = false, CfgRevive = false, CfgCachedCheck = false, CfgUnsafeAck = false, CfgEarlyPromotion = false, CfgWrongBaseline = false, CfgRebaseMutation = false).*
+>>> acquireA
+```
 
 For an individual counterexample, use the pinned CLI directly:
 
@@ -154,49 +187,60 @@ overapproximation.
 ## Model and checks
 
 `LeaseElection.qnt` keeps shared control separate from each actor's observed
-head, captured conditional request, response, monotonic deadline, baseline,
-cancellation, local readiness and barrier progress.
+head, conditional request, local deadline, baseline and readiness. It also tracks
+a small recovery history through source selection, baseline creation, upload and
+acknowledgement.
 
-Acquisition GET observation, request preparation, CAS and response are separate
-actions. Renewal and promotion share one pending slot. A CAS can complete after
-local loss. Conflict and lost-response paths do not install new authority.
-Bootstrap details are condensed into a complete-baseline action. Cleanup's fresh
-GET and preparation are combined, but its CAS is separate and can conflict.
+Acquisition GET, request preparation, CAS and response are separate actions.
+Renewal and promotion share one pending slot. A write can complete after local
+loss. Conflicts and lost responses do not create local authority. Bootstrap
+selects a fixed source history before it builds an independent baseline.
 
-`protocolSafety` checks these properties:
+The model uses 2 operation IDs, one per term. It stores each prefix's latest
+history as a two-bit membership set. This is enough to check recoverability and
+baseline inclusion, but not history ordering or arbitrary operation sequences.
 
+`protocolSafety` includes these properties:
+
+- `ackRecoverable`: each acknowledged operation appears in the history of the prefix named by control
+- `completeBaseline`: the recovery pointer names a completed baseline, and ready control names its owner's prefix
+- `baselineContainsSelected`: a new baseline matches its fixed restore selection, with an uploaded operation added afterwards
+- `mutationUsesObservedHead`: pending renewals and promotions use the term's observed revision
+- `controlDiscipline`: revisions change with writes, bootstrapping preserves the recovery pointer, and stale CAS cannot change control
 - a ready actor acquired a term and completed its baseline
-- ready control points to a complete baseline belonging to its owner
-- a successful CAS uses the captured, still-current revision
-- non-promotion mutations preserve the complete recovery pointer
 - a delayed renewal response does not revive expired or cancelled authority
 - a successful ownership observation matches owner, phase, prefix and expiry
 
-`singleReady` independently checks that at most one actor would pass local
-readiness now. `safety` combines it with `protocolSafety`.
+The model checks control discipline on CAS transitions. Actor IDs are process IDs,
+not acquisition-ordered term numbers. It therefore omits the TLA model's numeric
+recovery-order check. The acknowledgement and baseline properties check history
+preservation instead.
 
-The runner checks these configurations:
+`singleReady` checks whether more than one actor would pass local readiness.
+`safety` combines that check with `protocolSafety`.
+
+The runner checks these complete finite graphs and expected counterexamples:
 
 | Configuration | Actions | Required outcome |
 | --- | --- | --- |
-| Synchronized | `leaseStep` | `safety` holds through the complete finite graph |
-| WithinMargin, +5,000 ms | `leaseStep`, `controlStep`, and combined `step` | `safety` holds through each complete finite graph |
-| ExcessSkew, +10,000 ms | `leaseStep` | `protocolSafety` holds; `singleReady` has a counterexample |
-| ForwardJump and BackwardJump | `leaseStep` | `singleReady` has a counterexample with a clock adjustment after a term is ready |
-| NoCAS mutation | `leaseStep` | Counterexample caused by accepting a stale conditional write |
-| LateRenewal mutation | `leaseStep` | Counterexample caused by reviving expired authority |
-| CachedConfirmation mutation | Combined `step` | Counterexample caused by accepting a stale local ownership belief instead of a fresh GET |
+| WithinMargin, +5,000 ms | `leaseStep`, `controlStep` and `recoveryStep` | All checked safety invariants hold |
+| ExcessSkew, +10,000 ms | `leaseStep` and `recoveryStep` | `protocolSafety` holds; `singleReady` has an overlap counterexample |
+| ForwardJump and BackwardJump | `leaseStep` | `singleReady` fails after the clock adjustment |
+| NoCAS mutation | `leaseStep` | Stale CAS violates `protocolSafety` and `controlDiscipline` |
+| LateRenewal mutation | `leaseStep` | A late response violates `protocolSafety` by reviving authority |
+| CachedConfirmation mutation | `step` | A stale local belief violates the fresh-observation check |
 
-The last 3 are deliberately broken models, not findings against current code.
-The runner requires the exact invariant failure and parses every printed trace
-state. It checks the named cause, not just nonzero exit. Safe checks require
-successful completion and an empty queue. Supplementary simulation is seeded
-with `20261022`; its absence of failures is not exhaustive evidence.
+Deterministic scenarios also check early acknowledgement, early promotion, wrong
+baselines and rebased mutations. Each must violate its intended property. These
+are unsafe model controls, not findings against production. Safe TLC searches
+must finish with an empty queue. Expected counterexamples must fail for the
+named invariant. Seeded simulation is supplementary evidence.
 
-`leaseStep` omits cleanup and barriers to focus on lease timing. `controlStep`
-fixes time at zero to focus on cancellation, release and barriers. The combined
-`step` check for WithinMargin includes both sets, so the safety claim for that
-configuration does not rely on composing the separate projections.
+`leaseStep` focuses on lease timing and baseline transitions. `controlStep` keeps
+time fixed while it checks barriers, loss and cleanup. `recoveryStep` combines
+clock ticks, takeover, source selection, baseline creation, upload and delayed
+acknowledgement. It omits renewal and cleanup to keep the joint search tractable.
+The other projections check those paths separately.
 
 ## Bounds and assumptions
 
@@ -208,6 +252,7 @@ These are finite checks, not a proof of the TypeScript implementation:
 - wall-clock offsets of zero, +5,000 ms or +10,000 ms; jump variants change B's offset once by +10,000 ms or -10,000 ms
 - equal-rate monotonic clocks with no backwards movement or suspend-specific behaviour
 - atomic conditional control writes, strongly consistent GET, unique UUIDs/revisions and no control deletion or ABA
+- two operation IDs and one operation per term; histories are membership sets, not ordered logs
 - successful baseline creation and term-isolated, retained prefixes as in the existing protocol model
 
 The complete search has no execution-depth cap, state constraint, symmetry
@@ -223,10 +268,11 @@ requires a fresh incarnation, but this model does not independently model
 persistent process identity. The real integration suite separately exercises a
 parent crash, child death, competing initialization and recovery.
 
-For acknowledgement/recovery-history safety and conditional liveness, retain
-[the existing TLA+ analysis](../README.md). This Quint analysis adds election
-clocks and overlapping contenders; it does not replace or re-prove that work.
-No new liveness guarantee follows under arbitrary pauses or storage outages.
+The Quint model now checks bounded acknowledgement and baseline safety with
+lease timing. Retain [the TLA+ analysis](../README.md) for its fuller history
+model, unsafe protocol variants and conditional liveness checks. Neither model
+proves the TypeScript implementation correct or guarantees progress under
+arbitrary pauses or storage outages.
 
 ## Follow-up decisions
 
