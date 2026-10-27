@@ -105,7 +105,7 @@ def trace(log, main):
 
 def ready(state):
     return [i for i, a in state["actors"].items()
-            if a["ready"] and not a["stopped"] and state["now"] < a["deadline"]]
+            if a["stage"] == "ready" and not a["stopped"] and state["now"] < a["deadline"]]
 
 
 def verify(main, step, invariant, failure=None):

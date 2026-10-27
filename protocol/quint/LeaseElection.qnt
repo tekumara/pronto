@@ -15,8 +15,8 @@ module LeaseElection {
   type Pending = { kind: str, expected: int, start: int, expires: int,
                    phase: str, recovery: int, outcome: str, resultRevision: int }
   type Actor = { stage: str, head: int, headRecovery: int, deadline: int,
-                 ready: bool, stopped: bool, acquired: bool, baseline: bool,
-                 renewed: bool, released: bool, seen: Control, pending: Pending, barrier: str }
+                 stopped: bool, baseline: bool, renewed: bool, released: bool,
+                 seen: Control, pending: Pending, barrier: str }
   type State = { now: int, offset: int, control: Control, actors: int -> Actor,
                  badCAS: bool, badRevival: bool, badRecovery: bool, badObservation: bool }
   var s: State
@@ -25,13 +25,17 @@ module LeaseElection {
   pure val emptyPending: Pending = { kind: "", expected: 0, start: 0, expires: 0,
     phase: "idle", recovery: -1, outcome: "", resultRevision: 0 }
   pure val emptyActor: Actor = { stage: "new", head: 0, headRecovery: -1, deadline: 0,
-    ready: false, stopped: false, acquired: false, baseline: false, renewed: false,
-    released: false, seen: emptyControl, pending: emptyPending, barrier: "idle" }
+    stopped: false, baseline: false, renewed: false, released: false,
+    seen: emptyControl, pending: emptyPending, barrier: "idle" }
 
   def actor(i) = s.actors.get(i)
+  // Derived state, not independent bookkeeping: a positive head records an observed acquisition;
+  // stopped masks the historical ready stage. The monotonic deadline remains separate.
+  def acquired(i) = actor(i).head > 0
+  def ready(i) = actor(i).stage == "ready" and not(actor(i).stopped)
   def wall(i) = s.now + (if (i == 1) s.offset else 0)
   def live(i) = not(actor(i).stopped) and s.now < actor(i).deadline
-  def locallyReady(i) = actor(i).ready and live(i)
+  def locallyReady(i) = ready(i) and live(i)
   def confirms(i) = and {
     s.control.owner == i, s.control.phase == "ready", s.control.recovery == i,
     s.control.expires > wall(i) + MARGIN,
@@ -93,17 +97,15 @@ module LeaseElection {
         actors: s.actors.set(i,
           if (p.kind == "release") { ...a, pending: emptyPending, stage: "spent" }
           else if (accept) { ...a, pending: emptyPending,
-            stage: if (p.kind == "promote" or a.ready) "ready" else "bootstrapping",
-            acquired: true, head: p.resultRevision, headRecovery: p.recovery,
-            deadline: p.start + TTL - MARGIN, stopped: false,
-            ready: p.kind == "promote" or a.ready }
-          else { ...a, pending: emptyPending, stopped: true, ready: false,
-            acquired: a.acquired or (p.kind == "acquire" and p.outcome == "ok" and not(lost)),
+            stage: if (p.kind == "promote" or ready(i)) "ready" else "bootstrapping",
+            head: p.resultRevision, headRecovery: p.recovery,
+            deadline: p.start + TTL - MARGIN, stopped: false }
+          else { ...a, pending: emptyPending, stopped: true,
             head: if (p.outcome == "ok" and not(lost)) p.resultRevision else a.head,
             headRecovery: if (p.outcome == "ok" and not(lost)) p.recovery else a.headRecovery,
             deadline: if (p.kind == "acquire" and p.outcome == "ok" and not(lost))
               p.start + TTL - MARGIN else a.deadline,
-            stage: if (a.acquired) a.stage else "spent" }),
+            stage: if (acquired(i)) a.stage else "spent" }),
       },
     }
   }
@@ -117,22 +119,22 @@ module LeaseElection {
   action prepareMutation(i, promote) = {
     val a = actor(i)
     all {
-      a.acquired, live(i), a.pending.kind == "",
+      acquired(i), live(i), a.pending.kind == "",
       if (promote) a.stage == "bootstrapping" and a.baseline else not(a.renewed),
       s' = { ...s, actors: s.actors.set(i, { ...a, renewed: a.renewed or not(promote),
         pending: { kind: if (promote) "promote" else "renew", expected: a.head,
           start: s.now, expires: wall(i) + TTL,
-          phase: if (promote or a.ready) "ready" else "bootstrapping",
+          phase: if (promote or ready(i)) "ready" else "bootstrapping",
           recovery: if (promote) i else a.headRecovery, outcome: "request", resultRevision: 0 } }) },
     }
   }
   action lose(i) = all {
-    actor(i).acquired, not(actor(i).stopped),
-    s' = { ...s, actors: s.actors.set(i, { ...actor(i), stopped: true, ready: false }) },
+    acquired(i), not(actor(i).stopped),
+    s' = { ...s, actors: s.actors.set(i, { ...actor(i), stopped: true }) },
   }
   // Cleanup waits for the serialized mutation; then a NEW fresh read may release only its own term.
   action prepareRelease(i) = all {
-    actor(i).acquired, actor(i).stopped, not(actor(i).released), actor(i).pending.kind == "",
+    acquired(i), actor(i).stopped, not(actor(i).released), actor(i).pending.kind == "",
     s.control.owner == i,
     (s.control.phase == "ready" and s.control.recovery == i) or
       (s.control.phase == "bootstrapping" and s.control.recovery == actor(i).headRecovery),
@@ -159,7 +161,7 @@ module LeaseElection {
     actor(i).barrier.in(Set("observed", "failed")),
     s' = { ...s, actors: s.actors.set(i,
       if (actor(i).barrier == "observed" and locallyReady(i)) { ...actor(i), barrier: "returned" }
-      else { ...actor(i), barrier: "rejected", stopped: true, ready: false }) },
+      else { ...actor(i), barrier: "rejected", stopped: true }) },
   }
   action tick = all { s.now < MAX_TIME, s' = { ...s, now: s.now + 1 } }
   action jumpClock = all {
@@ -194,7 +196,7 @@ module LeaseElection {
     s.now.in(0.to(MAX_TIME)), s.control.owner.in(NODES.union(Set(-1))),
     s.control.recovery.in(NODES.union(Set(-1))), s.control.revision.in(0.to(8)),
     (s.control.phase == "idle") == (s.control.owner == -1),
-    NODES.forall(i => actor(i).ready implies (actor(i).acquired and actor(i).baseline)),
+    NODES.forall(i => ready(i) implies (acquired(i) and actor(i).baseline)),
   }
   val completePointer = s.control.phase == "ready" implies
     (s.control.recovery == s.control.owner and actor(s.control.owner).baseline)

@@ -1,8 +1,11 @@
 # Recorded leader-election checks
 
-The 22 October 2026 run completed all 11 Quint/TLC checks. The combined
+The 25 October 2026 run completed all 11 Quint/TLC checks. The combined
 WithinMargin model explored 12,690,979 distinct states with no invariant violation
-and an empty queue. This is bounded model-checking evidence under the
+and an empty queue. Deriving the actor's acquisition and readiness fields preserved
+every outcome, generated/distinct-state count, queue count and search depth, as well
+as every normalized counterexample trace, from the 22 October baseline. This is
+bounded model-checking evidence under the
 [model's assumptions](README.md#bounds-and-assumptions), not proof of the application.
 
 Real RustFS/Litestream replays confirmed overlapping readiness from excessive
@@ -66,7 +69,7 @@ Apalache backend jar SHA-256:
 880c0b2b72354816f12e9a9755829f2907071e9a181ffea1937954c23d54739d
 
 LeaseElection.qnt SHA-256:
-30181ef1efbbeb2d15dfbabaa50289c40557ab72e8005d46e2fe4603a7ac008c
+ca8f789fc5296706d73418210d61d60db71a0af0e3b3b1e0438c83f68c1de982
 
 Scenarios.qnt SHA-256:
 7fa23f1933056de1a7166534c942221151d2112c9135c6b27d42f8f94e4fdfa2
@@ -80,10 +83,10 @@ in the session-local directory below. It is temporary evidence, not a portable
 repository dependency. Run `mise run quint:check` to generate a new evidence set.
 
 ```text
-/var/folders/d8/ksz8jtjs71dg8nf53mpw9jk00000gp/T/pronto-quint-f41gzs5s
+/var/folders/d8/ksz8jtjs71dg8nf53mpw9jk00000gp/T/pronto-quint-2p41kt8e
 ```
 
-The implementation test logs from this session are in
+The implementation test logs from the 22 October session are in
 `/tmp/pronto-quint-unit-final.log` and
 `/tmp/pronto-quint-integration-final.log`. The existing protocol check output is
 in `/tmp/pronto-existing-protocol-final.log`.
