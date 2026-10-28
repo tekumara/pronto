@@ -603,6 +603,8 @@ test("an unstructured final answer cannot bypass complete report validation, pos
   const result = await done;
   assert.equal(result.code, 1);
   assert.match(result.stderr, /without a complete assessment/);
+  assert.match(result.stderr, /conversation=\d+, submission=\d+, model=local\/test/);
+  assert.match(result.stderr, /No assessment rejection was recorded\./);
   assert.doesNotMatch(result.stdout, /Verdict:|Everything is addressed/);
   assert.equal(github.comments.length, 0);
   assert.equal(github.approvals.length, 0);
@@ -612,7 +614,9 @@ test("a report without a database-migration classification cannot post a verdict
   const github = githubEvidence({ empty: true });
   let calls = 0;
   const f = await fixture(t, (body, response) => {
-    if (++calls === 1) return tool(response, "report_review_assessment", { assessments: [] });
+    if (++calls === 1) return tool(response, "report_review_assessment", { assessments: [{ commentKey: "inline:1", findings: [
+      { summary: "PRIVATE-SUMMARY", status: "addressed", reason: "PRIVATE-REASON", evidence: [evidenceUrl] },
+    ] }] });
     assert.match(body.messages.at(-1)?.content ?? "", /databaseMigration/);
     reply(response, [{ role: "assistant", content: "Done." }]);
   }, { entrypoint: resolve("audit.ts"), github: github.handler });
@@ -621,6 +625,9 @@ test("a report without a database-migration classification cannot post a verdict
   const result = await done;
   assert.equal(result.code, 1);
   assert.match(result.stderr, /without a complete assessment/);
+  assert.match(result.stderr, /Last assessment rejection:.*databaseMigration/);
+  assert.match(result.stderr, /conversation=\d+, submission=\d+, model=local\/test/);
+  assert.doesNotMatch(result.stderr, /Received arguments|PRIVATE-|"assessments"/);
   assert.doesNotMatch(result.stdout, /Verdict:/);
   assert.equal(github.comments.length, 0);
   assert.equal(github.approvals.length, 0);

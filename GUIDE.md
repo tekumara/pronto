@@ -197,6 +197,8 @@ Add `--verbose` to include ignored deliveries, duplicates, coalesced requests, d
 
 Retries, failures, recovery and shutdown messages remain visible without `--verbose`. Warnings and errors go to stderr; activity and debug messages go to stdout. For example, capture both with `pronto serve --apply 2>&1 | tee -a pronto.log`.
 
+Incomplete-assessment errors include the conversation, submission and model identifiers, plus the latest saved assessment rejection when available. Diagnostics are length-limited and omit the reporting tool's argument dump.
+
 ### Webhook reliability
 
 In serve mode, Pronto saves accepted audit requests before returning `202`. Waiting work and one queued rerun per PR survive restarts. Delivery deduplication also survives restarts, within the last 1000 accepted delivery IDs per repository.

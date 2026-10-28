@@ -4,7 +4,7 @@ import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil
 import { Type } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, UsageDoc, watchEvents,
+  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, ToolResultEntry, UsageDoc, watchEvents,
   type Conversation, type ConversationId, type Cursor, type Harness, type ModelRef, type SubmissionId, type TaskId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "./state.ts";
@@ -1256,9 +1256,25 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       throw new Error(diagnosticText(`Audit failed: ${settled.reason} (conversation=${conversation.id}, submission=${settled.id}, model=${savedModel?.provider}/${savedModel?.modelId})${detail}`));
     }
     if (!saved?.report) {
-      const answer = settled.type === "input"
-        ? await conversation.commit(async (tx) => (await tx.entry(AssistantEntry, settled.answer))?.model?.[0], context)
-        : undefined;
+      const { answer, rejection } = await conversation.commit(async (tx) => {
+        const answer = settled.type === "input" ? (await tx.entry(AssistantEntry, settled.answer))?.model?.[0] : undefined;
+        let cursor: Cursor | undefined;
+        do {
+          const page = await tx.scanEntries({ conversationId: conversation.id, minEntryId: settled.entry,
+            maxEntryId: settled.type === "input" ? settled.answer : settled.entry, order: "descending" }, 100, cursor);
+          for (const entry of page.items) {
+            if (!ToolResultEntry.is(entry)) continue;
+            const message = entry.model?.[0];
+            if (message?.role !== "toolResult" || message.toolName !== report.name || !message.isError) continue;
+            const errors = entry.data?.diagnostics.filter((diagnostic) => diagnostic.severity === "error").map((diagnostic) =>
+              // Pi's schema error includes the entire submitted report. Keep only the validation explanation.
+              diagnostic.code === "invalid_arguments" ? diagnostic.message.split("\n\nReceived arguments:\n", 1)[0] : diagnostic.message);
+            return { answer, rejection: errors?.join("; ") || "report_review_assessment failed without a saved diagnostic." };
+          }
+          cursor = page.next;
+        } while (cursor);
+        return { answer, rejection: undefined };
+      }, context);
       let reason = "";
       if (answer?.role === "assistant") {
         const stopReason = answer.rawStopReason ? `${answer.stopReason} (${answer.rawStopReason})` : answer.stopReason;
@@ -1266,7 +1282,8 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           ? ` The model hit its token limit: ${stopReason}; ${answer.usage.totalTokens} total tokens.`
           : ` Model stop reason: ${stopReason}.`;
       }
-      throw new Error(stripControlCharacters(`Agent finished without a complete assessment.${reason} No verdict was produced.`));
+      const detail = rejection ? ` Last assessment rejection: ${rejection}` : " No assessment rejection was recorded.";
+      throw new Error(diagnosticText(`Agent finished without a complete assessment.${reason} No verdict was produced. (conversation=${conversation.id}, submission=${settled.id}, model=${savedModel?.provider}/${savedModel?.modelId})${detail}`));
     }
     const plan = publicationPlan(snapshot, saved.report, saved.databaseMigration, options);
     const publications = (await harness.snapshot(PublicationRequests, conversation.id, context))?.tasks ?? {};

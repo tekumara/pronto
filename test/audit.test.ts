@@ -431,6 +431,55 @@ test("chat /audit uses isolated evidence and then continues the original coding 
   assert.equal(turn, 5);
 });
 
+test("incomplete audits log the latest saved assessment rejection after recovery, bounded and without private content", { timeout: 20_000 }, async (t) => {
+  const github = githubEvidence();
+  const waitingForAnswer = Promise.withResolvers<void>();
+  let turn = 0;
+  const f = await fixture(t, (_body, response) => {
+    switch (turn++) {
+      case 0:
+        return tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
+      case 1: {
+        const report = assessments();
+        for (const assessment of report.assessments) for (const finding of assessment.findings) {
+          finding.evidence = [prUrl];
+          finding.reason = "PRIVATE-ASSESSMENT-TEXT";
+        }
+        report.assessments.push({ ...report.assessments[0]!,
+          commentKey: `\u001b[31mlatest-rejection\n${"x".repeat(6_000)}END-OF-ASSESSMENT-ERROR` });
+        return tool(response, "report_review_assessment", report);
+      }
+      case 2:
+        // Put the report rejection beyond the first history page, followed by unrelated tool errors.
+        return reply(response, [{ role: "assistant", tool_calls: Array.from({ length: 105 }, (_, index) => ({
+          index, id: `unrelated-${index}`, type: "function",
+          function: { name: "read_review_comment", arguments: JSON.stringify({ commentKey: "unrelated" }) },
+        })) }], "tool_calls");
+      case 3:
+        waitingForAnswer.resolve();
+        return; // Crash while the final model request is in flight, then inspect the restored transcript.
+      default:
+        return reply(response, [{ role: "assistant", content: "PRIVATE-FINAL-ANSWER" }]);
+    }
+  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  const interrupted = f.start([prUrl]);
+  interrupted.child.stdin.end();
+  await waitingForAnswer.promise;
+  interrupted.child.kill("SIGKILL");
+  await interrupted.done;
+  const resumed = f.start([prUrl]);
+  resumed.child.stdin.end();
+  const result = await resumed.done;
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /Resuming saved snapshot/);
+  assert.match(result.stderr, /without a complete assessment.*Model stop reason: stop/);
+  assert.match(result.stderr, /conversation=\d+, submission=\d+, model=local\/test/);
+  assert.match(result.stderr, /Last assessment rejection:.*Unknown or duplicate comment:.*latest-rejection/);
+  assert.ok(result.stderr.trim().length <= 4_000, "the final diagnostic must stay bounded");
+  assert.doesNotMatch(result.stderr, /\u001b|Missing assessments|Unknown comment key|PRIVATE-|END-OF-ASSESSMENT-ERROR/);
+  assert.doesNotMatch(result.stdout, /Verdict:|PRIVATE-/);
+});
+
 test("audit logs connection causes and retry context before a successful recovery", { timeout: 20_000 }, async (t) => {
   const github = githubEvidence();
   let calls = 0;
