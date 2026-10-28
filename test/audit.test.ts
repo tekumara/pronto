@@ -355,6 +355,36 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.equal(github.requests.filter((path) => path === "/github/graphql").length, 2);
 });
 
+test("file citations accept inspected subranges but reject unread lines and altered targets", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  const file = codeUrl.split("#")[0]!;
+  const rejected = [
+    `${file}#L1-L3`, `${file}#L2-L4`, `${file}#L3-L2`, `${file}#L0-L2`,
+    `${file}#L2.5`, `${file}#L9007199254740993`, file,
+    `${file.replace("github.com", "example.com")}#L2`,
+    `${file.replace("contributor/fork", "acme/demo")}#L2`,
+    `${file.replace(headSha, baseSha)}#L2`,
+    `${file.replace("src/access.ts", "src/other.ts")}#L2`,
+    `${file}?raw=1#L2`, `${commentUrl(201)}#L2`,
+  ];
+  const accepted = [`${file}#L2`, `${file}#L2-L2`, `${file}#L3`, `${file}#L2-L3`];
+  let turn = 0;
+  let rejectedCount = 0;
+  const f = await fixture(t, (body, response) => {
+    if (turn++ === 0) return tool(response, "read_github_file", { path: "src/access.ts", revision: "head", offset: 2, limit: 2 });
+    if (rejectedCount) assert.match(body.messages.at(-1)?.content ?? "", /Unknown evidence URL/);
+    if (turn > rejected.length + 2) return reply(response, [{ role: "assistant", content: "Could not record the assessment." }]);
+    const report = assessments();
+    for (const assessment of report.assessments) for (const finding of assessment.findings) finding.evidence = [prUrl];
+    report.assessments[0]!.findings[0]!.evidence = rejectedCount < rejected.length ? [rejected[rejectedCount++]!] : accepted;
+    tool(response, "report_review_assessment", report);
+  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  const output = await f.run("", [prUrl]);
+  assert.equal(rejectedCount, rejected.length);
+  assert.match(output, /Verdict:/);
+  for (const citation of accepted) assert.ok(output.includes(citation), `accepted citation must be retained: ${citation}`);
+});
+
 test("chat /audit uses isolated evidence and then continues the original coding conversation", { timeout: 20000 }, async (t) => {
   const github = githubEvidence();
   let turn = 0;

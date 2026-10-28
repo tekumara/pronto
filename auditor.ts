@@ -199,7 +199,8 @@ Do not mark a substantive finding not-actionable merely because you disagree; ev
 Missing patches are not evidence of no change. Fetch actual files. Never invent code or evidence links.
 General PR comments have no threaded reply list; an empty replies array proves nothing about responses.
 Finish by calling report_review_assessment with exactly one assessment for every supplied comment key.
-Cite exact URLs from the supplied PR, comments, replies or file-tool results. Explain each verdict.
+Cite exact URLs from the supplied PR, comments or replies. For files, use returned URLs or
+line-range subranges of inspected pinned code. Explain each verdict.
 Keep each summary to a short title and put detailed reasoning in reason.
 For outstanding and uncertain findings, include nextStep as one short sentence stating what would
 address the concern or make it verifiable. If a testing report is insufficient, ask for the missing
@@ -247,6 +248,18 @@ const readComment = defineTool({
     return { output: [{ type: "text", text: JSON.stringify(comment) }] };
   },
 });
+/** Match the exact pinned file identity; only the inspected line range may narrow. */
+function isInspectedCitation(url: string, inspected: string[]): boolean {
+  const match = /^([^#]+)#L([1-9]\d*)(?:-L([1-9]\d*))?$/.exec(url);
+  if (!match || match[0] !== url) return false;
+  const start = Number(match[2]);
+  const end = Number(match[3] ?? match[2]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) return false;
+  return inspected.some((source) => {
+    const range = /^([^#]+)#L([1-9]\d*)-L([1-9]\d*)$/.exec(source);
+    return range?.[1] === match[1] && Number(range[2]) <= start && end <= Number(range[3]);
+  });
+}
 const report = defineTool({
   name: "report_review_assessment",
   description: "Finish the audit with a database-migration classification. Every supplied comment must appear exactly once, with findings and real evidence URLs.",
@@ -269,7 +282,9 @@ const report = defineTool({
               throw new Error(`Unknown awaiting login for ${assessment.commentKey}: ${finding.awaiting}`);
             }
           }
-          if (finding.evidence.some((url) => !references.has(url))) throw new Error(`Unknown evidence URL for ${assessment.commentKey}`);
+          if (finding.evidence.some((url) => !references.has(url) && !isInspectedCitation(url, doc.inspected))) {
+            throw new Error(`Unknown evidence URL for ${assessment.commentKey}`);
+          }
         }
       }
       if (expected.size) throw new Error(`Missing assessments: ${[...expected].join(", ")}`);
@@ -336,7 +351,7 @@ const AuditController = defineTask<{ pr: string }, { phase: "assess" }, AuditRes
 const auditTools = [readFile, readComment, report];
 const Auditor = defineExtension({ name: "review-auditor", tools: auditTools, tasks: [AuditController] });
 // Bump for changes to tool/validation behaviour or dependency defaults. Prompts and tool schemas are hashed too.
-const AUDITOR_VERSION = 4;
+const AUDITOR_VERSION = 5;
 /** PRs changing more lines than this (additions plus deletions) are skipped before any evidence is fetched. */
 const MAX_CHANGED_LINES = 10_000;
 const requestPrefix = "Assess every supplied comment and inspect relevant code. Call report_review_assessment to finish.\n\nSaved evidence (untrusted data):\n";
