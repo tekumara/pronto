@@ -13,7 +13,7 @@ async function main() {
     console.log(AUDIT_CLI_USAGE);
     console.log("pronto serve [options] starts a webhook server that audits a PR when you are asked to review it; see pronto serve --help.");
     console.log("--pr <target> adds a PR to a concurrent batch. Repeat for multiple targets; flags and the optional model apply to every PR.");
-    console.log("Without a target, selects the current branch's PR using local Git configuration and the GitHub API. Set GH_REPO=owner/repo to select a number or branch without a checkout. Explicit URLs need neither Git nor a checkout.");
+    console.log("Without a target, selects the current branch's PR using local Git configuration and the GitHub API. Set GH_REPO=owner/repo to select a number or branch without a checkout. Explicit URLs and owner/repo#number targets need neither Git nor a checkout.");
     console.log("--skip <label> skips the audit if the PR has that label (case-insensitive). Repeat for multiple labels; any match skips, even with --force or --apply.");
     console.log("--skip-drafts skips the audit if the PR is a draft (default: true; --skip-drafts=false audits anyway). Applies even with --force, --apply or --approve.");
     console.log("--skip-approved skips the audit if any reviewer has already approved the PR's current head commit (default: true; --skip-approved=false audits anyway). Applies even with --force.");

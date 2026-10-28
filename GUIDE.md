@@ -29,13 +29,14 @@ pronto
 pronto --apply
 pronto feature/my-change
 pronto 42
+pronto example-org/example-repo#2423
 ```
 
 Pronto reads your checkout's Git configuration and queries GitHub directly, using the same token as the audit. It does not run `gh pr view`. Without a target, it follows PR tracking refs and the branch's push configuration, including renamed branches and fork owners. Branch lookups prefer open PRs, then the newest matching closed or merged PR. Closed or merged PRs whose head is the repository's default branch are not selected.
 
 Set `GH_REPO=owner/repo` (or `host/owner/repo`) to choose the repository explicitly. Otherwise, Pronto uses the default set by `gh repo set-default` (`remote.<name>.gh-resolved`), then prefers remotes named `upstream`, `github` and `origin`, in that order. HTTPS, SSH and scp-style Git URLs are supported. For an enterprise host, set `GITHUB_API_URL`; `GH_HOST`, if set, must match that host.
 
-Number and branch selection require Git and a checkout unless you set `GH_REPO`. An explicit PR URL needs neither. The GitHub CLI is optional when you provide a token; Pronto only uses `gh auth token` as an authentication fallback. Selection failures stop the command before model setup or audit storage.
+Use `owner/repo#number` to select a PR in a specific repository, for example `pronto example-org/example-repo#2423`. Number and branch selection in the current repository require Git and a checkout unless you set `GH_REPO`. An explicit PR URL or `owner/repo#number` target needs neither. The GitHub CLI is optional when you provide a token; Pronto only uses `gh auth token` as an authentication fallback. Selection failures stop the command before model setup or audit storage.
 
 If your authenticated GitHub account has already approved the current commit, Pronto only logs the skip. It does not post or preview another review. Other skips, including approval by another reviewer, get a review explaining the reason when you use `--apply`. Without `--apply`, Pronto previews that review. Skip reviews use `COMMENT`, never `APPROVE`, even with `--approve`.
 
@@ -86,7 +87,7 @@ Paths are relative to the repository root and match case-sensitively. `*` and `?
 - **Output.** Pronto lists the excluded files, up to 20 with a count of the rest, when it fetches evidence, reuses an assessment or skips the PR. It also says when a pattern matches no changed file. The verdict comment lists them under audit context, so reviewers can see what the audit did not read.
 - **Caching.** Exclusions are part of the evidence. Changing `--exclude` refreshes the assessment and the refresh reason names the affected files, while the same exclusions reuse it. Resuming an unfinished audit keeps the exclusions of its saved evidence, so use `--force` to apply different ones.
 
-You can also run the CLI without a global link using `npm run audit -- [<number> | <branch> | <GitHub PR URL>]` from this repository.
+You can also run the CLI without a global link using `npm run audit -- [<number> | <branch> | <owner/repo#number> | <GitHub PR URL>]` from this repository.
 
 The auditor uses your saved Pi default model, or the first available model if there is no usable default. Choose a specific model by adding `provider/model-id` after an explicit target:
 
@@ -103,6 +104,7 @@ Use `--pr` once for each target to check several PRs in one process:
 ```sh
 pronto --pr 42 --pr 43
 pronto --pr feature/first --pr feature/second
+pronto --pr example-org/example-repo#2423
 pronto --pr https://github.com/owner/repo/pull/42 \
        --pr https://github.com/owner/repo/pull/43
 ```

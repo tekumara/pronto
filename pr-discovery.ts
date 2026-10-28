@@ -111,10 +111,17 @@ async function currentBranchSelector(cwd: string, base: Repository, remotes: Rem
   return headBranch;
 }
 
-/** Resolve a URL, number or branch using local Git configuration and Pronto's GitHub credentials. */
+/** Resolve a URL, repository PR shorthand, number or branch using local Git configuration and Pronto's GitHub credentials. */
 export async function resolveAuditUrl(selector: string, cwd: string): Promise<string> {
   if (selector.includes("://")) return parseReviewTarget(selector).url;
   const host = repositoryHost();
+  const repositoryPR = selector.match(/^([\w-]+)\/([\w.-]+)#(\d+)$/);
+  if (repositoryPR) {
+    const number = Number(repositoryPR[3]);
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error("Expected a positive, safe PR number");
+    const repository = configuredRepository(`${repositoryPR[1]}/${repositoryPR[2]}`, host);
+    return findPullRequestUrl(repository, number);
+  }
   const override = process.env.GH_REPO ? configuredRepository(process.env.GH_REPO, host) : undefined;
   // Explicit selectors with GH_REPO need neither Git nor a checkout.
   const [remotes, config] = !override || !selector

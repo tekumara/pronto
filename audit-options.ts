@@ -1,7 +1,7 @@
 import { compileExclusions } from "./exclusions.ts";
 import { parseReviewTarget } from "./reviews.ts";
 
-export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
+export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <owner/repo#number> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
 
 export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--replicated-state] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
 

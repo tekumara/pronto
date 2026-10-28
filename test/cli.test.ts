@@ -38,7 +38,8 @@ const review = (login: string, state: string, commit = headSha) => ({
 });
 
 async function selectionFixture(t: TestContext, labels: string[] = [], reviews: object[] = [], draft = false,
-  discovery?: { head: string; url?: string; status?: number; defaultBranch?: string; state?: string }) {
+  discovery?: { head: string; url?: string; status?: number; defaultBranch?: string; state?: string }, repository = "acme/demo") {
+  const allowedPulls = repository === "acme/demo" ? [6, 7, 8] : [2423];
   return fixture(t, (_body, response) => {
     tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
   }, {
@@ -47,10 +48,11 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
       assert.equal(request.method, request.url === "/github/graphql" ? "POST" : "GET");
       const path = request.url!.split("?")[0];
       let data: unknown;
-      if (/^\/github\/repos\/acme\/demo\/pulls\/[678]$/.test(path)) {
-        data = { html_url: discovery?.url ?? `https://github.com/acme/demo/pull/${path.split("/").at(-1)}`, title: "Selected PR", body: "", merged: false, draft, labels: labels.map((name) => ({ name })), changed_files: 0,
-          head: { sha: "a".repeat(40), repo: { full_name: "acme/demo" } },
-          base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } };
+      const pull = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
+      if (pull && `${pull[1]}/${pull[2]}` === repository && allowedPulls.includes(Number(pull[3]))) {
+        data = { html_url: discovery?.url ?? `https://github.com/${repository}/pull/${pull[3]}`, title: "Selected PR", body: "", merged: false, draft, labels: labels.map((name) => ({ name })), changed_files: 0,
+          head: { sha: "a".repeat(40), repo: { full_name: repository } },
+          base: { sha: "b".repeat(40), repo: { full_name: repository } } };
       } else if (path === "/github/user") {
         data = { login: "auditor" };
       } else if (path === "/github/graphql") {
@@ -59,15 +61,16 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
         const { variables } = JSON.parse(Buffer.concat(chunks).toString());
         if (variables.headRefName !== undefined) {
           assert.ok(discovery, "Unexpected PR discovery request");
-          assert.equal(variables.owner, "acme");
-          assert.equal(variables.repo, "demo");
+          const [owner, repo] = repository.split("/");
+          assert.equal(variables.owner, owner);
+          assert.equal(variables.repo, repo);
           if (discovery.status) {
             response.writeHead(discovery.status).end("Discovery unavailable");
             return;
           }
-          const [owner, branch] = discovery.head.includes(":") ? discovery.head.split(":") : [null, discovery.head];
+          const [headOwner, branch] = discovery.head.includes(":") ? discovery.head.split(":") : [null, discovery.head];
           const candidate = { url: discovery.url ?? prUrl, state: discovery.state ?? "OPEN", headRefName: branch,
-            isCrossRepository: !!owner, headRepositoryOwner: { login: owner ?? "acme" } };
+            isCrossRepository: !!headOwner, headRepositoryOwner: { login: headOwner ?? "acme" } };
           data = { data: { repository: { defaultBranchRef: { name: discovery.defaultBranch ?? "main" }, pullRequests: { nodes: [
             { ...candidate, url: "https://github.com/acme/demo/pull/6", state: "CLOSED" },
             { ...candidate, url: "https://github.com/acme/demo/pull/8", isCrossRepository: true, headRepositoryOwner: { login: "someone-else" } },
@@ -79,7 +82,10 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
           } } } } };
         }
       } else {
-        assert.match(path, /^\/github\/repos\/acme\/demo\/(?:pulls\/[678]\/(?:comments|reviews|files)|issues\/[678]\/comments)$/);
+        const prefix = `/github/repos/${repository}/`;
+        assert.ok(path.startsWith(prefix), path);
+        const numbers = allowedPulls.join("|");
+        assert.match(path.slice(prefix.length), new RegExp(`^(?:pulls/(?:${numbers})/(?:comments|reviews|files)|issues/(?:${numbers})/comments)$`));
         data = path.endsWith("/reviews") ? reviews : [];
       }
       response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
@@ -88,7 +94,7 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
 }
 
 
-for (const { name, args, head = "feature/pr-inference", commands = [], repository = "", checkout = true, state = "OPEN", expectedUrl = prUrl } of [
+for (const { name, args, head = "feature/pr-inference", commands = [], repository = "", fixtureRepository = "acme/demo", checkout = true, state = "OPEN", expectedUrl = prUrl } of [
   { name: "current branch", args: [] },
   { name: "current branch with flags only", args: ["--force", "--approve", "--approve-migrations"] },
   { name: "explicit branch and model", args: ["feature/pr-inference", "local/test", "--force"] },
@@ -142,9 +148,11 @@ for (const { name, args, head = "feature/pr-inference", commands = [], repositor
   ] },
   { name: "GH_REPO number without a checkout", args: ["7"], repository: "acme/demo", checkout: false },
   { name: "GH_REPO branch without a checkout", args: ["feature/pr-inference"], repository: "github.com/acme/demo", checkout: false },
+  { name: "owner/repo#number without a checkout", args: ["example-org/example-repo#2423"], fixtureRepository: "example-org/example-repo", checkout: false,
+    expectedUrl: "https://github.com/example-org/example-repo/pull/2423" },
 ]) {
   test(`CLI resolves ${name} without gh`, { timeout: 20_000 }, async (t) => {
-    const f = await selectionFixture(t, [], [], false, { head, state });
+    const f = await selectionFixture(t, [], [], false, { head, state }, fixtureRepository);
     const env = checkout ? await gitCheckout(f.cwd, commands) : { PATH: f.cwd, GH_HOST: "" };
     const output = await f.run("", args, { env: { ...env, GH_REPO: repository } });
     assert.match(output, /PR title: Selected PR/);
@@ -152,8 +160,10 @@ for (const { name, args, head = "feature/pr-inference", commands = [], repositor
   });
 }
 
-for (const { name, labels, args, draft = false, input = "", entrypoint = resolve("audit.ts") } of [
+for (const { name, labels, args, draft = false, input = "", entrypoint = resolve("audit.ts"), fixtureRepository = "acme/demo", expectedUrl = prUrl } of [
   { name: "an explicit PR URL works without gh or a Git checkout", labels: [], args: [prUrl, "local/test"] },
+  { name: "--pr accepts owner/repo#number without a checkout", labels: [], args: ["--pr", "example-org/example-repo#2423"],
+    fixtureRepository: "example-org/example-repo", expectedUrl: "https://github.com/example-org/example-repo/pull/2423" },
   { name: "CLI audits when no skip label matches exactly", labels: ["skip-audit"],
     args: ["--skip", "skip", prUrl, "local/test", "--skip=other"] },
   { name: "CLI audits an unlabelled PR when skip labels are provided", labels: [],
@@ -167,12 +177,12 @@ for (const { name, labels, args, draft = false, input = "", entrypoint = resolve
     args: [], entrypoint: resolve("agent.ts"), input: `/audit --skip-drafts=false ${prUrl}\n/quit\n` },
 ]) {
   test(name, { timeout: 20_000 }, async (t) => {
-    const f = await selectionFixture(t, labels, [], draft);
-    const output = await f.run(input, args, { entrypoint, env: { PATH: f.cwd } });
+    const f = await selectionFixture(t, labels, [], draft, undefined, fixtureRepository);
+    const output = await f.run(input, args, { entrypoint, env: { PATH: f.cwd, GH_REPO: "", GH_HOST: "" } });
     assert.match(output, /PR title: Selected PR/);
     assert.match(output, /Verdict:/);
     assert.doesNotMatch(output, /Skipping/);
-    assert.ok(output.includes(prUrl));
+    assert.ok(output.includes(expectedUrl));
   });
 }
 
@@ -224,6 +234,7 @@ for (const { name, args = [] as string[], head = "unrelated", commands = [], dis
   { name: "GitHub lookup failure", head: "feature/pr-inference", discovery: { status: 401 }, message: /GitHub request failed \(401\)/ },
   { name: "invalid URL returned by GitHub", head: "feature/pr-inference", discovery: { url: "https://github.com/acme/demo/issues/7" }, message: /Expected a GitHub PR URL/ },
   { name: "unsafe PR number", args: ["9007199254740992"], message: /positive, safe PR number/ },
+  { name: "unsafe owner/repo PR number", args: ["example-org/example-repo#9007199254740992"], message: /positive, safe PR number/ },
 ]) {
   test(`CLI stops before model or audit storage for ${name}`, { timeout: 20_000 }, async (t) => {
     const f = await selectionFixture(t, [], [], false, { head, ...discovery });
