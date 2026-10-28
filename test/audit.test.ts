@@ -267,6 +267,7 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   const github = githubEvidence({ state: "closed" });
   let turn = 0;
   let policy = "";
+  let rejection = "";
   const f = await fixture(t, (body, response) => {
     const latest = body.messages.at(-1)?.content ?? "";
     switch (turn++) {
@@ -290,25 +291,35 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
         assert.match(latest, new RegExp(headSha));
         tool(response, "bash", { command: "touch audit-should-not-write" });
         break;
-      case 2:
+      case 2: {
         assert.match(latest, /bash/i);
-        tool(response, "report_review_assessment", { ...assessments(), assessments: assessments().assessments.slice(0, -1) });
-        break;
-      case 3: {
-        assert.match(latest, /Missing assessments: review:302/);
         const invalid = assessments();
-        invalid.assessments[0]!.findings[0]!.evidence = ["https://example.com/invented"];
+        invalid.assessments.pop();
+        Object.assign(invalid.assessments[0]!.findings[0]!, {
+          awaiting: undefined, evidence: ["https://example.com/invented", "https://example.com/also-invented"],
+        });
+        Object.assign(invalid.assessments[1]!.findings[0]!, { status: "uncertain", awaiting: "outsider" });
+        invalid.assessments.push(invalid.assessments[2]!, { ...invalid.assessments[3]!, commentKey: "invented" });
         tool(response, "report_review_assessment", invalid);
         break;
       }
-      case 4:
-        assert.match(latest, new RegExp(`Unknown evidence URL for inline:${accessId}`));
+      case 3:
+        rejection = latest;
         tool(response, "report_review_assessment", assessments());
         break;
       default: assert.fail("Unexpected model turn");
     }
   }, { entrypoint: resolve("audit.ts"), github: github.handle });
   const output = await f.run("", [prUrl]);
+  assert.match(rejection, /Missing assessments: review:302/);
+  assert.match(rejection, new RegExp(`Missing awaiting for inline:${accessId}`));
+  assert.match(rejection, /Unknown awaiting login for inline:102: outsider/);
+  assert.match(rejection, /Unknown or duplicate comment: comment:201/);
+  assert.match(rejection, /Unknown or duplicate comment: invented/);
+  assert.match(rejection, new RegExp(`Unknown evidence URL for inline:${accessId}`));
+  assert.ok(rejection.includes("https://example.com/invented"));
+  assert.ok(rejection.includes("https://example.com/also-invented"));
+  assert.match(rejection, /Use supplied PR, comment or reply URLs/);
   // Guard the policy delivered to the model, not a simulated model's judgement of claims.
   assert.match(policy, /Accept specific reports of external testing, deployment or operator verification/);
   assert.match(policy, /Do not mark a finding uncertain\s+solely because these external results cannot be independently inspected\./);
@@ -344,7 +355,7 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.match(output, /GitHub: 1\/2 inline threads resolved \(0 unknown\)/);
   assert.ok(output.includes(`[1] outstanding: Access check\n    Source: inline:${accessId} · human\n    ${commentUrl(accessId)}\n    GitHub thread: resolved`));
   assert.ok(output.includes(`[2] addressed: Null check\n    Source: inline:102 · human\n    ${commentUrl(102)}\n    GitHub thread: open, outdated`));
-  assert.equal(turn, 5);
+  assert.equal(turn, 4);
   await assert.rejects(readFile(join(f.cwd, "audit-should-not-write")), { code: "ENOENT" });
   const files = await readdir(join(f.stateDir, "repos", "github.com"));
   await assert.rejects(readdir(join(f.cwd, ".pi-durable")), { code: "ENOENT" });

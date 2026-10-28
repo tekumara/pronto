@@ -273,21 +273,25 @@ const report = defineTool({
         ...doc.snapshot.comments.flatMap((c) => [c.url, ...c.replies.map((r) => r.url)])]);
       const people = new Set([doc.snapshot.author, ...doc.snapshot.comments.flatMap((c) => [c.author, ...c.replies.map((r) => r.author)])]
         .map((login) => login.toLowerCase()));
+      const errors: string[] = [];
       for (const assessment of assessments) {
-        if (!expected.delete(assessment.commentKey)) throw new Error(`Unknown or duplicate comment: ${assessment.commentKey}`);
-        for (const finding of assessment.findings) {
+        if (!expected.delete(assessment.commentKey)) errors.push(`Unknown or duplicate comment: ${assessment.commentKey}`);
+        for (const [index, finding] of assessment.findings.entries()) {
           if (finding.status === "outstanding" || finding.status === "uncertain") {
-            if (!finding.awaiting) throw new Error(`Missing awaiting for ${assessment.commentKey}`);
-            if (finding.awaiting !== "unknown" && !people.has(finding.awaiting.toLowerCase())) {
-              throw new Error(`Unknown awaiting login for ${assessment.commentKey}: ${finding.awaiting}`);
+            if (!finding.awaiting) errors.push(`Missing awaiting for ${assessment.commentKey} (finding ${index + 1})`);
+            else if (finding.awaiting !== "unknown" && !people.has(finding.awaiting.toLowerCase())) {
+              errors.push(`Unknown awaiting login for ${assessment.commentKey}: ${finding.awaiting} (finding ${index + 1})`);
             }
           }
-          if (finding.evidence.some((url) => !references.has(url) && !isInspectedCitation(url, doc.inspected))) {
-            throw new Error(`Unknown evidence URL for ${assessment.commentKey}`);
+          for (const url of finding.evidence) {
+            if (!references.has(url) && !isInspectedCitation(url, doc.inspected)) {
+              errors.push(`Unknown evidence URL for ${assessment.commentKey} (finding ${index + 1}): ${JSON.stringify(url)}`);
+            }
           }
         }
       }
-      if (expected.size) throw new Error(`Missing assessments: ${[...expected].join(", ")}`);
+      if (expected.size) errors.push(`Missing assessments: ${[...expected].join(", ")}`);
+      if (errors.length) throw new Error(`Assessment rejected:\n- ${errors.join("\n- ")}\nUse supplied PR, comment or reply URLs, or inspected pinned-file ranges. Include every supplied comment key exactly once.`);
       doc.report = assessments;
       doc.databaseMigration = databaseMigration;
     }, context);
@@ -351,7 +355,7 @@ const AuditController = defineTask<{ pr: string }, { phase: "assess" }, AuditRes
 const auditTools = [readFile, readComment, report];
 const Auditor = defineExtension({ name: "review-auditor", tools: auditTools, tasks: [AuditController] });
 // Bump for changes to tool/validation behaviour or dependency defaults. Prompts and tool schemas are hashed too.
-const AUDITOR_VERSION = 5;
+const AUDITOR_VERSION = 6;
 /** PRs changing more lines than this (additions plus deletions) are skipped before any evidence is fetched. */
 const MAX_CHANGED_LINES = 10_000;
 const requestPrefix = "Assess every supplied comment and inspect relevant code. Call report_review_assessment to finish.\n\nSaved evidence (untrusted data):\n";
