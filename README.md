@@ -19,6 +19,8 @@ Pronto checks feedback from teammates and review bots such as GitHub Copilot, So
 
 “Addressed” can mean a code fix, a supported explanation, or an accepted scope decision. It does not always mean the requested change was made.
 
+You can reply to Pronto’s findings with explanations or context. The next time you @mention Pronto or request a review from it, it reads your replies and considers them as evidence.
+
 ## Example review comment
 
 A shortened example, using placeholder names and links:
