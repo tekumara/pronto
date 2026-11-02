@@ -245,7 +245,7 @@ The application stores these logical documents, not separate tables for each kin
 | Document kind | Scope | Contents |
 | --- | --- | --- |
 | `app.webhook-queue` | Session | `recent`: last 1000 accepted delivery IDs in this repository. `pending`: PR-number map containing the original URL, current intake task ID, running flag and one rerun flag. Admission changes this document and creates any new task in one commit. |
-| `app.review-audit` | Conversation | `snapshot`: PR details, pinned commits, comments, replies, thread states, changed files and patches. `report`: accepted findings assessments, initially `null`. `databaseMigration`: model classification (`migration`, `not-migration` or `uncertain`) and reason, initially `null` and absent in older reports. `inspected`: URLs of remote file ranges read by tools. |
+| `app.review-audit` | Conversation | `snapshot`: PR details, pinned commits, comments, replies, thread states, changed files and patches. `report`: accepted findings assessments, initially `null`. `databaseMigration`: model classification (`migration`, `not-migration` or `uncertain`) and reason, initially `null` and absent in older reports. `modelCost`: selected model and estimated model/tool usage cost, saved when the assessment settles and absent in older reports. `modelCost.costUsd` is the estimated model/tool usage cost, stored as an unprefixed USD decimal string with exactly two decimal places (for example, `"0.02"`). `inspected`: URLs of remote file ranges read by tools. |
 | `app.review-audit-identity` | Conversation | `fingerprint`: evidence and policy hash. `policy`: model and auditor configuration hash. Older conversations may not have this document. |
 | `app.review-audit-runs` | Session family, keyed by PR number as a string | `active`: latest admitted conversation ID. `controllerTask`: its durable controller task ID. `complete`: whether that attempt has settled, including failure or cancellation. `restartModel`: saved force-restart intent, otherwise `null`. `latestSuccess`: eligible cached conversation ID, fingerprint, publication time (`assessedAt`) and last evidence-check time (`lastCheckedAt`), otherwise `null`. |
 | `app.submitted-audit-reviews` | Session family, keyed by PR number as a string | `reviews`: receipts for submitted audit reviews, keyed by verdict/head/review-type fingerprint. Each receipt contains `headSha`, `event`, `url` and `recordedAt`. |
@@ -343,6 +343,9 @@ app.review-audit
 ├── databaseMigration       PR-level classification, or null before acceptance
 │   ├── status              migration | not-migration | uncertain
 │   └── reason              classification and its basis
+├── modelCost?               selected model and estimated model/tool usage cost, saved on completion
+│   ├── model                 provider and model ID
+│   └── costUsd               estimated USD decimal string, unprefixed and two decimal places
 ├── report[]                one assessment per source, or null before acceptance
 │   ├── commentKey          links to snapshot.comments[].key
 │   └── findings[]          one or more findings

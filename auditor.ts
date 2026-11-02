@@ -37,6 +37,7 @@ const Report = Type.Object({
   }, { additionalProperties: false })),
 }, { additionalProperties: false });
 type MigrationAssessment = { status: "migration" | "not-migration" | "uncertain"; reason: string };
+type ModelCostInfo = { model: ModelRef | null; costUsd: string }; // Estimated model/tool cost, stored as a decimal string.
 type Assessment = { commentKey: string; findings: {
   summary: string; status: string; reason: string; nextStep?: string; awaiting?: string; evidence: string[];
 }[] };
@@ -44,9 +45,10 @@ type Assessment = { commentKey: string; findings: {
 const AuditDocument = defineDoc<{
   snapshot: ReviewSnapshot | null; report: Assessment[] | null; inspected: string[];
   databaseMigration?: MigrationAssessment | null; // Older saved reports have no classification.
+  modelCost?: ModelCostInfo | null; // Older saved reports have no model or cost metadata.
 }>({
   kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial",
-  initial: () => ({ snapshot: null, report: null, inspected: [], databaseMigration: null }),
+  initial: () => ({ snapshot: null, report: null, inspected: [], databaseMigration: null, modelCost: null }),
 });
 type CachedAssessment = {
   fingerprint: string; conversationId: ConversationId; assessedAt: string; lastCheckedAt: string;
@@ -319,16 +321,22 @@ const AuditController = defineTask<{ pr: string }, { phase: "assess" }, AuditRes
       }, context)).wait(context);
       const report = await runtime.snapshot(AuditDocument, task.conversationId, context);
       const identity = await runtime.snapshot(AuditIdentity, task.conversationId, context);
-      const model = (await runtime.agent(context)).model;
+      const model = (await runtime.agent(context)).model ?? null;
       const successful = settled.status === "done" && !!report?.report;
+      const modelCost: ModelCostInfo | null = successful ? {
+        model, costUsd: estimatedCost(await runtime.snapshot(UsageDoc, task.conversationId, context)),
+      } : null;
       const cacheable = successful && identity?.fingerprint && model
         && identity.policy === policyFingerprint(runtime.models, model);
       await runtime.commit(async (tx) => {
         const requests = await tx.doc(PublicationRequests, task.conversationId);
-        if (successful) for (const choices of requests.choices) {
-          const { intent } = publicationPlan(saved.snapshot!, report!.report!, report!.databaseMigration, choices);
-          const id = await enqueuePublication(tx, task.conversationId, intent);
-          if (id) requests.tasks[intent.fingerprint] = id;
+        if (successful) {
+          (await tx.doc(AuditDocument, task.conversationId)).modelCost = modelCost;
+          for (const choices of requests.choices) {
+            const { intent } = publicationPlan(saved.snapshot!, report!.report!, report!.databaseMigration, choices, modelCost!);
+            const id = await enqueuePublication(tx, task.conversationId, intent);
+            if (id) requests.tasks[intent.fingerprint] = id;
+          }
         }
         const runs = await tx.doc(AuditRuns, task.input.pr, null);
         // Fence stale attempts: only the selected attempt may publish to this PR's cache.
@@ -461,8 +469,19 @@ const snapshotDisclaimer = "This is the agent's assessment of a saved snapshot, 
 function estimatedCost(usage: UsageState | undefined): string {
   const cost = [...Object.values(usage?.models ?? {}), ...Object.values(usage?.tools ?? {})]
     .reduce((total, item) => total + item.cost.total, 0);
-  const formatted = cost.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-  return `est. $${formatted}`;
+  return cost.toFixed(2);
+}
+
+function formatEstimatedCost(usd: string): string {
+  return `est. US$${usd}`;
+}
+
+async function resolveModelCost(harness: Harness, conversationId: ConversationId, context: Context,
+  saved?: ModelCostInfo | null): Promise<ModelCostInfo> {
+  if (saved) return saved;
+  const conversation = await harness.conversation(conversationId, context);
+  const model = conversation ? (await conversation.agent(context)).model ?? null : null;
+  return { model, costUsd: estimatedCost(await harness.snapshot(UsageDoc, conversationId, context)) };
 }
 
 function summarizeFindings(assessments: Assessment[]) {
@@ -549,7 +568,8 @@ function formatReport(snapshot: ReviewSnapshot, assessments: Assessment[], appro
   return stripControlCharacters(lines.join("\n"));
 }
 
-function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], approvalBlock: ApprovalBlock | null): string {
+function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], approvalBlock: ApprovalBlock | null,
+  modelCost: ModelCostInfo): string {
   const { counts } = summarizeFindings(assessments);
   const headline = counts.outstanding ? "Changes needed" : counts.uncertain ? "Verification needed"
     : counts.addressed ? "All actionable findings addressed" : "No actionable findings identified";
@@ -585,6 +605,8 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
   sections.push([
     "<details>", "<summary>Audit context</summary>", "",
     `- PR: [${snapshot.target.owner}/${snapshot.target.repo}#${snapshot.target.pr}](${snapshot.target.url})`,
+    `- model used: ${modelCost.model ? `\`${modelCost.model.provider}/${modelCost.model.modelId}\`` : "unknown"}`,
+    `- estimated audit cost: ${formatEstimatedCost(modelCost.costUsd)}`,
     `- audited head: \`${snapshot.headSha}\``,
     `- evidence fetched: ${snapshot.startedAt} to ${snapshot.fetchedAt}`,
     `- inline threads: ${resolved}/${inline.length} resolved (${unknown} unknown)`,
@@ -600,10 +622,10 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
 }
 
 function publicationPlan(snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined,
-  options: Partial<PublicationChoices>) {
+  options: Partial<PublicationChoices>, modelCost: ModelCostInfo) {
   const choices = publicationChoices(options);
   const approvalBlock = choices.approveMigrations ? null : migrationApprovalBlock(databaseMigration);
-  const body = formatComment(snapshot, assessments, approvalBlock);
+  const body = formatComment(snapshot, assessments, approvalBlock, modelCost);
   // Decide approval first: an approval carries the verdict in one review, otherwise it is a comment review.
   let approve = false;
   let skipped: string | null = null;
@@ -657,9 +679,9 @@ async function outputSkip(harness: Harness, snapshot: Pick<ReviewSnapshot, "targ
 }
 
 async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessments: Assessment[], databaseMigration: MigrationAssessment | null | undefined,
-  options: Partial<PublicationChoices>, log: AuditLog, context: Context, started: number, conversationId: ConversationId,
+  modelCost: ModelCostInfo, options: Partial<PublicationChoices>, log: AuditLog, context: Context, started: number, conversationId: ConversationId,
   taskId: Awaited<ReturnType<typeof enqueuePublication>>, existing: { url: string } | undefined, cached = false): Promise<void> {
-  const { intent, approve, skipped, approvalBlock } = publicationPlan(snapshot, assessments, databaseMigration, options);
+  const { intent, approve, skipped, approvalBlock } = publicationPlan(snapshot, assessments, databaseMigration, options, modelCost);
   const report = formatReport(snapshot, assessments, approvalBlock);
   log("debug", report, `\n${report}\n`);
   const body = intent.body;
@@ -691,8 +713,8 @@ async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessme
   const { counts } = summarizeFindings(assessments);
   const outcome = dryRun ? `Preview only · would ${existing ? "skip existing review" : approve ? "approve" : "comment"}`
     : existing ? "Already submitted" : approve ? "Approved" : "Completed";
-  const cost = cached ? "est. $0" : estimatedCost(await harness.snapshot(UsageDoc, conversationId, context));
-  log("info", `${outcome} · ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not actionable · ${((performance.now() - started) / 1000).toFixed(1)}s · ${cost}`, null);
+  const cost = cached ? "0" : estimatedCost(await harness.snapshot(UsageDoc, conversationId, context));
+  log("info", `${outcome} · ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not actionable · ${((performance.now() - started) / 1000).toFixed(1)}s · ${formatEstimatedCost(cost)}`, null);
   if (url || existing) log("info", `Review: ${url ?? existing!.url}`, null);
 }
 
@@ -1134,6 +1156,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       }
       conversation = existing;
       snapshot = saved.snapshot;
+      const fallbackModelCost = await resolveModelCost(harness, existing.id, context, saved.modelCost);
       await harness.commit(async (tx) => {
         const requests = await tx.doc(PublicationRequests, existing.id);
         const choices = publicationChoices(options);
@@ -1143,7 +1166,8 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
         const runs = await tx.doc(AuditRuns, prKey, null);
         const report = await tx.doc(AuditDocument, existing.id);
         if (runs.complete && report.report) {
-          const { intent } = publicationPlan(saved.snapshot!, report.report, report.databaseMigration, choices);
+          const modelCost = report.modelCost ?? fallbackModelCost;
+          const { intent } = publicationPlan(saved.snapshot!, report.report, report.databaseMigration, choices, modelCost);
           const id = await enqueuePublication(tx, existing.id, intent);
           if (id) requests.tasks[intent.fingerprint] = id;
         }
@@ -1167,7 +1191,8 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
         const identity = await harness.snapshot(AuditIdentity, cached.conversationId, context);
         if (cached.fingerprint === fingerprint && saved?.snapshot && saved.report
           && identity?.fingerprint === fingerprint && identity.policy === policy) {
-          const plan = publicationPlan(saved.snapshot, saved.report, saved.databaseMigration, options);
+          const modelCost = await resolveModelCost(harness, cached.conversationId, context, saved.modelCost);
+          const plan = publicationPlan(saved.snapshot, saved.report, saved.databaseMigration, options, modelCost);
           const existing = (await harness.snapshot(SubmittedAuditReviews, prKey, context))?.reviews[plan.intent.fingerprint];
           const publication = await harness.commit(async (tx) => {
             const taskId = await enqueuePublication(tx, cached.conversationId, plan.intent);
@@ -1182,7 +1207,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           log("info", "Reusing saved assessment", `[audit] ${detail}`);
           log("debug", detail, null);
           outputSnapshotExclusions(snapshot, options.exclude, log);
-          await outputReport(harness, saved.snapshot, saved.report, saved.databaseMigration, options, log, context, started,
+          await outputReport(harness, saved.snapshot, saved.report, saved.databaseMigration, modelCost, options, log, context, started,
             cached.conversationId, publication, existing, true);
           return;
         }
@@ -1285,10 +1310,11 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       const detail = rejection ? ` Last assessment rejection: ${rejection}` : " No assessment rejection was recorded.";
       throw new Error(diagnosticText(`Agent finished without a complete assessment.${reason} No verdict was produced. (conversation=${conversation.id}, submission=${settled.id}, model=${savedModel?.provider}/${savedModel?.modelId})${detail}`));
     }
-    const plan = publicationPlan(snapshot, saved.report, saved.databaseMigration, options);
+    const modelCost = await resolveModelCost(harness, conversation.id, context, saved.modelCost);
+    const plan = publicationPlan(snapshot, saved.report, saved.databaseMigration, options, modelCost);
     const publications = (await harness.snapshot(PublicationRequests, conversation.id, context))?.tasks ?? {};
     try {
-      await outputReport(harness, snapshot, saved.report, saved.databaseMigration, options, log, context, started, conversation.id,
+      await outputReport(harness, snapshot, saved.report, saved.databaseMigration, modelCost, options, log, context, started, conversation.id,
         publications[plan.intent.fingerprint] ?? null, priorReceipts?.reviews[plan.intent.fingerprint]);
     } finally {
       // A resumed caller can request a preview while an earlier explicit apply is still due.

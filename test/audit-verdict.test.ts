@@ -528,8 +528,9 @@ test("terminal reports number each finding and verdict comments keep open findin
         { summary: "Missing policy documentation", status: "outstanding",
           reason: "The requested policy documentation is still absent.", awaiting: "author", evidence: [issueUrl] },
       ] },
-    ] });
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    ] }, { prompt_tokens: 1000, completion_tokens: 500 });
+  }, { entrypoint: resolve("audit.ts"), github: github.handler,
+    modelCost: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 } });
   const terminal = await f.run("", ["--apply", url]);
   assert.match(terminal, /^Findings: 5 across 2 sources$/m);
   const findings = terminal.split("\n\n").filter((block) => /^\[\d+\] /.test(block));
@@ -586,11 +587,16 @@ test("terminal reports number each finding and verdict comments keep open findin
   assert.match(disclosures[0][2], /The discussion does not specify which roles should have access\./);
   assert.match(disclosures[0][2], /The requested policy documentation is still absent\./);
   assert.ok(disclosures[0][2].includes(`${url}#discussion_r2`), "all evidence links must be retained inside the disclosure");
+  assert.ok(disclosures[1][2].includes("model used: `local/test`"));
+  assert.ok(disclosures[1][2].includes("estimated audit cost: est. US$0.02"));
   assert.ok(disclosures[1][2].includes(`audited head: \`${sha}\``));
   assert.match(disclosures[1][2], /evidence fetched: .* to /);
   assert.match(disclosures[1][2], /inline threads: 0\/1 resolved \(0 unknown\)/);
   assert.match(disclosures[1][2], /other findings: 1 not actionable/);
   assert.doesNotMatch(body, /Null guard|already fixed|Duplicate request|repeats the access check|\u001b/);
+  const cached = await f.run("", [url]);
+  assert.match(cached, /model used: `local\/test`/);
+  assert.match(cached, /estimated audit cost: est\. US\$0\.02/);
 });
 
 test("an unstructured final answer cannot bypass complete report validation, post a verdict or approve", { timeout: 20000 }, async (t) => {
