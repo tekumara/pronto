@@ -121,13 +121,13 @@ for (const verbose of [false, true]) {
     assert.equal(repeat.status, 202);
     await out.until(/INFO\s+acme\/demo#7\s+Reusing saved assessment/);
     await out.until(/INFO\s+acme\/demo#7\s+Already submitted/);
-    assert.match(out.output, /INFO\s+acme\/demo#7\s+Already submitted · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · est\. US\$0(?:\n|$)/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Already submitted · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · US\$0(?:\n|$)/);
     assert.equal(gh.reviews.length, 1);
     assert.equal(modelCalls, 1);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Queued · mentioned in a pull request comment · requester=maintainer/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+(Queued|Re-run queued) · review requested · requester=alice/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Started · 0 comments/);
-    assert.match(out.output, /INFO\s+acme\/demo#7\s+Completed · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · est\. US\$0\.02/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Completed · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · US\$0\.02/);
     if (verbose) {
       assert.match(out.output, /DEBUG\s+webhook\s+Ignored: review not requested from this user.*delivery=ignored-delivery-id/);
       assert.match(out.output, /DEBUG\s+acme\/demo#7\s+report_review_assessment/);

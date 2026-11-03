@@ -588,7 +588,7 @@ test("terminal reports number each finding and verdict comments keep open findin
   assert.match(disclosures[0][2], /The requested policy documentation is still absent\./);
   assert.ok(disclosures[0][2].includes(`${url}#discussion_r2`), "all evidence links must be retained inside the disclosure");
   assert.ok(disclosures[1][2].includes("model used: `local/test`"));
-  assert.ok(disclosures[1][2].includes("estimated audit cost: est. US$0.02"));
+  assert.ok(disclosures[1][2].includes("audit cost: US$0.02"));
   assert.ok(disclosures[1][2].includes(`audited head: \`${sha}\``));
   assert.match(disclosures[1][2], /evidence fetched: .* to /);
   assert.match(disclosures[1][2], /inline threads: 0\/1 resolved \(0 unknown\)/);
@@ -596,7 +596,7 @@ test("terminal reports number each finding and verdict comments keep open findin
   assert.doesNotMatch(body, /Null guard|already fixed|Duplicate request|repeats the access check|\u001b/);
   const cached = await f.run("", [url]);
   assert.match(cached, /model used: `local\/test`/);
-  assert.match(cached, /estimated audit cost: est\. US\$0\.02/);
+  assert.match(cached, /audit cost: US\$0\.02/);
 });
 
 test("an unstructured final answer cannot bypass complete report validation, post a verdict or approve", { timeout: 20000 }, async (t) => {

@@ -38,7 +38,7 @@ const ReportSchema = obj({
 });
 type ReportData = Static<typeof ReportSchema>;
 type MigrationAssessment = { status: "migration" | "not-migration" | "uncertain"; reason: string };
-type ModelCostInfo = { model: ModelRef | null; costUsd: string }; // Estimated model/tool cost, stored as a decimal string.
+type ModelCostInfo = { model: ModelRef | null; costUsd: string }; // Best available model/tool cost, stored as a decimal string.
 type Assessment = { commentKey: string; findings: {
   summary: string; status: string; reason: string; nextStep?: string; awaiting?: string; evidence: string[];
 }[] };
@@ -325,7 +325,7 @@ const AuditController = defineTask<{ pr: string }, { phase: "assess" }, AuditRes
       const model = (await runtime.agent(context)).model ?? null;
       const successful = settled.status === "done" && !!report?.report;
       const modelCost: ModelCostInfo | null = successful ? {
-        model, costUsd: estimatedCost(await runtime.snapshot(UsageDoc, task.conversationId, context)),
+        model, costUsd: bestAvailableCost(await runtime.snapshot(UsageDoc, task.conversationId, context)),
       } : null;
       const cacheable = successful && identity?.fingerprint && model
         && identity.policy === policyFingerprint(runtime.models, model);
@@ -467,14 +467,14 @@ function outputRefreshReasons(conversationId: ConversationId, reasons: string[],
 
 const snapshotDisclaimer = "This is the agent's assessment of a saved snapshot, not proof of correctness or the PR's current live state.";
 
-function estimatedCost(usage: UsageState | undefined): string {
+function bestAvailableCost(usage: UsageState | undefined): string {
   const cost = [...Object.values(usage?.models ?? {}), ...Object.values(usage?.tools ?? {})]
     .reduce((total, item) => total + item.cost.total, 0);
   return cost.toFixed(2);
 }
 
-function formatEstimatedCost(usd: string): string {
-  return `est. US$${usd}`;
+function formatCost(usd: string): string {
+  return `US$${usd}`;
 }
 
 async function resolveModelCost(harness: Harness, conversationId: ConversationId, context: Context,
@@ -482,7 +482,7 @@ async function resolveModelCost(harness: Harness, conversationId: ConversationId
   if (saved) return saved;
   const conversation = await harness.conversation(conversationId, context);
   const model = conversation ? (await conversation.agent(context)).model ?? null : null;
-  return { model, costUsd: estimatedCost(await harness.snapshot(UsageDoc, conversationId, context)) };
+  return { model, costUsd: bestAvailableCost(await harness.snapshot(UsageDoc, conversationId, context)) };
 }
 
 function summarizeFindings(assessments: Assessment[]) {
@@ -607,7 +607,7 @@ function formatComment(snapshot: ReviewSnapshot, assessments: Assessment[], appr
     "<details>", "<summary>Audit context</summary>", "",
     `- PR: [${snapshot.target.owner}/${snapshot.target.repo}#${snapshot.target.pr}](${snapshot.target.url})`,
     `- model used: ${modelCost.model ? `\`${modelCost.model.provider}/${modelCost.model.modelId}\`` : "unknown"}`,
-    `- estimated audit cost: ${formatEstimatedCost(modelCost.costUsd)}`,
+    `- audit cost: ${formatCost(modelCost.costUsd)}`,
     `- audited head: \`${snapshot.headSha}\``,
     `- evidence fetched: ${snapshot.startedAt} to ${snapshot.fetchedAt}`,
     `- inline threads: ${resolved}/${inline.length} resolved (${unknown} unknown)`,
@@ -714,8 +714,8 @@ async function outputReport(harness: Harness, snapshot: ReviewSnapshot, assessme
   const { counts } = summarizeFindings(assessments);
   const outcome = dryRun ? `Preview only · would ${existing ? "skip existing review" : approve ? "approve" : "comment"}`
     : existing ? "Already submitted" : approve ? "Approved" : "Completed";
-  const cost = cached ? "0" : estimatedCost(await harness.snapshot(UsageDoc, conversationId, context));
-  log("info", `${outcome} · ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not actionable · ${((performance.now() - started) / 1000).toFixed(1)}s · ${formatEstimatedCost(cost)}`, null);
+  const cost = cached ? "0" : bestAvailableCost(await harness.snapshot(UsageDoc, conversationId, context));
+  log("info", `${outcome} · ${counts.addressed} addressed · ${counts.outstanding} outstanding · ${counts.uncertain} uncertain · ${counts["not-actionable"]} not actionable · ${((performance.now() - started) / 1000).toFixed(1)}s · ${formatCost(cost)}`, null);
   if (url || existing) log("info", `Review: ${url ?? existing!.url}`, null);
 }
 
