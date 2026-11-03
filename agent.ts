@@ -1,11 +1,11 @@
 import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { WatchHandle } from "@earendil-works/chord";
 import { runAudits } from "./auditor.ts";
 import { parseAuditOptions } from "./audit-options.ts";
 import { createModelRuntime } from "./model.ts";
 import { openStateHarness } from "./state.ts";
-import { createRegistry, watchEvents } from "@earendil-works/pi-durable";
+import { AssistantEntry, ConversationTranscript, createRegistry, LiveDoc, ToolResultEntry, type ConversationView, type LiveState } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 
@@ -38,7 +38,7 @@ async function main() {
   rl.on("SIGINT", quit);
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
-  let stream: Awaited<ReturnType<typeof watchEvents>> | undefined;
+  let stream: WatchHandle<ConversationView> | undefined;
   try {
     const root = await harness.root(context, { agent: {
       model: { provider: model.provider, modelId: model.id },
@@ -55,47 +55,92 @@ async function main() {
     }
     console.log(`Pi Durable · ${agent.model!.provider}/${agent.model!.modelId}\n${cwd}\n/audit [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <PR URL> or --pr <PR URL>... to audit · /quit to exit · Ctrl+C saves unfinished work for restart\n`);
 
-    // Events contain both partial deltas and authoritative final messages.
+    // The conversation view replaces the former event stream: live partials are in pi.live,
+    // while completed assistant and tool messages are transcript entries.
     const printed = new Map<number, number>();
-    const printBlock = (block: AssistantMessage["content"][number], index: number) => {
-      if (block.type !== "text") return;
+    const printBlock = (block: { type: string; text?: string }, index: number) => {
+      if (block.type !== "text" || typeof block.text !== "string") return;
       process.stdout.write(block.text.slice(printed.get(index) ?? 0));
       printed.set(index, block.text.length);
     };
-    stream = await watchEvents(harness, root.id, context);
-    stream.start(async (events) => {
-      for (const event of events) {
-        if (event.type === "message_start" && event.message.role === "assistant") {
-          printed.clear();
-          event.message.content.forEach(printBlock);
-        } else if (event.type === "message_update") {
-          for (const change of event.changes) {
-            if (change.type === "text_delta") {
-              process.stdout.write(change.delta);
-              printed.set(change.contentIndex, (printed.get(change.contentIndex) ?? 0) + change.delta.length);
-            } else if ("block" in change) {
-              printBlock(change.block, change.contentIndex);
-            } else if (change.type === "message") {
-              change.message.content.forEach(printBlock);
-            }
-          }
-        } else if (event.type === "message_end") {
-          const message = event.entry.model?.[0];
+    stream = await root.watch(context);
+    const transcript = new ConversationTranscript((query, limit, ctx) => root.entries(query, limit, undefined, ctx));
+    let lastEntryId = stream.value.entries.at(-1)?.id ?? 0;
+    let runTask = (stream.value.docs[LiveDoc.definition.kind] as LiveState | undefined)?.run?.taskId;
+    const seenTools = new Set<string>();
+    let lastRetry: string | undefined;
+    let lastFailure: string | undefined;
+    const renderView = async (view: ConversationView) => {
+      const live = view.docs[LiveDoc.definition.kind] as LiveState | undefined;
+      if (live?.run?.taskId !== undefined && live.run.taskId !== runTask) {
+        runTask = live.run.taskId;
+        printed.clear();
+        seenTools.clear();
+      }
+      const assistantContent = view.entries.flatMap((entry) => entry.model ?? []).flatMap((message) =>
+        message.role === "assistant" ? message.content : []);
+      const runningTools = [
+        ...(live?.tools ?? []).flatMap((slot) => {
+          if (slot.status !== "running") return [];
+          const call = assistantContent.find((block) => block.type === "toolCall" && block.id === slot.callId);
+          return [{ callId: slot.callId, name: slot.name, args: call?.type === "toolCall" ? call.arguments : {} }];
+        }),
+        ...(live?.nestedTools ?? []).filter((slot) => slot.status === "running").map((slot) => ({
+          callId: slot.callId, name: slot.name, args: slot.arguments,
+        })),
+      ];
+      for (const tool of runningTools) {
+        if (seenTools.has(tool.callId)) continue;
+        seenTools.add(tool.callId);
+        console.log(`[${tool.name}] ${tool.args.path ?? tool.args.command ?? ""}`);
+      }
+      const retry = live?.generation?.retry;
+      if (retry) {
+        const key = `${live?.generation?.attempt}:${retry.at}:${retry.error}`;
+        if (key !== lastRetry) {
+          lastRetry = key;
+          console.error(`Retry ${live?.generation?.attempt}: ${retry.error}`);
+        }
+      }
+      const failure = live?.runFailure;
+      if (failure) {
+        const key = `${failure.taskId}:${failure.reason}:${failure.detail ?? ""}`;
+        if (key !== lastFailure) {
+          lastFailure = key;
+          console.error(failure.detail ?? `Run ended without an answer: ${failure.reason}`);
+        }
+      }
+      live?.generation?.message?.content.forEach(printBlock);
+
+      let full = transcript.merge(view);
+      let gap = full.items.find((item) => item.kind === "gap");
+      while (gap) {
+        full = await transcript.fillGap(gap, context);
+        gap = full.items.find((item) => item.kind === "gap");
+      }
+      for (const item of full.items) {
+        if (item.kind !== "entry" || item.entry.id <= lastEntryId) continue;
+        const entry = item.entry;
+        if (AssistantEntry.is(entry)) {
+          const message = entry.model?.[0];
           if (message?.role === "assistant") {
             message.content.forEach(printBlock);
             console.log();
             if (message.errorMessage) console.error(message.errorMessage);
-          } else if (message?.role === "toolResult" && message.isError) {
-            console.error(message.content.flatMap((b) => b.type === "text" ? [b.text] : []).join("\n"));
+            printed.clear();
           }
-        } else if (event.type === "tool_execution_start") {
-          console.log(`[${event.toolName}] ${event.args.path ?? event.args.command ?? ""}`);
-        } else if (event.type === "auto_retry_start") {
-          console.error(`Retry ${event.attempt}: ${event.errorMessage}`);
-        } else if (event.type === "task_failed") {
-          console.error(event.message);
+        } else if (ToolResultEntry.is(entry)) {
+          const message = entry.model?.[0];
+          if (message?.role === "toolResult" && message.isError) {
+            console.error(message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n"));
+          }
         }
+        lastEntryId = entry.id;
       }
+    };
+    await renderView(stream.value);
+    stream.start(async (call) => {
+      if (call.kind === "value") await renderView(call.value);
     });
     harness.resume();
     await root.waitForIdle(context);

@@ -6,7 +6,7 @@ import { parseReviewTarget } from "./reviews.ts";
 
 type Pending = { url: string; task: TaskId<null>; running: boolean; rerun: boolean };
 const Queue = defineDoc<{ recent: string[]; pending: Record<string, Pending> }>({
-  kind: "app.webhook-queue", version: 1, scope: "session",
+  kind: "app.webhook-queue", version: 1, scope: "session", checkpointWhen: () => false,
   initial: () => ({ recent: [], pending: {} }),
 });
 export type Accepted = Enqueued | "duplicate";
@@ -112,10 +112,10 @@ export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch
           // preserves the checkpoint; other infrastructure failures retry with a bounded delay.
           if (closed || runtime.signal.aborted) throw error;
           runtime.report(error);
-          await runtime.sleep(runtime.now() + 1000, context);
-          await runtime.commit(() => ({ status: "running", checkpoint: {
+          await runtime.sleepUntil(runtime.now() + 1000, {
             phase: "dispatch", attempt: task.state.checkpoint.attempt + 1,
-          } }), context);
+          }, context);
+          return;
         }
       },
     },

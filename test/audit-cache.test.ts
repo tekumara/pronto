@@ -15,10 +15,10 @@ const audit = resolve("audit.ts");
 const chat = resolve("agent.ts");
 // Persisted document contracts used to inspect evidence and simulate a pre-filtering snapshot.
 const auditRuns = defineDocFamily<{ active: ConversationId | null }, null>({
-  kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({ active: null }),
+  kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false, initial: () => ({ active: null }),
 });
 const auditDocument = defineDoc<{ snapshot: ReviewSnapshot | null }>({
-  kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ snapshot: null }),
+  kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false, initial: () => ({ snapshot: null }),
 });
 
 function evidence(extra: { inline?: object[]; comments?: object[]; reviews?: object[] } = {}) {
@@ -122,7 +122,7 @@ test("unchanged evidence reuses a saved assessment across directories, CLI and c
   assert.doesNotMatch(first, /Refreshing audit/);
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
   const runs = defineDocFamily<{ latestSuccess: { conversationId: number } | null }, null>({
-    kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({ latestSuccess: null }),
+    kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false, initial: () => ({ latestSuccess: null }),
   });
   let assessmentId: number;
   try {
@@ -328,9 +328,9 @@ test("resuming an older saved report without migration status preserves the audi
   // Simulate an older report committed before its completion bookkeeping was saved.
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
   const report = defineDoc<JsonObject>({
-    kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({}),
+    kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false, initial: () => ({}),
   });
-  const runs = defineDocFamily<JsonObject, null>({ kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({}) });
+  const runs = defineDocFamily<JsonObject, null>({ kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false, initial: () => ({}) });
   try {
     const state = await session.snapshot(auditRuns, "9", BACKGROUND_CONTEXT);
     assert.ok(state?.active);
@@ -407,7 +407,7 @@ test("matching cached assessments do not expire", { timeout: 20_000 }, async (t)
   await f.run("", [url]);
   const session = createSession(await openNodeSqliteStorage(await storagePath(f.stateDir)));
   // Exercise the persisted per-PR state protocol with an assessment that has aged since it was saved.
-  const runs = defineDocFamily<JsonObject, null>({ kind: "app.review-audit-runs", version: 1, scope: "session", family: true, initial: () => ({}) });
+  const runs = defineDocFamily<JsonObject, null>({ kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false, initial: () => ({}) });
   try {
     await session.commit(async (tx) => {
       const doc = await tx.doc(runs, "9", null);
@@ -589,7 +589,7 @@ test("legacy per-PR databases are retained untouched and never imported into rep
   const key = createHash("sha256").update("https://github.com/acme/project#9").digest("hex").slice(0, 20);
   const legacyPath = join(directory, `${key}.sqlite`);
   const session = createSession(await openNodeSqliteStorage(legacyPath));
-  const legacy = defineDoc<JsonObject>({ kind: "app.review-audit-runs", version: 1, scope: "session", initial: () => ({ active: null, complete: true }) });
+  const legacy = defineDoc<JsonObject>({ kind: "app.review-audit-runs", version: 1, scope: "session", checkpointWhen: () => false, initial: () => ({ active: null, complete: true }) });
   try {
     await session.commit(async (tx) => { await tx.doc(legacy); }, BACKGROUND_CONTEXT);
   } finally { await session.close(BACKGROUND_CONTEXT); }

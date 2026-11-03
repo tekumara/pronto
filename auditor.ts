@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { arr, int, lit, obj, oneOf, opt, str, type Static } from "@earendil-works/pi-schema";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, ProviderDoc, ToolResultEntry, UsageDoc, watchEvents,
-  type Conversation, type ConversationId, type Cursor, type Harness, type ModelRef, type SubmissionId, type TaskId, type UsageState,
+  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, LiveDoc, ProviderDoc, ToolResultEntry, UsageDoc,
+  type Conversation, type ConversationId, type ConversationView, type Cursor, type Harness, type LiveState, type ModelRef, type SubmissionId, type TaskId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "./state.ts";
 import { createPublisher, SubmittedAuditReviews, completeReassessment, enqueuePublication, pendingReassessments, recoverPublications, waitForPublication, type PublicationChoices, type PublicationIntent, type PublicationResult } from "./publication.ts";
@@ -19,23 +19,24 @@ import { AUDIT_COMMENT_MARKER, fetchChangedFiles, fetchPullRequest, fetchReviewS
 /** The optional CLI text preserves its detailed transcript; null marks serve-only summaries. */
 type AuditLog = (level: LogLevel, message: string, cliText?: string | null) => void;
 
-const Finding = Type.Object({
-  summary: Type.String({ minLength: 1 }),
-  status: Type.Union(["addressed", "outstanding", "uncertain", "not-actionable"].map((s) => Type.Literal(s))),
-  reason: Type.String({ minLength: 1 }),
-  nextStep: Type.Optional(Type.String({ minLength: 1 })),
-  awaiting: Type.Optional(Type.String({ minLength: 1 })),
-  evidence: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
-}, { additionalProperties: false });
-const Report = Type.Object({
-  databaseMigration: Type.Object({
-    status: Type.Union(["migration", "not-migration", "uncertain"].map((s) => Type.Literal(s))),
-    reason: Type.String({ minLength: 1 }),
-  }, { additionalProperties: false }),
-  assessments: Type.Array(Type.Object({
-    commentKey: Type.String({ minLength: 1 }), findings: Type.Array(Finding, { minItems: 1 }),
-  }, { additionalProperties: false })),
-}, { additionalProperties: false });
+const Finding = obj({
+  summary: str({ minLength: 1 }),
+  status: oneOf(["addressed", "outstanding", "uncertain", "not-actionable"]),
+  reason: str({ minLength: 1 }),
+  nextStep: opt(str({ minLength: 1 })),
+  awaiting: opt(str({ minLength: 1 })),
+  evidence: arr(str({ minLength: 1 }), { minItems: 1 }),
+});
+const ReportSchema = obj({
+  databaseMigration: obj({
+    status: oneOf(["migration", "not-migration", "uncertain"]),
+    reason: str({ minLength: 1 }),
+  }),
+  assessments: arr(obj({
+    commentKey: str({ minLength: 1 }), findings: arr(Finding, { minItems: 1 }),
+  })),
+});
+type ReportData = Static<typeof ReportSchema>;
 type MigrationAssessment = { status: "migration" | "not-migration" | "uncertain"; reason: string };
 type ModelCostInfo = { model: ModelRef | null; costUsd: string }; // Estimated model/tool cost, stored as a decimal string.
 type Assessment = { commentKey: string; findings: {
@@ -47,7 +48,7 @@ const AuditDocument = defineDoc<{
   databaseMigration?: MigrationAssessment | null; // Older saved reports have no classification.
   modelCost?: ModelCostInfo | null; // Older saved reports have no model or cost metadata.
 }>({
-  kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false,
   initial: () => ({ snapshot: null, report: null, inspected: [], databaseMigration: null, modelCost: null }),
 });
 type CachedAssessment = {
@@ -58,14 +59,14 @@ const AuditRuns = defineDocFamily<{
   active: ConversationId | null; controllerTask: TaskId<AuditResult> | null; complete: boolean;
   restartModel: ModelRef | null; latestSuccess: CachedAssessment | null;
 }, null>({
-  kind: "app.review-audit-runs", version: 1, scope: "session", family: true,
+  kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false,
   initial: () => ({ active: null, controllerTask: null, complete: true, restartModel: null, latestSuccess: null }),
 });
 // Explicit caller choices saved before model execution. Recovery never substitutes server flags.
 const PublicationRequests = defineDoc<{
   choices: PublicationChoices[]; tasks: Record<string, TaskId<PublicationResult>>;
 }>({
-  kind: "app.audit-publication-requests", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  kind: "app.audit-publication-requests", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false,
   initial: () => ({ choices: [], tasks: {} }),
 });
 function publicationChoices(options: Partial<PublicationChoices>): PublicationChoices {
@@ -73,7 +74,7 @@ function publicationChoices(options: Partial<PublicationChoices>): PublicationCh
 }
 // Legacy conversations have no identity: retain their reports, but never guess which policy produced them.
 const AuditIdentity = defineDoc<{ fingerprint: string | null; policy: string | null }>({
-  kind: "app.review-audit-identity", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  kind: "app.review-audit-identity", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false,
   initial: () => ({ fingerprint: null, policy: null }),
 });
 
@@ -224,10 +225,10 @@ You have no filesystem, shell, GitHub mutation, or arbitrary-network tools.`;
 const readFile = defineTool({
   name: "read_github_file",
   description: "Read numbered lines from a repository file at this audit's pinned head or base SHA. The returned URL can be cited.",
-  parameters: Type.Object({
-    path: Type.String({ minLength: 1 }), revision: Type.Union([Type.Literal("head"), Type.Literal("base")]),
-    offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })),
-  }, { additionalProperties: false }),
+  parameters: obj({
+    path: str({ minLength: 1 }), revision: oneOf(["head", "base"]),
+    offset: opt(int({ minimum: 1 })), limit: opt(int({ minimum: 1, maximum: 300 })),
+  }),
   replay: "safe", outputLimits: { maxBytes: 40_000, maxLines: 2_000 },
   execute: async (args, api, context) => {
     const snapshot = (await api.snapshot(AuditDocument, api.conversationId, context))?.snapshot;
@@ -243,7 +244,7 @@ const readFile = defineTool({
 });
 const readComment = defineTool({
   name: "read_review_comment", description: "Read a complete comment and its replies from the saved evidence snapshot.",
-  parameters: Type.Object({ commentKey: Type.String() }, { additionalProperties: false }), replay: "safe",
+  parameters: obj({ commentKey: str() }), replay: "safe",
   execute: async ({ commentKey }, api, context) => {
     const comment = (await api.snapshot(AuditDocument, api.conversationId, context))?.snapshot?.comments.find((c) => c.key === commentKey);
     if (!comment) throw new Error(`Unknown comment key: ${commentKey}`);
@@ -265,8 +266,8 @@ function isInspectedCitation(url: string, inspected: string[]): boolean {
 const report = defineTool({
   name: "report_review_assessment",
   description: "Finish the audit with a database-migration classification. Every supplied comment must appear exactly once, with findings and real evidence URLs.",
-  parameters: Report, replay: "safe",
-  execute: async ({ assessments, databaseMigration }, api, context) => {
+  parameters: ReportSchema, replay: "safe",
+  execute: async ({ assessments, databaseMigration }: ReportData, api, context) => {
     await api.commit(async (tx) => {
       const doc = await tx.doc(AuditDocument, api.conversationId);
       if (!doc.snapshot) throw new Error("Audit snapshot missing");
@@ -1063,7 +1064,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
     }
     options = { ...options, ...reassessment.choices };
   }
-  let stream: Awaited<ReturnType<typeof watchEvents>> | undefined;
+  let stream: Awaited<ReturnType<Conversation["watch"]>> | undefined;
   try {
     const startedAt = new Date().toISOString();
     log("info", "Preparing · fetching GitHub evidence", null);
@@ -1251,17 +1252,33 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
       throw new Error("The saved audit model is unavailable. Restore its Pi credentials before resuming.");
     }
     await repository.allow(conversation.id, diagnostics, context);
-    stream = await watchEvents(harness, conversation.id, context);
-    stream.start(async (events) => {
-      for (const event of events) {
-        if (event.type === "tool_execution_start") {
-          const name = event.toolName.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
-          const argument = String(event.args.path ?? event.args.commentKey ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
-          log("debug", `${name} ${argument}`, `[audit:${name}] ${argument}`);
-        } else if (event.type === "auto_retry_start") {
-          warn(`Audit retry ${event.attempt}: ${event.errorMessage} (conversation=${conversation.id}, model=${savedModel?.provider}/${savedModel?.modelId}, retryAt=${new Date(event.at).toISOString()}, delayMs=${Math.max(0, event.at - Date.now())})`);
+    stream = await conversation.watch(context);
+    const seenTools = new Set<string>();
+    let lastRetry: string | undefined;
+    const logProgress = (view: ConversationView) => {
+      const live = view.docs[LiveDoc.definition.kind] as LiveState | undefined;
+      for (const slot of live?.tools ?? []) {
+        if (slot.status !== "running" || seenTools.has(slot.callId)) continue;
+        seenTools.add(slot.callId);
+        const name = slot.name.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+        const call = view.entries.flatMap((entry) => entry.model ?? []).flatMap((message) =>
+          message.role === "assistant" ? message.content : []).find((block) => block.type === "toolCall" && block.id === slot.callId);
+        const args = call?.type === "toolCall" ? call.arguments : {};
+        const argument = String(args.path ?? args.commentKey ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+        log("debug", `${name} ${argument}`, `[audit:${name}] ${argument}`);
+      }
+      const retry = live?.generation?.retry;
+      if (retry) {
+        const key = `${live.generation?.attempt}:${retry.at}:${retry.error}`;
+        if (key !== lastRetry) {
+          lastRetry = key;
+          warn(`Audit retry ${live.generation?.attempt}: ${retry.error} (conversation=${conversation.id}, model=${savedModel?.provider}/${savedModel?.modelId}, retryAt=${new Date(retry.at).toISOString()}, delayMs=${Math.max(0, retry.at - Date.now())})`);
         }
       }
+    };
+    logProgress(stream.value);
+    stream.start(async (call) => {
+      if (call.kind === "value") logProgress(call.value);
     });
     if (controllerTask == null) throw new Error("Incomplete audit has no controller task");
     const priorReceipts = await harness.snapshot(SubmittedAuditReviews, prKey, context);
@@ -1308,7 +1325,7 @@ async function auditRequest(target: ReviewTarget, options: AuditOptions & { mode
           : ` Model stop reason: ${stopReason}.`;
       }
       const detail = rejection ? ` Last assessment rejection: ${rejection}` : " No assessment rejection was recorded.";
-      throw new Error(diagnosticText(`Agent finished without a complete assessment.${reason} No verdict was produced. (conversation=${conversation.id}, submission=${settled.id}, model=${savedModel?.provider}/${savedModel?.modelId})${detail}`));
+      throw new Error(diagnosticText(`Agent finished without a complete assessment.${reason} No verdict was produced. (conversation=${conversation.id}, submission=${settled.id}, model=${savedModel?.provider}/${savedModel?.modelId})${detail}`, 3_500));
     }
     const modelCost = await resolveModelCost(harness, conversation.id, context, saved.modelCost);
     const plan = publicationPlan(snapshot, saved.report, saved.databaseMigration, options, modelCost);

@@ -100,8 +100,12 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
     first.child.kill(signal);
     const stopped = await first.done;
     if (signal === "SIGTERM") assert.equal(stopped.code, 0, stopped.stderr);
-    const output = await f.run("/quit\n");
-    assert.ok(output.includes("Recovered and finished."));
+    const resumed = f.start();
+    resumed.child.stdin.end("/quit\n");
+    const output = await resumed.done;
+    assert.equal(output.code, 0, output.stderr);
+    assert.ok(output.stdout.includes("Recovered and finished."));
+    if (signal === "SIGKILL") assert.match(output.stderr, /Retry 1: The host stopped while the model was answering/);
     assert.equal(requests, 2);
   });
 }

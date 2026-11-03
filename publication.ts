@@ -11,7 +11,7 @@ export type PublicationIntent = {
 export type PublicationResult = { url: string | null };
 type ReassessmentRequest = Pick<PublicationIntent, "target" | "choices" | "fingerprint"> & { author: string | null };
 const Reassessments = defineDoc<{ pending: Record<string, ReassessmentRequest> }>({
-  kind: "app.audit-reassessments", version: 1, scope: "session",
+  kind: "app.audit-reassessments", version: 1, scope: "session", checkpointWhen: () => false,
   initial: () => ({ pending: {} }),
 });
 
@@ -28,14 +28,14 @@ export async function completeReassessment(tx: Tx, pr: string, request: Reassess
 export const SubmittedAuditReviews = defineDocFamily<{
   reviews: Record<string, { headSha: string; event: "COMMENT" | "APPROVE"; url: string; recordedAt: string }>;
 }, null>({
-  kind: "app.submitted-audit-reviews", version: 1, scope: "session", family: true,
+  kind: "app.submitted-audit-reviews", version: 1, scope: "session", family: true, checkpointWhen: () => false,
   initial: () => ({ reviews: {} }),
 });
 // The intent is immutable. Only delivery state and the pointer to a retry task change.
 const Publications = defineDocFamily<{
   pending: Record<string, { intent: PublicationIntent; taskId: TaskId<PublicationResult>; author: string | null; attempted: boolean; failed: boolean }>;
 }, null>({
-  kind: "app.audit-publications", version: 1, scope: "session", family: true,
+  kind: "app.audit-publications", version: 1, scope: "session", family: true, checkpointWhen: () => false,
   initial: () => ({ pending: {} }),
 });
 

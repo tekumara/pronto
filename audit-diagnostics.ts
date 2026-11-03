@@ -1,9 +1,9 @@
 import type { Api, Model, StreamOptions } from "@earendil-works/pi-ai";
 
 /** Keep diagnostic lines bounded and strip terminal controls. */
-function diagnosticText(value: unknown): string {
+function diagnosticText(value: unknown, maxLength = 4_000): string {
   const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
-  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 4_000);
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, maxLength);
 }
 
 /** Format transport errors, retry events and the final failure consistently for one audit. */

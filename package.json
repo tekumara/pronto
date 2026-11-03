@@ -21,16 +21,17 @@
     "test:quint": "mise run quint:check"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1154.0",
-    "@earendil-works/chord": "1.3.0",
-    "@earendil-works/pi-ai": "1.3.0",
-    "@earendil-works/pi-coding-agent": "1.3.0",
-    "@earendil-works/pi-durable": "1.3.0",
-    "agent-reviews": "1.1.0",
-    "undici": "8.10.2"
+    "@aws-sdk/client-s3": "3.1161.0",
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0",
+    "@earendil-works/pi-schema": "1.5.0",
+    "agent-reviews": "1.3.0",
+    "undici": "8.12.3"
   },
   "devDependencies": {
-    "@types/node": "^22.19.0",
-    "typescript": "^5.9.3"
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
   }
 }
