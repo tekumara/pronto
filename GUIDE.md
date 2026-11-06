@@ -6,7 +6,7 @@ Check whether human and bot review findings on a GitHub pull request have been a
 
 Audits are read-only by default. When you provide a PR URL, you do not need a local checkout. Pi Durable saves the evidence and assessment in SQLite, resumes interrupted audits and reuses assessments when the evidence is unchanged. Add `--apply` to post the verdict as a PR review comment; add `--approve` as well to make that review an approval when the verdict allows it. Without `--apply`, Pronto previews the comment and any selected approval.
 
-For ongoing coding tasks, an [optional interactive chat](#optional-interactive-chat) is also available.
+Use the [optional audit discussion chat](#optional-audit-discussion-chat) to ask about existing findings, author replies and evidence.
 
 ## Quick start
 
@@ -405,7 +405,7 @@ The verdict comment is previewed by default. With `--apply`, Pronto posts it unl
 
 `--apply` checks local records of [submitted audit reviews](GLOSSARY.md#language) in the repository's SQLite database. When the verdict body, review type and audited head match a recorded review, Pronto skips the write and prints its saved URL. Evidence-fetch times and trailing whitespace do not affect the match. This applies to cached assessments and forced refreshes. A preview followed by `--apply` still posts if no matching receipt exists. Changed verdict content or a different head can produce a new review.
 
-A submission receipt is saved after GitHub acknowledges the review, or after remote reconciliation finds a previously attempted publication. Receipts are shared across working directories, CLI and chat, and GitHub accounts using the same state directory. Remote history is checked only for a saved attempted publication. Earlier reviews without a local receipt or pending intent, including reviews from another machine or state directory, do not prevent posting. Editing, deleting or dismissing a review on GitHub does not remove its local receipt. `--force` refreshes the assessment, not review submission history.
+A submission receipt is saved after GitHub acknowledges the review, or after remote reconciliation finds a previously attempted publication. Receipts are shared across working directories, CLI and serve, and GitHub accounts using the same state directory. Remote history is checked only for a saved attempted publication. Earlier reviews without a local receipt or pending intent, including reviews from another machine or state directory, do not prevent posting. Editing, deleting or dismissing a review on GitHub does not remove its local receipt. `--force` refreshes the assessment, not review submission history.
 
 The review is a `COMMENT` review, or an `APPROVE` review when approval is selected and eligible (see [Approve clean audits](#approve-clean-audits)). A recorded comment review does not prevent a later approval review. A recorded approval prevents another matching approval, even after a later dismissal or request for changes on GitHub. The separate live `--skip-approved` check still skips PRs already approved at their current head; use `--skip-approved=false` to audit them anyway.
 
@@ -589,7 +589,7 @@ pronto/
     └── <cwd-hash>.sqlite
 ```
 
-Each repository has one audit database, shared across working directories and both entry points. Its path uses the lower-case GitHub hostname as a directory and the lower-case base-repository owner and name separated by `~`, not the PR number or fork head repository. The hostname is percent-encoded for use as a path component. Each PR has a separate controller document keyed by its PR number. Each assessment attempt still has an independent conversation. Chat databases are separate, keyed by the canonical absolute working directory; symlink aliases share a chat, while different worktrees do not. Chat database filenames use the first 20 hexadecimal characters of a SHA-256 hash.
+Each repository has one audit database, written by the CLI and serve mode and read by chat across working directories. Its path uses the lower-case GitHub hostname as a directory and the lower-case base-repository owner and name separated by `~`, not the PR number or fork head repository. The hostname is percent-encoded for use as a path component. Each PR has a separate controller document keyed by its PR number. Each assessment attempt still has an independent conversation. Chat databases are separate, keyed by the canonical absolute working directory; symlink aliases share a chat, while different worktrees do not. Chat database filenames use the first 20 hexadecimal characters of a SHA-256 hash.
 
 No separate JSON or Markdown report file is written. Evidence is saved in a Durable document and as a submitted conversation input. Remote file reads become tool results. The structured assessment is also retained in the session.
 
@@ -601,55 +601,64 @@ See [Audit database contents](DATABASE.md#audit-database-contents) for the saved
 
 Earlier hash-named repository databases in the root of `repos/`, old per-PR databases in `audits/`, and directory-local `.pi-durable/` databases are left untouched and are not imported. The first audit using the readable repository name starts a fresh database; old databases remain on disk as historical records. Only the configured state directory supplies history and recovery state. If no database exists there, Pronto starts a new session. Keep any old `.pi-durable/` directory out of version control.
 
-## Optional interactive chat
+## Optional audit discussion chat
 
-The repository also includes a plain terminal coding chat in [`agent.ts`](agent.ts). It uses Pi Durable for conversation history, tool calls and recovery. There is no full-screen TUI, server, or subagent system.
+The plain terminal chat in [`agent.ts`](agent.ts) discusses existing Pronto audits. It does not run audits or change their verdicts.
 
-After installing dependencies and logging in to Pi, start it with:
+Start it after installing dependencies and logging in to Pi:
 
 ```sh
-npm start
+make chat
+# or: npm start
 ```
 
-The chat uses your saved Pi default model, or the first available model if there is no usable default. The selected model is shown at startup. Choose a specific model with:
+Ask a question with a PR URL, then continue the conversation:
+
+```text
+you> Why is https://github.com/owner/repo/pull/42 still outstanding?
+you> What did the author say about these findings?
+you> Was this addressed by code, an explanation or reported testing?
+you> Does the cited evidence support the auditor's reasoning?
+you> What would satisfy the rubric?
+you> What truthful explanation could address the concern?
+```
+
+The chat reads the saved assessment alongside original comments, replies, patches, code excerpts and audit instructions. It separates the auditor's recorded conclusion from its own analysis. Discussion does not mark findings addressed, rewrite the assessment or guarantee a changed verdict.
+
+The selected attempt stays the same across follow-up questions and restarts, even if another audit finishes meanwhile. Ask explicitly to switch to the latest attempt or a particular audit ID. The chat identifies failed or incomplete attempts rather than silently falling back to an older successful assessment.
+
+The chat uses your saved Pi default model, or the first available model if there is no usable default. Choose another model with:
 
 ```sh
 npm start -- provider/model-id
 ```
 
-A model argument also changes the model of an existing conversation. The startup banner shows the model, working directory and a short command list. Type a task at `you>`. Answers stream as plain text. Tool calls show their name and file path or command. Enter `/help` to see commands and audit options, or `/quit` to exit.
-
-You can invoke the same PR auditor from chat:
-
-```text
-/audit https://github.com/owner/repo/pull/42
-/audit --pr https://github.com/owner/repo/pull/42 --pr https://github.com/owner/repo/pull/43
-```
-
-Chat batch targets must be URLs; branch and number selection are CLI-only. The command supports the same `--pr`, `--skip`, `--skip-drafts`, `--skip-approved`, `--exclude` (paths cannot contain spaces here), `--force`, `--approve`, `--allow-uncertain`, `--approve-migrations`, and `--apply` flags described above. Chat audits also preview by default and require `--apply` to post the verdict comment or submit an approval. Chat audits use the chat's model and separate audit storage. They do not replace the coding conversation or its tools.
-
-To use the coding chat in another project, run the script from that directory:
-
-```sh
-cd /path/to/project
-node --experimental-strip-types /path/to/pronto/agent.ts
-```
+A model argument also changes the model of an existing conversation. Answers stream as plain text; tool calls show their name and PR URL or file path. Enter `/help` for examples or `/quit` to exit.
 
 ### Chat tools and safety
 
-Unlike the read-only auditor, the chat installs Pi Durable's built-in `read`, `write`, `edit`, and `bash` tools. They run directly on your machine as your user, with no sandbox or approval prompts. Use the chat only with projects and tasks you trust.
+The model has 2 tools:
 
-The chat uses the same Pi credential setup as the auditor. Pi extensions, skills, MCP servers, and its full system prompt are not loaded. A short coding instruction tells the model to inspect the project and follow `AGENTS.md` when present.
+| Tool | Reads |
+| --- | --- |
+| `read_audit` | Saved summary, findings with their original sources, discussion, patches, original instructions and successful code excerpts |
+| `read_github_file` | Additional numbered code lines at the selected audit's pinned head or base commit, with citable URLs |
+
+`read_audit` initially selects the latest saved attempt for a PR. Its default `auditId=0` keeps an existing selection. A positive `auditId` selects that particular attempt; `latest=true` explicitly switches to the latest. Sections use character offsets and return at most 16,000 characters per call, with `nextOffset` for continuation. Long replies are not silently dropped.
+
+Audit retrieval uses a separate read-only SQLite connection. It can read while a CLI or server process owns the repository database. It cannot resume assessments, recover pending publications, migrate databases or create an audit when none exists.
+
+Additional code reads are labelled as new inspection, not evidence the original auditor necessarily saw. Missing evidence or original instructions remain explicit limitations. The conversation reflects the saved snapshot, not current GitHub comments, thread resolution, approvals or mergeability.
+
+There are no local filesystem, shell, coding or GitHub mutation tools. Pi skills, MCP servers and its full coding prompt are not loaded. The former `/audit` command is no longer supported: use `pronto <PR URL>` in a separate terminal to run an audit.
 
 ### Chat persistence and recovery
 
-The coding chat has one conversation per canonical working directory in `<state-directory>/chats/<cwd-hash>.sqlite`. Restart the same command to continue it. Conversation history and the selected model survive restarts.
+Discussion history, selected model and selected audit are saved in one conversation per canonical working directory in `<state-directory>/chats/<cwd-hash>.sqlite`. Audit records remain separate in `<state-directory>/repos/`.
 
-Ctrl+C or SIGTERM closes the harness without cancelling its unfinished work. On the next launch, `harness.resume()` continues it before accepting another task. An interrupted model request is retried. Interrupted tools rerun only when Pi Durable declares them replay-safe; writes and shell commands are not blindly repeated.
+Ctrl+C or SIGTERM saves unfinished discussion for restart. The next launch resumes it before accepting another question. Both tools are read-only and replay-safe. Existing chat histories are retained, but coding instructions and tool filters are replaced before recovery.
 
-Pronto rejects a second chat process for the same working directory and state directory. Audits use separate databases, so they do not lock the coding conversation.
-
-To start a fresh conversation, stop the chat and move or delete its `<cwd-hash>.sqlite` file and SQLite sidecars (`-wal` and `-shm`). Keep the state directory's `repos/` subdirectory to retain current audits, and `audits/` if you want to retain older per-PR history. The chat database contains your prompts, model responses and tool results, so keep it private.
+Pronto rejects a second chat process for the same working directory and state directory. To start a fresh discussion, stop the chat and move or delete its chat database and SQLite sidecars (`-wal` and `-shm`). Keep the repository databases to retain audits. Chat history contains your questions and retrieved evidence, so keep it private.
 
 ## Development checks
 
@@ -658,9 +667,15 @@ npm run check
 npm test
 ```
 
-The tests verify that `npm link` exposes the source-backed `pronto` command from another directory. They use simulated model providers and local GitHub endpoints with temporary credentials. Audit tests cover both entry points, paginated evidence, fork-head code reads, blocked shell calls, report coverage and citations, inconsistent evidence, and restart recovery. They also cover opt-in verdict comments and approvals, a new review on every `--apply` with the verdict merged into the approval, default dry-run previews and per-invocation `--apply` consent for GitHub writes, skipped approvals, commit changes before approval, posting failures, cache reuse and invalidation, no expiry, failed reassessment, forced restarts, crashes during fetching and before printing, and retaining old per-PR databases without importing them. Concurrent audit tests cover CLI and chat batches, per-PR cache isolation, same-PR admission, caller cancellation, batch failures, asynchronous proxy transport, forced restart isolation, repo-wide process locks, deferred job recovery, and recovery after SIGKILL and SIGTERM. Serve tests cover signature verification, delivery filtering, redelivery handling, per-PR queueing and the concurrency cap, option validation, and a real server process that audits a requested review, submits its verdict once, ignores other requests and stops on SIGTERM. They also cover resuming audits that SIGKILL or SIGTERM left unfinished, retrying the latest failed assessment once per startup without reusing an older success, rechecking recovered PRs, closing idle databases and skipping a database another process holds. Chat tests exercise all 4 coding tools, streamed output, saved history, and recovery after SIGKILL and SIGTERM. Storage tests cover path precedence, private permissions, shared audit history, isolated chats, process locks and ignoring directory-local databases. Tests use temporary state directories and do not contact a real model provider or GitHub. Supplied model verdicts test report rendering, validation and action rules, not the model's ability to judge whether a scope explanation is adequate.
+The tests use temporary state directories, simulated model providers and local GitHub endpoints. They do not contact a real provider or GitHub.
 
-Pi Durable is experimental. Pi packages are pinned to 1.0.3, with `package-lock.json` included alongside the code.
+Audit tests cover source-backed CLI installation, evidence pagination, pinned fork code, report validation, citations, previews, approval safeguards, publication recovery, caching and concurrent batches. Serve tests cover verified webhook admission, queueing, process recovery and duplicate prevention.
+
+Chat tests exercise real audit-reading tools against assessments created by the CLI. They cover original replies and code citations, bounded long-source retrieval, selected attempts across restarts and newer audits, missing evidence, blocked coding tools, and read-only inspection of interrupted assessments and pending publications while a writer owns the database. Storage tests cover path selection, private permissions, process locks and separate discussion history.
+
+Supplied model responses test retrieval, rendering, validation and action rules. They do not prove that a real model judges every explanation correctly.
+
+Pi Durable is experimental. Pi packages are pinned to 1.5.0, with `package-lock.json` included alongside the code.
 
 ## References
 

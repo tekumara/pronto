@@ -205,26 +205,6 @@ for (const selection of ["unselected", "merged", "skip label"] as const) {
   });
 }
 
-test("chat batches overlap audits and leave the coding conversation available afterwards", { timeout: 20_000 }, async (t) => {
-  const github = evidence();
-  const pending: { body: Request; response: ServerResponse }[] = [];
-  const f = await fixture(t, (body, response) => {
-    if (body.messages.findLast((message) => message.role === "user")?.content === "continue coding") {
-      assert.ok(body.tools.some((tool) => tool.function.name === "bash"));
-      assert.ok(body.messages.every((message) => !message.content?.includes("Saved evidence")));
-      reply(response, [{ role: "assistant", content: "Coding chat is still available." }]);
-      return;
-    }
-    pending.push({ body, response });
-    if (pending.length === 2) for (const request of pending) assess(request.body, request.response);
-  }, { github: github.handler });
-  const output = await f.run(`/audit --pr ${urls[0]} --pr ${urls[1]}\ncontinue coding\n/quit\n`);
-  assert.equal(pending.length, 2);
-  assert.match(output, /Assessment for PR 42/);
-  assert.match(output, /Assessment for PR 43/);
-  assert.match(output, /Coding chat is still available/);
-});
-
 for (const failure of ["fetch", "assessment"] as const) {
   test(`a PR ${failure} failure does not interrupt another PR or prevent its result being cached`, { timeout: 20_000 }, async (t) => {
     const github = evidence();

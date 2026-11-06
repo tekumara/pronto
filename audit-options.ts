@@ -5,8 +5,8 @@ export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts
 
 export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--replicated-state] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
 
-export function parseAuditOptions(args: string[], source: "cli" | "chat" | "serve") {
-  const usage = source === "cli" ? AUDIT_CLI_USAGE : source === "serve" ? SERVE_USAGE : "Usage: /audit [options] <GitHub PR URL> | --pr <GitHub PR URL>...\nType /help for audit options.";
+export function parseAuditOptions(args: string[], source: "cli" | "serve") {
+  const usage = source === "cli" ? AUDIT_CLI_USAGE : SERVE_USAGE;
   // Boolean flags default to true and take an optional true|false value.
   const booleanFlags = ["--skip-drafts", "--skip-approved"];
   const flags = ["--force", ...booleanFlags, "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];
@@ -62,15 +62,15 @@ export function parseAuditOptions(args: string[], source: "cli" | "chat" | "serv
     }
   }
   if (targets.length ? positional.length > (source === "cli" ? 1 : 0)
-    : (source === "chat" && !positional.length) || positional.length > (source === "cli" ? 2 : 1)) throw new Error(usage);
+    : positional.length > (source === "cli" ? 2 : 1)) throw new Error(usage);
   // Serve takes no targets, so its one positional argument is the model.
   const selectors = source === "serve" ? [] : targets.length ? targets : [positional[0] ?? ""];
   const requested = targets.length || source === "serve" ? positional[0] : positional[1];
   if ((targets.length || source === "serve") && requested && (requested.includes("://") || !requested.includes("/"))) {
     throw new Error(`${source === "serve" ? "pronto serve takes no PR targets" : "Use --pr for every target in a batch"}; the only positional argument is provider/model-id\n${usage}`);
   }
-  // Chat still requires URLs. Validate every explicit URL before credentials, storage or network access.
-  for (const selector of selectors) if (source === "chat" || selector.includes("://")) parseReviewTarget(selector);
+  // Validate every explicit URL before credentials, storage or network access.
+  for (const selector of selectors) if (selector.includes("://")) parseReviewTarget(selector);
   return { selectors, requested, skipLabels, skipDrafts: booleans["--skip-drafts"], skipApproved: booleans["--skip-approved"], exclude, force: supplied.has("--force"),
     approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"),
     approveMigrations: supplied.has("--approve-migrations"), apply: supplied.has("--apply") };

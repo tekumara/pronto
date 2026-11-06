@@ -4,10 +4,11 @@ import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil
 import { arr, int, lit, obj, oneOf, opt, str, type Static } from "@earendil-works/pi-schema";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  AssistantEntry, createRegistry, defineDoc, defineDocFamily, defineExtension, defineTask, defineTool, LiveDoc, ProviderDoc, ToolResultEntry, UsageDoc,
-  type Conversation, type ConversationId, type ConversationView, type Cursor, type Harness, type LiveState, type ModelRef, type SubmissionId, type TaskId, type UsageState,
+  AssistantEntry, createRegistry, defineDoc, defineExtension, defineTask, defineTool, LiveDoc, ProviderDoc, ToolResultEntry, UsageDoc,
+  type Conversation, type ConversationId, type ConversationView, type Cursor, type Harness, type LiveState, type ModelRef, type TaskId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "./state.ts";
+import { AUDIT_CONTROLLER_KIND, AuditDocument, AuditIdentity, AuditRuns, type Assessment, type AuditResult, type MigrationAssessment, type ModelCostInfo } from "./audit-records.ts";
 import { createPublisher, SubmittedAuditReviews, completeReassessment, enqueuePublication, pendingReassessments, recoverPublications, waitForPublication, type PublicationChoices, type PublicationIntent, type PublicationResult } from "./publication.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { createWebhookQueue } from "./webhook-queue.ts";
@@ -37,31 +38,6 @@ const ReportSchema = obj({
   })),
 });
 type ReportData = Static<typeof ReportSchema>;
-type MigrationAssessment = { status: "migration" | "not-migration" | "uncertain"; reason: string };
-type ModelCostInfo = { model: ModelRef | null; costUsd: string }; // Best available model/tool cost, stored as a decimal string.
-type Assessment = { commentKey: string; findings: {
-  summary: string; status: string; reason: string; nextStep?: string; awaiting?: string; evidence: string[];
-}[] };
-
-const AuditDocument = defineDoc<{
-  snapshot: ReviewSnapshot | null; report: Assessment[] | null; inspected: string[];
-  databaseMigration?: MigrationAssessment | null; // Older saved reports have no classification.
-  modelCost?: ModelCostInfo | null; // Older saved reports have no model or cost metadata.
-}>({
-  kind: "app.review-audit", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false,
-  initial: () => ({ snapshot: null, report: null, inspected: [], databaseMigration: null, modelCost: null }),
-});
-type CachedAssessment = {
-  fingerprint: string; conversationId: ConversationId; assessedAt: string; lastCheckedAt: string;
-};
-type AuditResult = { submissionId: SubmissionId };
-const AuditRuns = defineDocFamily<{
-  active: ConversationId | null; controllerTask: TaskId<AuditResult> | null; complete: boolean;
-  restartModel: ModelRef | null; latestSuccess: CachedAssessment | null;
-}, null>({
-  kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false,
-  initial: () => ({ active: null, controllerTask: null, complete: true, restartModel: null, latestSuccess: null }),
-});
 // Explicit caller choices saved before model execution. Recovery never substitutes server flags.
 const PublicationRequests = defineDoc<{
   choices: PublicationChoices[]; tasks: Record<string, TaskId<PublicationResult>>;
@@ -72,12 +48,6 @@ const PublicationRequests = defineDoc<{
 function publicationChoices(options: Partial<PublicationChoices>): PublicationChoices {
   return { apply: !!options.apply, approve: !!options.approve, allowUncertain: !!options.allowUncertain, approveMigrations: !!options.approveMigrations };
 }
-// Legacy conversations have no identity: retain their reports, but never guess which policy produced them.
-const AuditIdentity = defineDoc<{ fingerprint: string | null; policy: string | null }>({
-  kind: "app.review-audit-identity", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false,
-  initial: () => ({ fingerprint: null, policy: null }),
-});
-
 const instructions = `You are a read-only PR review auditor, not a fixer.
 The host has fetched the mandatory review evidence. Assess ALL supplied comment keys, including
 answered and resolved inline threads, PR-level comments, and human and bot review summaries.
@@ -304,7 +274,7 @@ const report = defineTool({
 // Keep admission and completion durable, not in a caller's lifetime. The shared scheduler
 // can finish bookkeeping after a crash, even when the original caller is no longer waiting.
 const AuditController = defineTask<{ pr: string }, { phase: "assess" }, AuditResult>({
-  name: "app.review-audit-controller", version: 1,
+  name: AUDIT_CONTROLLER_KIND, version: 1,
   initial: () => ({ phase: "assess" }),
   phases: {
     assess: async (task, runtime, context) => {

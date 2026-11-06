@@ -64,6 +64,7 @@ The table stores the document's identity, owner and history policy, not its actu
 | `pi.inbox` | Queued inputs |
 | `pi.usage` | Token and cost totals |
 | `app.review-audit` | Saved evidence, accepted assessment and inspected file URLs |
+| `app.audit-discussion` | Chat-only selected audit: PR URL, attempt ID and snapshot ID |
 | `app.review-audit-identity` | Evidence-and-policy fingerprint and policy hash |
 | `app.review-audit-runs` | One family member per PR: current attempt, controller task, restart intent and cache pointer |
 | `app.submitted-audit-reviews` | One family member per PR: submitted audit reviews used to skip duplicate writes |
@@ -222,11 +223,11 @@ For an unchanged-evidence recheck, there is no new conversation, submission or m
 - Rechecks are `entries` with kind `app.review-audit-recheck`. They also update `latestSuccess.lastCheckedAt` in that PR's session-scoped `app.review-audit-runs` family member.
 - Commit sequences are not timestamps. Changes saved in the same atomic commit share a sequence.
 
-The audit document definitions are in [`auditor.ts`](auditor.ts). Publication tasks and receipts are in [`publication.ts`](publication.ts). Webhook task and queue definitions are in [`webhook-queue.ts`](webhook-queue.ts).
+The audit document definitions are in [`audit-records.ts`](audit-records.ts). Publication tasks and receipts are in [`publication.ts`](publication.ts). Webhook task and queue definitions are in [`webhook-queue.ts`](webhook-queue.ts).
 
 ## Audit database contents
 
-Each repository has one database at `<state-directory>/repos/<github-host>/<owner>~<repo>.sqlite`, shared by the CLI and chat command across working directories. The host directory is the percent-encoded, lower-case GitHub hostname; the filename uses the lower-case base-repository owner and name, separated by `~`. The host and repo components distinguish origins and repositories, while excluding PR numbers and fork head names. One process owns the database; its shared harness can run independent PR audits concurrently. Earlier hash-named repository databases in the root of `repos/` are left untouched and are not imported. The first audit using a readable name starts a fresh database. The coding conversation remains separate in `<state-directory>/chats/<cwd-hash>.sqlite`.
+Each repository has one database at `<state-directory>/repos/<github-host>/<owner>~<repo>.sqlite`, written by the CLI and serve mode, and read by chat across working directories. The host directory is the percent-encoded, lower-case GitHub hostname; the filename uses the lower-case base-repository owner and name, separated by `~`. The host and repo components distinguish origins and repositories, while excluding PR numbers and fork head names. One process owns the database; its shared harness can run independent PR audits concurrently. Earlier hash-named repository databases in the root of `repos/` are left untouched and are not imported. The first audit using a readable name starts a fresh database. Audit discussion remains separate in `<state-directory>/chats/<cwd-hash>.sqlite`. Chat reads repository databases through a read-only SQLite connection without taking the writer ownership lock or starting a repository harness. It cannot resume assessment or publication tasks.
 
 Serve mode first saves accepted webhook work in the repository database. Its `app.webhook-audit` task belongs to the root conversation and starts at a `dispatch` checkpoint. The session-scoped `app.webhook-queue` document records deduplication and pending PRs. Concurrent copies of a delivery ID cannot create duplicate tasks. Only verified, classified audit deliveries reach this admission boundary; raw payloads and secrets are not stored.
 
@@ -257,7 +258,7 @@ The session-scoped `app.submitted-audit-reviews` family is also keyed by PR numb
 
 `recordedAt` is the local receipt timestamp, not GitHub's `submitted_at` value. Earlier experimental receipt schemas are not migrated; an existing GitHub review without a receipt in this document can be submitted again.
 
-Review submission receipts remain the local source of truth for duplicate prevention. They are shared across audit attempts, working directories, CLI, chat and GitHub accounts using this repository database. Previews create no receipt or publication task. External edits, deletions, dismissals and later review decisions do not change a saved receipt.
+Review submission receipts remain the local source of truth for duplicate prevention. They are shared across audit attempts, working directories, CLI, serve mode and GitHub accounts using this repository database. Previews create no receipt or publication task. External edits, deletions, dismissals and later review decisions do not change a saved receipt.
 
 ### Durable verdict publication
 
@@ -267,7 +268,7 @@ For a fresh assessment, the controller atomically saves successful completion, c
 
 The publisher is a conversation-owned background task with a `publish` checkpoint. It cannot be cancelled by a model conversation restart. Its immutable input contains the complete publication intent. Before POST, it saves the authenticated author and an attempted flag in the pending document. This flag conservatively means GitHub may have accepted the request. After acknowledgement, it atomically saves the receipt, removes the pending entry and completes the task. A process crash leaves the live task resumable. A request failure leaves the intent pending and the task failed; startup creates a replacement delivery task, preserving the original intent and attempt state. A later explicit `--apply` can also retry it.
 
-Serve startup discovers pending publications even without pending webhook work or an unfinished assessment. It retains their repository harnesses and resumes publication directly, without rerunning live audit admission or the model. CLI and chat recover publications when opening the targeted repository. Normal audit completion waits for its publication tasks; shutdown interrupts invocations but leaves their durable state. Failed publications are reported and retained for another startup or explicit apply, rather than retried in a tight loop.
+Serve startup discovers pending publications even without pending webhook work or an unfinished assessment. It retains their repository harnesses and resumes publication directly, without rerunning live audit admission or the model. CLI audits recover publications when opening the targeted repository. Chat only reads existing audits and never recovers publications. Normal audit completion waits for its publication tasks; shutdown interrupts invocations but leaves their durable state. Failed publications are reported and retained for another startup or explicit apply, rather than retried in a tight loop.
 
 On a saved attempted publication, the publisher lists all review pages before another POST. It accepts only a review matching the saved author, head SHA, review state, exact body and `<!-- pronto:publication:<fingerprint> -->` marker. A match restores the receipt without posting, even if an approval's head has since changed. Otherwise a retry still performs the normal approval head/base checks. Lookup failures stop the delivery rather than falling through to POST. If credentials now identify a different account, Pronto can reconcile the original author's review but refuses a new POST until that account is restored. Fresh intents do not adopt arbitrary remote reviews from another state directory.
 
@@ -334,7 +335,7 @@ Conversation IDs are numeric database identities, not PR numbers. These applicat
 
 There is no `findings` table. Findings live in the JSON value of the conversation-scoped `app.review-audit` document. The `documents` table identifies that document; `document_revisions` stores its value as a base and subsequent deltas. Use Durable's snapshot API to read the reconstructed value.
 
-The structure is defined in [`auditor.ts`](auditor.ts):
+The structure is defined in [`audit-records.ts`](audit-records.ts):
 
 ```text
 app.review-audit

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fixture, reply, tool } from "./fixtures.ts";
+import { prUrl, headSha, accessId, codeUrl, commentUrl, githubEvidence, assessments } from "./audit-evidence.ts";
 
-test("terminal chat starts with a concise banner and keeps audit help local", { timeout: 20000 }, async (t) => {
+test("terminal chat keeps help local and refuses the former audit runner", { timeout: 20000 }, async (t) => {
   let requests = 0;
   const f = await fixture(t, (_body, response) => {
     requests++;
@@ -14,88 +15,167 @@ test("terminal chat starts with a concise banner and keeps audit help local", { 
   const banner = await f.run("/quit\n");
   assert.ok(banner.includes("local/test"));
   assert.ok(banner.includes(f.cwd));
-  assert.match(banner, /\/audit <PR URL>/);
+  assert.match(banner, /saved audit.*PR URL/);
   assert.match(banner, /\/help/);
-  assert.match(banner, /Ctrl\+C.*unfinished work/);
-  assert.doesNotMatch(banner, /--skip|--approve|--exclude/, "audit flags belong in help, not the startup banner");
+  assert.match(banner, /Ctrl\+C.*unfinished discussion/);
+  assert.doesNotMatch(banner, /--skip|--approve|--exclude/);
 
   const { child, done } = f.start();
-  child.stdin.end("/help\n/audit\n/quit\n");
+  child.stdin.end("/help\n/audit " + prUrl + " --apply\n/quit\n");
   const help = await done;
   assert.equal(help.code, 0, help.stderr);
-  assert.match(help.stdout, /\/audit --pr <PR URL> --pr <PR URL>/);
-  assert.match(help.stdout, /--apply.*GitHub/);
-  assert.match(help.stdout, /--approve\s+.*--apply/);
-  assert.match(help.stderr, /Usage: \/audit/);
-  assert.match(help.stderr, /\/help/);
-  assert.doesNotMatch(help.stderr, /--skip/, "invalid audit input should point to help instead of dumping flags");
-  assert.equal(requests, 0, "help and invalid audit commands must not call the model");
+  assert.match(help.stdout, /read_audit/);
+  assert.match(help.stdout, /pinned commits/);
+  assert.match(help.stderr, /Chat only reads existing audits/);
+  assert.equal(requests, 0, "help and rejected commands must not call the model");
+  await assert.rejects(readdir(join(f.stateDir, "repos")), { code: "ENOENT" });
 });
 
-test("terminal chat uses saved Pi credentials, coding tools, and persisted history", { timeout: 20000 }, async (t) => {
+test("terminal chat streams answers using saved credentials and persisted discussion history", { timeout: 20000 }, async (t) => {
   let turn = 0;
   const partial = Promise.withResolvers<ServerResponse>();
   const f = await fixture(t, (body, response) => {
     const latest = body.messages.at(-1);
-    switch (turn++) {
-      case 0:
-        assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), ["bash", "edit", "read", "write"]);
-        assert.equal(latest?.content, "make a greeting");
-        tool(response, "read", { path: "seed.txt" });
-        break;
-      case 1:
-        assert.match(latest?.content ?? "", /hello/);
-        tool(response, "write", { path: "greeting.txt", content: "hello\n" });
-        break;
-      case 2:
-        tool(response, "edit", { path: "greeting.txt", edits: [{ oldText: "hello", newText: "hello world" }] });
-        break;
-      case 3:
-        tool(response, "bash", { command: "cat greeting.txt" });
-        break;
-      case 4:
-        assert.match(latest?.content ?? "", /hello world/);
-        response.writeHead(200, { "Content-Type": "text/event-stream" });
-        response.write(`data: ${JSON.stringify({ id: "reply", choices: [{ index: 0, delta: { role: "assistant", content: "Greeting " }, finish_reason: null }] })}\n\n`);
-        partial.resolve(response);
-        break;
-      case 5:
-        assert.equal(latest?.content, "what did you do?");
-        assert.ok(body.messages.some((message) => message.role === "user" && message.content === "make a greeting"));
-        assert.ok(body.messages.some((message) => message.role === "assistant" && message.content === "Greeting ready."));
-        reply(response, [{ role: "assistant", content: "I made greeting.txt." }]);
-        break;
-      default:
-        assert.fail("Unexpected model request");
+    if (turn++ === 0) {
+      assert.equal(latest?.content, "what can we discuss?");
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write(`data: ${JSON.stringify({ id: "reply", choices: [{ index: 0, delta: { role: "assistant", content: "Saved " }, finish_reason: null }] })}\n\n`);
+      partial.resolve(response);
+    } else {
+      assert.equal(latest?.content, "what did you say?");
+      assert.ok(body.messages.some((message) => message.role === "user" && message.content === "what can we discuss?"));
+      assert.ok(body.messages.some((message) => message.role === "assistant" && message.content === "Saved audits."));
+      reply(response, [{ role: "assistant", content: "We can discuss existing audits." }]);
     }
   });
-  await writeFile(join(f.cwd, "seed.txt"), "hello\n");
   const first = f.start();
   const streamed = new Promise<void>((done) => {
     let output = "";
     const onData = (data: Buffer) => {
       output += data;
-      if (output.includes("Greeting ")) {
+      if (output.includes("Saved ")) {
         first.child.stdout.off("data", onData);
         done();
       }
     };
     first.child.stdout.on("data", onData);
   });
-  first.child.stdin.end("make a greeting\n/quit\n");
+  first.child.stdin.end("what can we discuss?\n/quit\n");
   const response = await partial.promise;
-  await streamed; // The first text must reach the terminal before the response ends.
-  reply(response, [{ content: "ready." }]);
+  await streamed;
+  reply(response, [{ content: "audits." }]);
   const result = await first.done;
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(await readFile(join(f.cwd, "greeting.txt"), "utf8"), "hello world\n");
-  assert.equal(result.stdout.split("Greeting ready.").length - 1, 1, "streamed answer must appear exactly once");
-  assert.ok(result.stdout.includes("[bash] cat greeting.txt"));
-  // A changed Pi default must not replace or prevent using the saved model.
+  assert.equal(result.stdout.split("Saved audits.").length - 1, 1, "streamed answer must appear exactly once");
   await writeFile(join(f.agentDir, "settings.json"), JSON.stringify({ defaultProvider: "missing", defaultModel: "missing" }));
-  const second = await f.run("what did you do?\n/quit\n");
-  assert.ok(second.includes("I made greeting.txt."));
-  assert.equal(turn, 6);
+  assert.match(await f.run("what did you say?\n/quit\n"), /We can discuss existing audits/);
+  assert.equal(turn, 2);
+});
+
+test("chat retrieves original findings, replies, rubric and pinned code through real tools", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  let building = true;
+  let auditTurns = 0;
+  let turn = 0;
+  let selectedId: number | undefined;
+  const f = await fixture(t, (body, response) => {
+    const latest = body.messages.at(-1)?.content ?? "";
+    if (building) {
+      if (auditTurns++ === 0) tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
+      else tool(response, "report_review_assessment", assessments());
+      return;
+    }
+    const page = () => {
+      const value = JSON.parse(latest);
+      assert.equal(value.audit.auditId, selectedId);
+      assert.equal(value.audit.headSha, headSha);
+      assert.equal(value.audit.status, "completed");
+      assert.equal(value.nextOffset, null);
+      return JSON.parse(value.content);
+    };
+    switch (turn++) {
+      case 0:
+        assert.ok(body.tools.every((entry) => ["read_audit", "read_github_file"].includes(entry.function.name)));
+        tool(response, "read_audit", { prUrl });
+        break;
+      case 1: {
+        const summary = JSON.parse(latest);
+        selectedId = summary.audit.auditId;
+        assert.equal(summary.audit.status, "completed");
+        assert.equal(JSON.parse(summary.content).counts.outstanding, 1);
+        tool(response, "read_audit", { section: "findings", commentKey: `inline:${accessId}` });
+        break;
+      }
+      case 2:
+        assert.equal(page()[0].findings[0].reason, "The code returns true without checking access.");
+        assert.equal(page()[0].source.url, commentUrl(accessId));
+        reply(response, [{ role: "assistant", content: `The access-check finding is outstanding: ${codeUrl}` }]);
+        break;
+      case 3:
+        assert.equal(latest, "What did the author say?");
+        tool(response, "read_audit", { section: "discussion", commentKey: "inline:102" });
+        break;
+      case 4:
+        assert.equal(page().replies[0].body, "Fixed already");
+        assert.equal(page().replies[0].url, commentUrl(103));
+        reply(response, [{ role: "assistant", content: `The reply says “Fixed already”: ${commentUrl(103)}` }]);
+        break;
+      case 5:
+        tool(response, "read_audit", { section: "findings", commentKey: "inline:102" });
+        break;
+      case 6:
+        assert.equal(page()[0].findings[0].status, "addressed");
+        assert.equal(page()[0].findings[0].reason, "The guard handles a missing user.");
+        tool(response, "read_audit", { section: "code" });
+        break;
+      case 7:
+        assert.equal(page()[0].result.url, codeUrl);
+        assert.match(page()[0].result.content, /if \(!user\) return false/);
+        reply(response, [{ role: "assistant", content: `The saved code supports the null-check fix: ${codeUrl}` }]);
+        break;
+      case 8:
+        tool(response, "read_github_file", { path: "src/access.ts", revision: "head", offset: 1, limit: 3 });
+        break;
+      case 9: {
+        const code = JSON.parse(latest);
+        assert.equal(code.auditId, selectedId);
+        assert.equal(code.sha, headSha);
+        assert.equal(code.url, codeUrl);
+        assert.match(code.provenance, /Additional.*not saved audit evidence/);
+        reply(response, [{ role: "assistant", content: `My additional pinned-code inspection supports the claim: ${codeUrl}` }]);
+        break;
+      }
+      case 10:
+        tool(response, "read_audit", { section: "instructions", limit: 16000 });
+        break;
+      case 11:
+        assert.match(page(), /not a fixer/);
+        assert.match(page(), /explanation\/scope decision/);
+        reply(response, [{ role: "assistant", content: "The saved rubric accepts a supported explanation or scope decision, not just a code fix." }]);
+        break;
+      case 12:
+        tool(response, "read_audit", { section: "findings", commentKey: `inline:${accessId}` });
+        break;
+      case 13:
+        assert.equal(page()[0].findings[0].status, "outstanding");
+        reply(response, [{ role: "assistant", content: "A proposed explanation must be truthful and supported; discussion does not change the recorded verdict." }]);
+        break;
+      default: assert.fail("Unexpected model turn");
+    }
+  }, { github: github.handle });
+  await f.run("", [prUrl], { entrypoint: resolve("audit.ts") });
+  building = false;
+  const savedPath = join(f.stateDir, "repos/github.com/acme~demo.sqlite");
+  const original = await readFile(savedPath);
+  const githubReads = github.requests.length;
+  const output = await f.run(`Why is ${prUrl} outstanding?\nWhat did the author say?\nWas it addressed by code or explanation?\nDoes the evidence support the reasoning?\nWhat would satisfy the rubric?\nWhat explanation could suffice?\n/quit\n`);
+  assert.match(output, /The access-check finding is outstanding/);
+  assert.ok(output.includes(commentUrl(103)));
+  assert.match(output, /does not change the recorded verdict/);
+  assert.equal(turn, 14);
+  assert.equal(github.requests.length, githubReads + 1, "only the explicit additional pinned-file read may contact GitHub");
+  assert.equal(github.requests.at(-1), `/github/repos/contributor/fork/contents/src/access.ts?ref=${headSha}`);
+  assert.deepEqual(await readFile(savedPath), original, "discussion must not modify the audit database");
 });
 
 for (const signal of ["SIGKILL", "SIGTERM"] as const) {

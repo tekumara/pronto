@@ -1,42 +1,35 @@
 import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { WatchHandle } from "@earendil-works/chord";
-import { runAudits } from "./auditor.ts";
-import { parseAuditOptions } from "./audit-options.ts";
+import { AuditDiscussion, auditChatInstructions } from "./audit-chat.ts";
 import { createModelRuntime } from "./model.ts";
 import { openStateHarness } from "./state.ts";
 import { AssistantEntry, ConversationTranscript, createRegistry, LiveDoc, ToolResultEntry, type ConversationView, type LiveState } from "@earendil-works/pi-durable";
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
 
-const CHAT_COMMANDS = `Type a task to chat, or use a command:
-  /audit <PR URL>  Audit a pull request (preview by default)
-  /help            Show commands and audit options
-  /quit            Exit
+const CHAT_COMMANDS = `Ask about a saved audit by PR URL, then ask follow-up questions.
+  /help  Show examples and available tools
+  /quit  Exit
 
-Ctrl+C saves unfinished work for restart.`;
+Ctrl+C saves unfinished discussion for restart.`;
 
 const CHAT_HELP = `${CHAT_COMMANDS}
 
-Audit targets
-  /audit <PR URL>
-  /audit --pr <PR URL> --pr <PR URL> ...
+Examples
+  Why is https://github.com/owner/repo/pull/42 still outstanding?
+  What did the author say about these findings?
+  Was this addressed by code, an explanation or reported testing?
+  Does the cited evidence support the auditor's reasoning?
+  What would satisfy the rubric?
+  What truthful explanation could address the concern?
 
-Audit options
-  --skip <label>          Skip PRs with this label (repeatable)
-  --skip-drafts=false     Include draft PRs (skipped by default)
-  --skip-approved=false   Include PRs already approved at the current head
-  --exclude <path>        Exclude a repository-relative path or glob (repeatable)
-  --force                 Restart the audit and bypass cached assessments
+Tools
+  read_audit        Read saved findings, discussion, patches, rubric and code excerpts
+  read_github_file  Inspect additional code at the selected audit's pinned commits
 
-Posting reviews (preview only unless you use --apply)
-  --apply                 Post the verdict review to GitHub
-  --approve               Approve eligible PRs (requires --apply)
-  --allow-uncertain       Allow --approve with uncertain findings
-  --approve-migrations    Allow --approve for migrations or unknown migration status
-
-Drafts and PRs approved at the current head are skipped by default.
-Chat targets must be GitHub PR URLs. Labels and paths cannot contain spaces.`;
+Chat keeps the selected attempt across questions and restarts.
+Ask explicitly to switch to the latest attempt or a particular audit ID.
+Chat cannot run audits, change findings, post reviews or run shell commands.
+Use pronto <PR URL> in a separate terminal to run an audit.`;
 
 async function main() {
   const context = BACKGROUND_CONTEXT;
@@ -45,12 +38,10 @@ async function main() {
   const { models, model, available } = await createModelRuntime(cwd, process.argv[2]);
 
   const registry = createRegistry();
-  registry.install(CodingTools);
-  const env = new NodeExecutionEnv({ cwd });
+  registry.install(AuditDiscussion);
   const harness = await openStateHarness({ kind: "chat", cwd }, {
     models,
     registry,
-    env: () => env,
     settings: { toolExecution: "sequential" },
     onReport: (error) => console.error(error),
   }, context);
@@ -72,17 +63,20 @@ async function main() {
     const root = await harness.root(context, { agent: {
       model: { provider: model.provider, modelId: model.id },
       cwd,
-      instructions: "You are a concise coding agent. Inspect the project before changing it. Use read, write, edit, and bash to complete the user's task. Check your changes. Follow project instructions in AGENTS.md when present.",
+      instructions: auditChatInstructions,
+      extensions: [AuditDiscussion],
     } });
-    // root() only uses its agent argument when creating the conversation.
-    if (process.argv[2]) {
-      await root.configure({ model: { provider: model.provider, modelId: model.id } }, context);
-    }
+    // Also replace the old coding instructions/tool filters in existing chat histories before resuming work.
+    await root.configure({
+      instructions: auditChatInstructions, extensions: [AuditDiscussion], tools: AuditDiscussion.tools,
+      modelTools: AuditDiscussion.tools,
+      ...(process.argv[2] ? { model: { provider: model.provider, modelId: model.id } } : {}),
+    }, context);
     const agent = await root.agent(context);
     if (!available.some((m) => m.provider === agent.model?.provider && m.id === agent.model?.modelId)) {
       throw new Error("The saved model is unavailable. Run npm start -- provider/model-id to select another.");
     }
-    console.log(`Pi Durable\n  Model  ${agent.model!.provider}/${agent.model!.modelId}\n  Cwd    ${cwd}\n\n${CHAT_COMMANDS}\n`);
+    console.log(`Pronto · audit chat\n  Model  ${agent.model!.provider}/${agent.model!.modelId}\n  Cwd    ${cwd}\n\n${CHAT_COMMANDS}\n`);
 
     // The conversation view replaces the former event stream: live partials are in pi.live,
     // while completed assistant and tool messages are transcript entries.
@@ -121,7 +115,7 @@ async function main() {
       for (const tool of runningTools) {
         if (seenTools.has(tool.callId)) continue;
         seenTools.add(tool.callId);
-        console.log(`[${tool.name}] ${tool.args.path ?? tool.args.command ?? ""}`);
+        console.log(`[${tool.name}] ${tool.args.prUrl ?? tool.args.path ?? ""}`);
       }
       const retry = live?.generation?.retry;
       if (retry) {
@@ -179,13 +173,8 @@ async function main() {
       if (content === "/quit") break;
       if (content === "/help") {
         console.log(`\n${CHAT_HELP}\n`);
-      } else if (/^\/audit(?:\s|$)/.test(content)) {
-        try {
-          const { selectors: urls, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(content.slice("/audit".length).trim().split(/\s+/).filter(Boolean), "chat");
-          await runAudits(urls, { models, model: agent.model!, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply });
-        } catch (error) {
-          console.error(error instanceof Error ? error.message : error);
-        }
+      } else if (content.startsWith("/")) {
+        console.error("Chat only reads existing audits. Ask a question with a PR URL, or type /help. Use pronto <PR URL> in a separate terminal to run an audit.");
       } else if (content) {
         const settled = await (await root.submit({ type: "input", content }, context)).wait(context);
         if (settled.status === "unanswered") console.error(`No answer: ${settled.reason}`);
@@ -200,7 +189,6 @@ async function main() {
     process.off("SIGTERM", quit);
     await harness.close(context);
     await stream?.stop();
-    await env.cleanup(context);
   }
 }
 

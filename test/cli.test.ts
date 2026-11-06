@@ -160,7 +160,7 @@ for (const { name, args, head = "feature/pr-inference", commands = [], repositor
   });
 }
 
-for (const { name, labels, args, draft = false, input = "", entrypoint = resolve("audit.ts"), fixtureRepository = "acme/demo", expectedUrl = prUrl } of [
+for (const { name, labels, args, draft = false, fixtureRepository = "acme/demo", expectedUrl = prUrl } of [
   { name: "an explicit PR URL works without gh or a Git checkout", labels: [], args: [prUrl, "local/test"] },
   { name: "--pr accepts owner/repo#number without a checkout", labels: [], args: ["--pr", "example-org/example-repo#2423"],
     fixtureRepository: "example-org/example-repo", expectedUrl: "https://github.com/example-org/example-repo/pull/2423" },
@@ -173,12 +173,10 @@ for (const { name, labels, args, draft = false, input = "", entrypoint = resolve
     args: [prUrl, "--skip-drafts=false"] },
   { name: "CLI audits a draft PR with --skip-drafts false", labels: [], draft: true,
     args: ["--skip-drafts", "false", prUrl] },
-  { name: "chat audits a draft PR with --skip-drafts=false", labels: [], draft: true,
-    args: [], entrypoint: resolve("agent.ts"), input: `/audit --skip-drafts=false ${prUrl}\n/quit\n` },
 ]) {
   test(name, { timeout: 20_000 }, async (t) => {
     const f = await selectionFixture(t, labels, [], draft, undefined, fixtureRepository);
-    const output = await f.run(input, args, { entrypoint, env: { PATH: f.cwd, GH_REPO: "", GH_HOST: "" } });
+    const output = await f.run("", args, { env: { PATH: f.cwd, GH_REPO: "", GH_HOST: "" } });
     assert.match(output, /PR title: Selected PR/);
     assert.match(output, /Verdict:/);
     assert.doesNotMatch(output, /Skipping/);

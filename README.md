@@ -65,6 +65,10 @@ These safeguards rely on the AI’s assessment of the review feedback and migrat
 
 The goal is less time chasing review feedback and waiting for another review round—not replacing tests or a full code review.
 
+## Discuss a saved audit
+
+Run `make chat` to ask why an existing audit is outstanding, what the author said, or whether its evidence supports the reasoning. Follow-up questions keep the selected audit. The chat is read-only: it cannot rerun audits, change findings or post reviews. See [audit discussion chat](GUIDE.md#optional-audit-discussion-chat) for setup and examples.
+
 ## Technical guide
 
 See the [technical guide](GUIDE.md) for setup, usage, audit behaviour and development details.

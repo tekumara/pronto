@@ -12,7 +12,6 @@ import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtu
 
 const url = "https://github.com/acme/project/pull/9";
 const audit = resolve("audit.ts");
-const chat = resolve("agent.ts");
 // Persisted document contracts used to inspect evidence and simulate a pre-filtering snapshot.
 const auditRuns = defineDocFamily<{ active: ConversationId | null }, null>({
   kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false, initial: () => ({ active: null }),
@@ -113,7 +112,7 @@ async function storagePath(stateDir: string) {
   return join(directory, files[0]);
 }
 
-test("unchanged evidence reuses a saved assessment across directories, CLI and chat, ignoring fetch times and collection order", { timeout: 20_000 }, async (t) => {
+test("unchanged evidence reuses a saved assessment across directories, ignoring fetch times and collection order", { timeout: 20_000 }, async (t) => {
   const github = evidence();
   let calls = 0;
   const f = await fixture(t, (body, response) => assess(body, response, ++calls), { entrypoint: audit, github: github.handler });
@@ -142,9 +141,6 @@ test("unchanged evidence reuses a saved assessment across directories, CLI and c
   assert.doesNotMatch(second, /Refreshing audit/);
   assert.match(second, /Assessment 1/);
   assert.match(second, /Not all actionable findings are addressed/);
-  const output = await f.run(`/audit ${url}\n/quit\n`, [], { entrypoint: chat });
-  assert.match(output, reuseMessage);
-  assert.equal(calls, 1);
 });
 
 test("marked audit output from any account is omitted from saved and model evidence without hiding ordinary discussion", { timeout: 20_000 }, async (t) => {
@@ -354,19 +350,7 @@ test("resuming an older saved report without migration status preserves the audi
   assert.equal(calls, 1, "explicitly bypassing missing migration status must reuse the assessment");
 });
 
-test("chat --force bypasses a completed cache entry", { timeout: 20_000 }, async (t) => {
-  const github = evidence();
-  let calls = 0;
-  const f = await fixture(t, (body, response) => assess(body, response, ++calls), { entrypoint: audit, github: github.handler });
-  await f.run("", [url]);
-  const output = await f.run(`/audit --force ${url}\n/quit\n`, [], { entrypoint: chat });
-  assert.equal(calls, 2);
-  assert.match(output, /Assessment 2/);
-  assert.doesNotMatch(output, /Reusing.*assessment/);
-  assert.match(output, /--force requested/);
-});
-
-test("invalid audit flags are rejected before audit storage or network access in CLI and chat", { timeout: 20_000 }, async (t) => {
+test("invalid audit flags are rejected before audit storage or network access", { timeout: 20_000 }, async (t) => {
   const github = evidence();
   const f = await fixture(t, () => assert.fail("Invalid commands must not reach the model"), { entrypoint: audit, github: github.handler });
   for (const args of [[url, "--froce"], [url, "--force", "--force"],
@@ -381,21 +365,6 @@ test("invalid audit flags are rejected before audit storage or network access in
     assert.equal(result.code, 1);
     assert.match(result.stderr, /Usage:/);
   }
-  const { child, done } = f.start([], { entrypoint: chat });
-  child.stdin.end(`/audit ${url} --force --force\n/audit ${url} --comment\n/audit ${url} --approve --approve\n/audit ${url} --approve-migrations --approve-migrations\n/audit ${url} --apply --apply\n/audit ${url} --dry-run\n/audit ${url} --sticky\n/audit ${url} --sticky=false\n/audit ${url} --skip\n/audit ${url} --skip=\n/audit ${url} --skip --apply\n/audit ${url} --exclude\n/audit ${url} --exclude=\n/audit ${url} --exclude --apply\n/audit ${url} --exclude /\n/quit\n`);
-  const result = await done;
-  assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stderr, /--force can be supplied only once/);
-  assert.match(result.stderr, /Unknown audit option: --comment/);
-  assert.match(result.stderr, /--approve can be supplied only once/);
-  assert.match(result.stderr, /--approve-migrations can be supplied only once/);
-  assert.match(result.stderr, /--apply can be supplied only once/);
-  assert.match(result.stderr, /Unknown audit option: --dry-run/);
-  assert.match(result.stderr, /Unknown audit option: --sticky\b/);
-  assert.match(result.stderr, /Unknown audit option: --sticky=false/);
-  assert.match(result.stderr, /--skip requires a non-empty label/);
-  assert.match(result.stderr, /--exclude requires a non-empty path/);
-  assert.match(result.stderr, /Invalid --exclude path: "\/"/);
   assert.equal(github.reads(), 0);
   await assert.rejects(readdir(join(f.stateDir, "repos")), { code: "ENOENT" });
 });

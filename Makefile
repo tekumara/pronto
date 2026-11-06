@@ -16,7 +16,7 @@ S3_SECRET_KEY ?= pronto-local-secret
 help: ## List available make targets and their descriptions
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_.-]+:.*##/ { sub(/^[[:space:]]+/, "", $$2); printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-chat: ## Start the interactive Pronto chat
+chat: ## Discuss existing Pronto audits
 	npm start
 
 audit: ## Audit the PR URLs supplied in PRS
