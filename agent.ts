@@ -9,6 +9,35 @@ import { AssistantEntry, ConversationTranscript, createRegistry, LiveDoc, ToolRe
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 
+const CHAT_COMMANDS = `Type a task to chat, or use a command:
+  /audit <PR URL>  Audit a pull request (preview by default)
+  /help            Show commands and audit options
+  /quit            Exit
+
+Ctrl+C saves unfinished work for restart.`;
+
+const CHAT_HELP = `${CHAT_COMMANDS}
+
+Audit targets
+  /audit <PR URL>
+  /audit --pr <PR URL> --pr <PR URL> ...
+
+Audit options
+  --skip <label>          Skip PRs with this label (repeatable)
+  --skip-drafts=false     Include draft PRs (skipped by default)
+  --skip-approved=false   Include PRs already approved at the current head
+  --exclude <path>        Exclude a repository-relative path or glob (repeatable)
+  --force                 Restart the audit and bypass cached assessments
+
+Posting reviews (preview only unless you use --apply)
+  --apply                 Post the verdict review to GitHub
+  --approve               Approve eligible PRs (requires --apply)
+  --allow-uncertain       Allow --approve with uncertain findings
+  --approve-migrations    Allow --approve for migrations or unknown migration status
+
+Drafts and PRs approved at the current head are skipped by default.
+Chat targets must be GitHub PR URLs. Labels and paths cannot contain spaces.`;
+
 async function main() {
   const context = BACKGROUND_CONTEXT;
   const cwd = process.cwd();
@@ -53,7 +82,7 @@ async function main() {
     if (!available.some((m) => m.provider === agent.model?.provider && m.id === agent.model?.modelId)) {
       throw new Error("The saved model is unavailable. Run npm start -- provider/model-id to select another.");
     }
-    console.log(`Pi Durable · ${agent.model!.provider}/${agent.model!.modelId}\n${cwd}\n/audit [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <PR URL> or --pr <PR URL>... to audit · /quit to exit · Ctrl+C saves unfinished work for restart\n`);
+    console.log(`Pi Durable\n  Model  ${agent.model!.provider}/${agent.model!.modelId}\n  Cwd    ${cwd}\n\n${CHAT_COMMANDS}\n`);
 
     // The conversation view replaces the former event stream: live partials are in pi.live,
     // while completed assistant and tool messages are transcript entries.
@@ -148,7 +177,9 @@ async function main() {
     for await (const line of lines) {
       const content = line.trim();
       if (content === "/quit") break;
-      if (/^\/audit(?:\s|$)/.test(content)) {
+      if (content === "/help") {
+        console.log(`\n${CHAT_HELP}\n`);
+      } else if (/^\/audit(?:\s|$)/.test(content)) {
         try {
           const { selectors: urls, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(content.slice("/audit".length).trim().split(/\s+/).filter(Boolean), "chat");
           await runAudits(urls, { models, model: agent.model!, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply });

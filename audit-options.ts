@@ -6,7 +6,7 @@ export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts
 export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--replicated-state] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "chat" | "serve") {
-  const usage = source === "cli" ? AUDIT_CLI_USAGE : source === "serve" ? SERVE_USAGE : "Usage: /audit [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] <GitHub PR URL> | --pr <GitHub PR URL>...";
+  const usage = source === "cli" ? AUDIT_CLI_USAGE : source === "serve" ? SERVE_USAGE : "Usage: /audit [options] <GitHub PR URL> | --pr <GitHub PR URL>...\nType /help for audit options.";
   // Boolean flags default to true and take an optional true|false value.
   const booleanFlags = ["--skip-drafts", "--skip-approved"];
   const flags = ["--force", ...booleanFlags, "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];

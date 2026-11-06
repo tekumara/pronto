@@ -5,6 +5,33 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fixture, reply, tool } from "./fixtures.ts";
 
+test("terminal chat starts with a concise banner and keeps audit help local", { timeout: 20000 }, async (t) => {
+  let requests = 0;
+  const f = await fixture(t, (_body, response) => {
+    requests++;
+    reply(response, [{ role: "assistant", content: "Unexpected model request." }]);
+  });
+  const banner = await f.run("/quit\n");
+  assert.ok(banner.includes("local/test"));
+  assert.ok(banner.includes(f.cwd));
+  assert.match(banner, /\/audit <PR URL>/);
+  assert.match(banner, /\/help/);
+  assert.match(banner, /Ctrl\+C.*unfinished work/);
+  assert.doesNotMatch(banner, /--skip|--approve|--exclude/, "audit flags belong in help, not the startup banner");
+
+  const { child, done } = f.start();
+  child.stdin.end("/help\n/audit\n/quit\n");
+  const help = await done;
+  assert.equal(help.code, 0, help.stderr);
+  assert.match(help.stdout, /\/audit --pr <PR URL> --pr <PR URL>/);
+  assert.match(help.stdout, /--apply.*GitHub/);
+  assert.match(help.stdout, /--approve\s+.*--apply/);
+  assert.match(help.stderr, /Usage: \/audit/);
+  assert.match(help.stderr, /\/help/);
+  assert.doesNotMatch(help.stderr, /--skip/, "invalid audit input should point to help instead of dumping flags");
+  assert.equal(requests, 0, "help and invalid audit commands must not call the model");
+});
+
 test("terminal chat uses saved Pi credentials, coding tools, and persisted history", { timeout: 20000 }, async (t) => {
   let turn = 0;
   const partial = Promise.withResolvers<ServerResponse>();

@@ -617,7 +617,7 @@ The chat uses your saved Pi default model, or the first available model if there
 npm start -- provider/model-id
 ```
 
-A model argument also changes the model of an existing conversation. Type a task at `you>`. Answers stream as plain text. Tool calls show their name and file path or command. Enter `/quit` to exit.
+A model argument also changes the model of an existing conversation. The startup banner shows the model, working directory and a short command list. Type a task at `you>`. Answers stream as plain text. Tool calls show their name and file path or command. Enter `/help` to see commands and audit options, or `/quit` to exit.
 
 You can invoke the same PR auditor from chat:
 
