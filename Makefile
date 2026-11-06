@@ -11,9 +11,15 @@ S3_SECRET_KEY ?= pronto-local-secret
 
 # Run one or more explicit PR URLs with Pronto's usual review/apply flags:
 #   make audit PRS="https://github.com/owner/repo/pull/42 https://github.com/owner/repo/pull/43"
-.PHONY: audit nono-serve s3
+.PHONY: help chat audit nono-serve s3
 
-audit:
+help: ## List available make targets and their descriptions
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_.-]+:.*##/ { sub(/^[[:space:]]+/, "", $$2); printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+chat: ## Start the interactive Pronto chat
+	npm start
+
+audit: ## Audit the PR URLs supplied in PRS
 	@test -n "$(strip $(PRS))" || { \
 		echo 'Usage: make audit PRS="https://github.com/owner/repo/pull/42 [https://github.com/owner/repo/pull/43 ...]"' >&2; \
 		exit 2; \
@@ -21,11 +27,11 @@ audit:
 	npm run audit -- $(foreach pr,$(PRS),--pr '$(pr)') --approve --apply --skip human-review
 
 # Resolve gh auth outside nono so the sandbox doesn't need Keychain access.
-nono-serve:
+nono-serve: ## Run the Pronto server inside nono
 	GITHUB_TOKEN="$$(gh auth token)" nono run --profile pronto --allow-cwd --listen-port $(PORT) -- "$(NODE_BIN)" --experimental-strip-types audit.ts serve --apply --approve --port $(PORT) 2>&1 | tee -a /tmp/pronto-serve.log
 
 # Start local-only RustFS for S3-compatible replication tests. Override S3_* as needed.
-s3:
+s3: ## Start local RustFS for S3 replication tests
 	@mkdir -p "$(S3_DATA_DIR)"
 	@echo "Starting RustFS at http://127.0.0.1:$(S3_PORT) (data: $(S3_DATA_DIR))"
 	RUSTFS_ACCESS_KEY="$(S3_ACCESS_KEY)" RUSTFS_SECRET_KEY="$(S3_SECRET_KEY)" \
