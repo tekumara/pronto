@@ -697,6 +697,12 @@ test("MCP audit uses a separate execution credential and CLI defaults, models, s
   assert.equal(invalidModel.isError, true);
   assert.match(JSON.stringify(invalidModel), /No available model/);
   assert.equal(gh.reviews.length, 1);
+  const many = Array.from({ length: 101 }, (_, index) => `unused-${index}`);
+  const expanded = await runMcpAudit(writer, { ...args, skipApproved: false, skipLabels: many, exclude: many });
+  assert.equal(expanded.results[0]!.status, "completed");
+  const manyTargets = await writer.callTool({ name: "run_audit", arguments: { targets: Array(101).fill(prUrl) } });
+  assert.equal(manyTargets.isError, true);
+  assert.match(JSON.stringify(manyTargets), /Duplicate PR target/);
   run.child.kill("SIGTERM");
   assert.equal((await run.done).code, 0);
 });
@@ -808,27 +814,30 @@ test("cancelling a queued MCP audit prevents it from starting", { timeout: 30_00
   const second = github(undefined, [], secondUrl);
   const started = Promise.withResolvers<void>();
   let held: ServerResponse | undefined;
-  const f = await fixture(t, (_body, response) => { held = response; started.resolve(); },
-    { entrypoint: resolve("src/cli/audit.ts"), github: (request, response) =>
-      /\/(?:pulls|issues)\/8(?:\/|\?|$)/.test(request.url!) ? second.handler(request, response) : first.handler(request, response) });
+  let calls = 0;
+  const f = await fixture(t, (_body, response) => {
+    if (++calls === 1) { held = response; started.resolve(); }
+    else assess(response);
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: (request, response) =>
+    /\/(?:pulls|issues)\/8(?:\/|\?|$)/.test(request.url!) ? second.handler(request, response) : first.handler(request, response) });
   const readToken = randomBytes(32).toString("hex");
   const auditToken = randomBytes(32).toString("hex");
   const run = f.start(["serve", "--port", "0", "--concurrency", "1", "--mcp", "--mcp-audit", "--mcp-public-url", "https://audits.example.test/mcp"],
     { env: { ...env, PRONTO_MCP_TOKEN: readToken, PRONTO_MCP_AUDIT_TOKEN: auditToken } });
-  const [, port] = await watchOutput(run.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const out = watchOutput(run.child);
+  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
   const client = await auditMcpClient(`http://127.0.0.1:${port}/mcp`, auditToken);
   t.after(() => client.close());
-  const active = runMcpAudit(client, { targets: [prUrl] });
-  await started.promise;
   const controller = new AbortController();
-  const queued = client.callTool({ name: "run_audit", arguments: { targets: [secondUrl] } }, { signal: controller.signal }).catch((error) => error);
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  // The runner schedules the whole batch before the first model call can start.
+  const batch = client.callTool({ name: "run_audit", arguments: { targets: [prUrl, secondUrl] } }, { signal: controller.signal }).catch((error) => error);
+  await started.promise;
   controller.abort();
-  await queued;
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await batch;
+  const resumed = runMcpAudit(client, { targets: [prUrl] });
+  await out.until(/acme\/demo#7\s+Resuming saved snapshot/);
   assess(held!);
-  assert.equal((await active).results[0]!.status, "completed");
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal((await resumed).results[0]!.status, "completed");
   assert.deepEqual(second.requests, [], "a cancelled queued request must not fetch PR evidence later");
   run.child.kill("SIGTERM");
   assert.equal((await run.done).code, 0);

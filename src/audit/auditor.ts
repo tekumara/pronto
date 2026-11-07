@@ -2,10 +2,10 @@ import type { Context } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createRegistry, ProviderDoc, type ConversationId, type Cursor, type Harness } from "@earendil-works/pi-durable";
-import { parseReviewTarget, type ReviewTarget } from "../github/reviews.ts";
+import { auditTargetKey, parseReviewTarget, type ReviewTarget } from "../github/reviews.ts";
 import { stripControlCharacters, type Log } from "../logging.ts";
 import { createWebhookQueue } from "../server/webhook-queue.ts";
-import { auditTargetKey, createAuditScheduler } from "../server/audit-scheduler.ts";
+import { createAuditScheduler } from "../server/audit-scheduler.ts";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "../state.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
@@ -14,7 +14,7 @@ import { auditAssessment } from "./assessment.ts";
 import { createPublisher, pendingReassessments, recoverPublications, waitForPublication } from "./publication.ts";
 import { auditRequest, type AuditLog, type AuditOptions, type AuditOutcome, type RepositoryAudit } from "./request.ts";
 
-export type { AuditOptions, AuditOutcome } from "./request.ts";
+export type { AuditOptions } from "./request.ts";
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
 export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output, webhooks, state }: {
@@ -123,7 +123,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
                 output?.("info", scope, "PR commits changed since the audit snapshot · reassessing before publishing");
                 // An active caller consumes the saved reassessment itself. Otherwise use normal
                 // durable admission and concurrency limits; a crash before admission keeps the request.
-                if (webhookQueue && !requests.has(`${repositoryKey(target)}#${target.pr}`)) await auditor.enqueue(target.url);
+                if (webhookQueue && !requests.has(auditTargetKey(target))) await auditor.enqueue(target.url);
               }
             }, () => {}).catch((error) => {
               output?.("error", scope, `Could not queue reassessment: ${error instanceof Error ? error.message : String(error)}`);
@@ -145,8 +145,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       if (recovering) await recovering;
       if (closing) throw new Error("Auditor is closed");
       const target = parseReviewTarget(url);
-      const repository = repositoryKey(target);
-      const requestKey = `${repository}#${target.pr}`;
+      const requestKey = auditTargetKey(target);
       if (requests.has(requestKey)) throw new Error(`Audit is already in progress: ${target.url}`);
       requests.add(requestKey);
       const scope = `${target.owner}/${target.repo}#${target.pr}`;
@@ -221,9 +220,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
             repository = undefined;
             for (const url of selected.values()) {
               const target = parseReviewTarget(url);
-              restoredRequests.add(`${repositoryKey(target)}#${target.pr}`);
+              restoredRequests.add(auditTargetKey(target));
             }
-            for (const target of failed) failedRecoveries.add(`${repositoryKey(target)}#${target.pr}`);
+            for (const target of failed) failedRecoveries.add(auditTargetKey(target));
             urls.push(...selected.values());
           } catch (error) {
             await repository?.harness.close(BACKGROUND_CONTEXT).catch(() => {});
@@ -265,8 +264,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
 export function validateAuditTargets(urls: string[]): void {
   const keys = new Set<string>();
   for (const url of urls) {
-    const key = auditTargetKey(url);
-    if (keys.has(key)) throw new Error(`Duplicate PR target: ${parseReviewTarget(url).url}`);
+    const target = parseReviewTarget(url);
+    const key = auditTargetKey(target);
+    if (keys.has(key)) throw new Error(`Duplicate PR target: ${target.url}`);
     keys.add(key);
   }
 }

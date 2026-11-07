@@ -2,7 +2,7 @@ import type { Context } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { defineDoc, defineExtension, defineTask, ROOT_CONVERSATION_ID, type Harness, type TaskId } from "@earendil-works/pi-durable";
 import { createAuditQueue, type Enqueued } from "./audit-queue.ts";
-import { parseReviewTarget } from "../github/reviews.ts";
+import { auditTargetKey, parseReviewTarget } from "../github/reviews.ts";
 
 type Pending = { url: string; task: TaskId<null>; running: boolean; rerun: boolean };
 const Queue = defineDoc<{ recent: string[]; pending: Record<string, Pending> }>({
@@ -23,10 +23,7 @@ export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch
   const scheduled = new Map<string, Scheduled>();
   const shutdown = new AbortController();
   const dispatchContext = withAbortSignal(shutdown.signal, BACKGROUND_CONTEXT);
-  const key = (url: string) => {
-    const target = parseReviewTarget(url);
-    return `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`;
-  };
+  const key = (url: string) => auditTargetKey(parseReviewTarget(url));
   let closed = false;
   const dispatch = createAuditQueue({
     concurrency,

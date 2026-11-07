@@ -1,14 +1,9 @@
-import { parseReviewTarget } from "../github/reviews.ts";
+import { auditTargetKey, parseReviewTarget } from "../github/reviews.ts";
 
 /** `queued`: a new job, which may start at once. `rerun`: it runs again after the current audit. `coalesced`: already covered. */
 export type Enqueued = "queued" | "rerun" | "coalesced" | "closed";
 
 type Entry = { url: string; running: boolean; rerun: boolean };
-
-function prKey(url: string): string {
-  const target = parseReviewTarget(url);
-  return `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`;
-}
 
 /**
  * Runs audits requested by webhook deliveries, at most `concurrency` at once and never two for one PR.
@@ -58,7 +53,7 @@ export function createAuditQueue({ concurrency, audit, onError }: {
   return {
     enqueue(url: string): Enqueued {
       if (closed) return "closed";
-      const key = prKey(url);
+      const key = auditTargetKey(parseReviewTarget(url));
       const entry = entries.get(key);
       if (!entry) {
         entries.set(key, { url, running: false, rerun: false });

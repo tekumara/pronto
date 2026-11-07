@@ -52,7 +52,7 @@ The execution token can read audits and call `run_audit`. It can spend model cre
 
 | Argument | CLI equivalent and default |
 | --- | --- |
-| `targets` | PR URLs, `owner/repo#number`, numbers or branches; up to 100. Omit to use the server's current branch |
+| `targets` | PR URLs, `owner/repo#number`, numbers or branches. Omit to use the server's current branch |
 | `model` | `provider/model-id`; omit to use the server's CLI default model |
 | `skipLabels` | Repeated `--skip` labels; default empty |
 | `skipDrafts` | `--skip-drafts`; default `true` |
@@ -66,7 +66,7 @@ The execution token can read audits and call `run_audit`. It can spend model cre
 
 For example, `run_audit({targets: ["https://github.com/owner/repo/pull/42"], force: true})` reassesses a PR without publishing. To publish an eligible approval, add `apply: true` and `approve: true`. The defaults match the CLI, not the webhook flags passed to `pronto serve`. As with the CLI, previously authorised publications can still recover.
 
-Numbers and branches use the server's `GH_REPO` or Git checkout, not the client's. An omitted target uses the server's current branch. Use explicit PR URLs when that context is not intended. The tool resolves and validates the whole batch before starting audits. Each call accepts up to 100 targets, labels and exclusion patterns and the request body remains limited to 64 KiB.
+Numbers and branches use the server's `GH_REPO` or Git checkout, not the client's. An omitted target uses the server's current branch. Use explicit PR URLs when that context is not intended. The tool resolves and validates the whole batch before starting audits. The request body is limited to 64 KiB.
 
 The call waits for each audit. Its structured and text results contain `apply` and a `results` array in target order. Each result has a `prUrl` and a `status`: `completed`, `skipped` or `failed`. A completed result includes `auditId` and `cached`; a skipped result includes `reason`; a failed result includes `error`. If any PR fails, the tool result has `isError: true` and still includes the other results. Use the completed result's `prUrl` and `auditId` with `read_audit` for its evidence. A skip does not select an older audit.
 

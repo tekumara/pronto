@@ -60,6 +60,11 @@ export function parseReviewTarget(value: string): ReviewTarget {
   return { owner: match[1]!, repo: match[2]!, pr: Number(match[3]), url: `${url.origin}${url.pathname.replace(/\/$/, "")}` };
 }
 
+/** Stable identity across URL casing and trailing-slash variants. */
+export function auditTargetKey(target: ReviewTarget): string {
+  return `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`;
+}
+
 function failureDetails(error: unknown): string {
   const details: string[] = [];
   const pending = [error];

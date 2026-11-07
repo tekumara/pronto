@@ -1,10 +1,4 @@
-import { parseReviewTarget } from "../github/reviews.ts";
-
-/** Canonical identity shared by batch validation and the server's execution scheduler. */
-export function auditTargetKey(url: string): string {
-  const target = parseReviewTarget(url);
-  return `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`;
-}
+import { auditTargetKey, parseReviewTarget } from "../github/reviews.ts";
 
 /** Limits webhook and manual work together and never overlaps two audits of the same PR. */
 export function createAuditScheduler(concurrency: number) {
@@ -33,7 +27,7 @@ export function createAuditScheduler(concurrency: number) {
     run<T>(url: string, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
       if (closed) return Promise.reject(new Error("Audit scheduler is closed"));
       if (signal?.aborted) return Promise.reject(signal.reason);
-      const key = auditTargetKey(url);
+      const key = auditTargetKey(parseReviewTarget(url));
       return new Promise<T>((resolve, reject) => {
         const job: Job = { key, run, resolve: (value) => resolve(value as T), reject, signal, onAbort: () => {
           const index = waiting.indexOf(job);
