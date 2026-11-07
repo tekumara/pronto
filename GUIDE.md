@@ -10,7 +10,7 @@ Use the [optional audit discussion chat](#optional-audit-discussion-chat) to ask
 
 ## Quick start
 
-You need Node.js 22.19 or newer and an existing Pi login. If needed, run `pi` and use `/login` first.
+You need Node.js 22.19 or newer and an existing Pi login. The project uses Node.js 26 for development; if you use mise, run `mise install node` to install it. If needed, run `pi` and use `/login` first.
 
 Authenticate with `gh auth login`, `GITHUB_TOKEN`, or `GH_TOKEN`. Your GitHub token needs read access to the target PR and its code, including a fork's head repository.
 
