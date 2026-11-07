@@ -128,6 +128,8 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
   async function attempt(): Promise<void> {
     const head = await storage.read();
     if (stopping || (head?.record.owner && head.record.expires > Date.now())) return;
+    const acquisitionReason = !head ? "initial"
+      : head.record.owner === null ? "explicit-release" : "lease-expired";
     const id = randomUUID();
     const start = performance.now();
     let acquired: ControlHead;
@@ -142,7 +144,7 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
       cancellation, lost: Promise.withResolvers<void>(), serial: Promise.resolve(),
       child: new Litestream(config, root, prefix, cancellation.signal, (error) => lose(term, error), options.log) };
     active = term;
-    options.log("info", "replication", `Acquired owner term ${id}; bootstrapping`);
+    options.log("info", "replication", `Acquired owner term ${id}; bootstrapping (reason=${acquisitionReason})`);
     term.timer = setInterval(() => {
       try { live(term); } catch { return; }
       // Serialize renewal with promotion; a failed mutation ends the term rather than rebasing a stale update.

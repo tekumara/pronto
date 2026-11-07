@@ -374,8 +374,12 @@ test("competing serve contenders, new repository admission and deduplication sur
   const upload = operations.findIndex((e) => e.method === "PUT" && e.path.includes(".ltx"));
   assert.ok(upload >= 0);
   assert.ok(operations.slice(upload + 1).some((e) => e.method === "GET" && e.path.includes("control.json")), "fresh ownership GET follows actual upload before 202");
+  const releasedTerm = (await storage.read())!.record.owner;
+  assert.ok(releasedTerm);
   await primary.stop();
+  assert.ok(primary.output.includes(`Released owner term ${releasedTerm}`));
   await ready(standby.base);
+  assert.match(standby.output, /Acquired owner term [a-f0-9-]{36}; bootstrapping \(reason=explicit-release\)/);
   const duplicate = await deliver(standby.base, body, { id: "durable-delivery" });
   assert.equal(duplicate.status, 202);
   assert.deepEqual(await duplicate.json(), { status: "duplicate" });
@@ -413,6 +417,7 @@ test("a crashed owner is replaced only after lease expiry, without reusing its s
   assert.deepEqual(await readdir(join(b.f.stateDir, "terms")), []);
   assert.equal((await storage.read())!.record.owner, source.record.owner);
   await until(async () => (await fetch(`${successor.base}/readyz`)).status === 200, 45_000);
+  assert.match(successor.output, /Acquired owner term [a-f0-9-]{36}; bootstrapping \(reason=lease-expired\)/);
   const current = (await storage.read())!;
   assert.notEqual(current.record.owner, source.record.owner);
   assert.notEqual(current.record.recovery, source.record.recovery);
