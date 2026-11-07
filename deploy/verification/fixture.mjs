@@ -21,6 +21,7 @@ function clientProbeReport() {
   return {
     state: clientProbe.active ? "running" : "stopped",
     endpoint: "http://pronto-verify:8080/webhook",
+    connectionPolicy: "close-after-each-request",
     intervalMs: clientIntervalMs,
     timeoutMs: clientTimeoutMs,
     startedAt: clientProbe.startedAt,
@@ -52,9 +53,12 @@ async function runClientProbe(probe) {
     const startedMono = performance.now(), startedAt = new Date().toISOString();
     let status = null, outcome = null, error = null, success = false;
     try {
+      // The Service selects a backend per TCP connection. Close each request so
+      // successive probes can observe EndpointSlice changes instead of pinning
+      // this monitor to a former backend through HTTP keep-alive.
       const response = await fetch("http://pronto-verify:8080/webhook", {
         method: "POST", signal: AbortSignal.timeout(clientTimeoutMs),
-        headers: { "Content-Type": "application/json", "X-GitHub-Event": "pull_request",
+        headers: { "Connection": "close", "Content-Type": "application/json", "X-GitHub-Event": "pull_request",
           "X-GitHub-Delivery": probe.delivery, "X-Hub-Signature-256": signature }, body,
       });
       status = response.status;

@@ -52,9 +52,9 @@ Additional checks passed:
 - Node.js syntax checks, `bash -n`, and ShellCheck with the shared wizard template's unused colour warning excluded
 - `git diff --check`
 
-## Client-observed downtime sample
+## Client-observed downtime samples
 
-A complete two-pod verification run on 7 November 2026 included an independent in-cluster client sending the same signed webhook through the ClusterIP Service every 100 ms, with a 1-second request timeout. The client-observed gap is the time between its last HTTP 202 response before failures and its first HTTP 202 response after recovery.
+An earlier complete two-pod run on 7 November 2026 used an independent in-cluster client sending the same signed webhook through the ClusterIP Service every 100 ms, with a 1-second request timeout and Node fetch's default connection pooling. The client-observed gap is the time between its last HTTP 202 response before failures and its first HTTP 202 response after recovery.
 
 | Fault | Client-observed success gap | Failed probes | Related measurement |
 | --- | ---: | ---: | --- |
@@ -62,6 +62,19 @@ A complete two-pod verification run on 7 November 2026 included an independent i
 | Stop RustFS | 25,823 ms | 247 | Both Pronto pods stayed live but unready; Service had no ready endpoints |
 
 These are sampled measurements from one local run, not an SLO or zero-downtime guarantee. The probe exercises the in-cluster Service, not an external ingress or public webhook client. The full request timeline is in the ignored local artifact `.k3d/evidence/2026-11-07T11-10-50.131Z/observations.json`.
+
+## Fresh-connection sample and rolling upgrade
+
+A later verifier run on 7 November sets `Connection: close` on each synthetic request. A follow-up diagnostic had shown that a pooled HTTP connection can remain pinned to a former owner after it becomes an unready standby, even when a fresh connection through the Service reaches the new owner. The results below measure new TCP connections per request; persistent-connection behavior is not covered. The probe interval is a 100 ms target with a 1-second request timeout, so slow or timed-out requests delay the next attempt.
+
+| Scenario | Client-observed gap | Failed probes | Attempts |
+| --- | ---: | ---: | ---: |
+| Kill the owner pod | 26,897 ms | 41 | 45 |
+| Stop RustFS | 28,367 ms | 47 | 49 |
+| Replace the standby image | No failures observed | 0 | 56 |
+| Gracefully replace the owner image | 1,208 ms | 2 | 6 |
+
+The verifier passed. It updated StatefulSet templates using `OnDelete`, replaced the standby first without changing the owner or losing a client success, then gracefully replaced the owner. Both pods ended on the candidate tag; the candidate and baseline tags referenced the same image digest, so this validates pod replacement and routing, not compatibility between different binaries. There were zero model calls, publication attempts or unexpected fixture requests, and the RustFS PVC identity was unchanged. Evidence is in `.k3d/evidence/2026-11-07T22-26-32.116Z/observations.json` (local and ignored by Git).
 
 ## Not verified
 

@@ -1,13 +1,13 @@
 // Cluster-boundary authoring gate:
 // Protect real Service routing, probes, process containment, isolated pod state,
-// crash takeover and PVC survival. Local integration tests cannot exercise
-// kubelet/controller/EndpointSlice regressions. No production seam is added.
+// crash takeover, OnDelete image replacement and PVC survival. Local integration
+// tests cannot exercise kubelet/controller/EndpointSlice regressions. No production seam is added.
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { apply, assertRouting, copyStorageSecret, endpoints, healthy, installApp, json, k, kubeconfig, namespace,
+import { apply, assertRouting, cluster, copyStorageSecret, endpoints, healthy, installApp, json, k, kubeconfig, namespace,
   podStates, run, secret, state, storageNamespace, until } from "./k3d.mjs";
 
 const ns = "pronto-verification", release = "pronto-verify";
@@ -17,6 +17,12 @@ function clientProbe(pod, action, delivery) {
   const url = `http://127.0.0.1:8081/client-probe/${action}${query}`;
   const script = `const response = await fetch(${JSON.stringify(url)}, {method:${JSON.stringify(method)}, headers:{"x-client-probe-control":process.env.PRONTO_WEBHOOK_SECRET}}); const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); console.log(JSON.stringify(result));`;
   return JSON.parse(k(["-n", ns, "exec", pod, "-c", "fixture", "--", "node", "--input-type=module", "-e", script]));
+}
+function podImage(podName) {
+  const pod = json(["-n", ns, "get", "pod", podName]);
+  const container = pod.spec.containers.find((item) => item.name === "pronto");
+  const status = pod.status.containerStatuses?.find((item) => item.name === "pronto");
+  return { uid: pod.metadata.uid, image: container.image, imageID: status?.imageID ?? null };
 }
 export async function verify() {
   assert.equal(json(["-n", "pronto", "get", "pods"]).items.length, 0,
@@ -167,12 +173,114 @@ export async function verify() {
     assert.deepEqual(json(["-n", storageNamespace, "get", "pvc"]).items.map((p) => ({ name: p.metadata.name, uid: p.metadata.uid, volume: p.spec.volumeName })), claims);
     record("deduplicated-after-storage-restart", probe(finalOwner.name, "deliver", delivery, "duplicate"));
     record("independent-restore-after-storage-restart", probe(finalOwner.name, "snapshot", delivery));
-    const stats = probe(finalOwner.name, "stats");
+    // A real StatefulSet OnDelete upgrade changes both templates but leaves the
+    // existing pods on the baseline tag until each pod is deliberately replaced.
+    const baselineImage = JSON.parse(readFileSync(join(state, "image.json"), "utf8")).image;
+    const baselineDigest = run("docker", ["image", "inspect", baselineImage, "--format", "{{.Id}}"]);
+    const repository = baselineImage.slice(0, baselineImage.lastIndexOf(":"));
+    const candidateTag = `k3d-upgrade-${randomUUID()}`;
+    const candidateImage = `${repository}:${candidateTag}`;
+    run("docker", ["tag", baselineImage, candidateImage]);
+    run("k3d", ["image", "import", "--cluster", cluster, candidateImage], { inherit: true, timeout: 300_000 });
+    const candidateDigest = run("docker", ["image", "inspect", candidateImage, "--format", "{{.Id}}"]);
+    assert.equal(candidateDigest, baselineDigest, "Upgrade simulation uses the same image bytes under a new immutable tag");
+    for (const node of [`k3d-${cluster}-server-0`, `k3d-${cluster}-agent-0`]) {
+      run("docker", ["exec", node, "crictl", "inspecti", `docker.io/library/${candidateImage}`]);
+    }
+
+    const beforeRollout = await healthy(ns, release, 2);
+    const rolloutOwner = beforeRollout.find((pod) => pod.ready === 200);
+    const rolloutStandby = beforeRollout.find((pod) => pod.ready === 503);
+    assert.ok(rolloutOwner && rolloutStandby, "Expected one ready owner and one unready standby before upgrade");
+    await assertRouting(ns, release, rolloutOwner.name);
+    assert.ok(beforeRollout.every((pod) => podImage(pod.name).image === baselineImage));
+    record("rollout-image-prepared", { baselineImage, candidateImage, imageDigest: baselineDigest,
+      note: "Distinct tags, identical image bytes; exercises OnDelete replacement, not binary compatibility." });
+
+    run("helm", ["upgrade", release, "deploy/helm/pronto", "--namespace", ns, "--kubeconfig", kubeconfig,
+      "--kube-context", `k3d-${cluster}`, "--reuse-values", "--wait=hookOnly", "--timeout", "180s",
+      "--set-string", `image.tag=${candidateTag}`], { inherit: true });
+    const updatedStatefulSets = json(["-n", ns, "get", "statefulsets"]).items;
+    assert.equal(updatedStatefulSets.length, 2);
+    for (const statefulSet of updatedStatefulSets) {
+      assert.equal(statefulSet.spec.template.spec.containers.find((item) => item.name === "pronto").image, candidateImage);
+    }
+    assert.ok((await healthy(ns, release, 2)).every((pod) => podImage(pod.name).image === baselineImage),
+      "OnDelete must leave both existing pods on the baseline image until individually replaced");
+    record("rollout-templates-updated", { candidateImage, pods: podStates(ns, release) });
+    // The verification fixture shares the chart image tag, so Helm also replaces
+    // its Deployment. Wait for the new fixture before starting client measurements.
+    const oldClientPod = clientPod;
+    clientPod = await until(() => json(["-n", ns, "get", "pods", "-l", `pronto-fixture=${release}`]).items
+      .find((pod) => pod.spec.containers.find((item) => item.name === "fixture")?.image === candidateImage
+        && pod.status.containerStatuses?.some((container) => container.name === "fixture" && container.ready))?.metadata.name,
+    "candidate-image client fixture is Ready", 60_000);
+    record("rollout-client-fixture-ready", { oldClientPod, clientPod, image: candidateImage });
+
+    const standbyClientStart = await beginClientProbe(delivery, "standby image replacement");
+    record("client-probe-armed-before-standby-replacement", { baselineSuccessAt: standbyClientStart.baselineSuccessAt,
+      intervalMs: standbyClientStart.intervalMs, timeoutMs: standbyClientStart.timeoutMs });
+    logs(rolloutStandby.name, "rollout-old-standby");
+    k(["-n", ns, "delete", "pod", rolloutStandby.name, "--wait=true"]);
+    const replacedStandby = await until(() => {
+      const pod = podStates(ns, release).find((item) => item.name === rolloutStandby.name);
+      if (!pod || pod.uid === rolloutStandby.uid || pod.health !== 200 || pod.ready !== 503) return false;
+      const image = podImage(pod.name);
+      return image.image === candidateImage ? { pod, image } : false;
+    }, "new-image standby is live and remains unready", 60_000);
+    const afterStandbyReplacement = await healthy(ns, release, 2);
+    const ownerAfterStandby = afterStandbyReplacement.find((pod) => pod.ready === 200);
+    assert.equal(ownerAfterStandby.name, rolloutOwner.name, "Replacing the standby must not replace the serving owner");
+    assert.equal(ownerAfterStandby.uid, rolloutOwner.uid);
+    await assertRouting(ns, release, ownerAfterStandby.name);
+    const standbyClient = finishClientProbe();
+    assert.ok(standbyClient.attempts > 0);
+    assert.equal(standbyClient.finishTimedOut, false, "Client did not receive a successful response after standby replacement");
+    assert.ok(standbyClient.firstFailureAt === null || standbyClient.firstRecoveryAt,
+      "Client requests failed during standby replacement but never recovered");
+    record("rollout-standby-replaced", { oldPod: rolloutStandby, newPod: replacedStandby,
+      owner: ownerAfterStandby, endpoints: endpoints(ns, release) });
+    record("rollout-standby-client-downtime", standbyClient);
+
+    const ownerBeforeReplacement = afterStandbyReplacement.find((pod) => pod.ready === 200);
+    const ownerSnapshotBefore = probe(ownerBeforeReplacement.name, "snapshot", delivery);
+    const ownerClientStart = await beginClientProbe(delivery, "owner image replacement");
+    record("client-probe-armed-before-owner-replacement", { baselineSuccessAt: ownerClientStart.baselineSuccessAt,
+      intervalMs: ownerClientStart.intervalMs, timeoutMs: ownerClientStart.timeoutMs });
+    logs(ownerBeforeReplacement.name, "rollout-old-owner");
+    record("rollout-owner-delete-requested", { pod: ownerBeforeReplacement.name, uid: ownerBeforeReplacement.uid,
+      image: podImage(ownerBeforeReplacement.name).image, method: "graceful kubectl delete pod" });
+    const ownerDeleteStartedAt = Date.now();
+    k(["-n", ns, "delete", "pod", ownerBeforeReplacement.name, "--wait=true"]);
+    const afterOwnerReplacement = await healthy(ns, release, 2, 120_000);
+    const ownerAfterReplacement = afterOwnerReplacement.find((pod) => pod.ready === 200);
+    await assertRouting(ns, release, ownerAfterReplacement.name);
+    const ownerClient = finishClientProbe();
+    assert.ok(ownerClient.attempts > 0);
+    assert.equal(ownerClient.finishTimedOut, false, "Client did not receive a successful response after owner replacement");
+    assert.ok(ownerClient.firstFailureAt === null || ownerClient.firstRecoveryAt,
+      "Client requests failed during owner replacement but never recovered");
+    const ownerSnapshotAfter = probe(ownerAfterReplacement.name, "snapshot", delivery);
+    assert.notEqual(ownerSnapshotAfter.owner, ownerSnapshotBefore.owner, "Owner replacement must acquire a new term");
+    const upgradedImages = afterOwnerReplacement.map((pod) => podImage(pod.name));
+    assert.ok(upgradedImages.every((image) => image.image === candidateImage), "Both pods must run the candidate image tag");
+    assert.deepEqual(json(["-n", storageNamespace, "get", "pvc"]).items.map((p) => ({ name: p.metadata.name, uid: p.metadata.uid, volume: p.spec.volumeName })), claims);
+    record("rollout-owner-replaced", { oldOwner: ownerBeforeReplacement, newOwner: ownerAfterReplacement,
+      ownerDeleteStartedAt: new Date(ownerDeleteStartedAt).toISOString(), takeoverMs: Date.now() - ownerDeleteStartedAt,
+      images: upgradedImages, endpoints: endpoints(ns, release) });
+    record("rollout-owner-client-downtime", ownerClient);
+    record("rollout-deduplicated-after-upgrade", probe(ownerAfterReplacement.name, "deliver", delivery, "duplicate"));
+    record("independent-restore-after-upgrade", ownerSnapshotAfter);
+
+    const stats = probe(ownerAfterReplacement.name, "stats");
     assert.ok(stats.githubReads > 0);
     assert.equal(stats.modelCalls, 0);
     assert.equal(stats.publicationAttempts, 0);
     assert.deepEqual(stats.unexpected, []);
-    record("passed", { pods: final, claims, fixture: stats, evidenceDirectory: directory });
+    record("passed", { pods: afterOwnerReplacement, claims, fixture: stats,
+      rollout: { baselineImage, candidateImage, sameImageDigest: baselineDigest === candidateDigest,
+        standbyFailures: standbyClient.failures, ownerClientGapMs: ownerClient.clientObservedGapMs,
+        ownerFailures: ownerClient.failures }, evidenceDirectory: directory });
   } catch (error) {
     record("failed", { message: error.message });
     throw error;
