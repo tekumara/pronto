@@ -3,6 +3,7 @@
 // crash takeover, OnDelete image replacement and PVC survival. Local integration
 // tests cannot exercise kubelet/controller/EndpointSlice regressions. No production seam is added.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,7 +42,46 @@ export async function verify() {
   const logs = (pod, name = pod) => {
     try { writeFileSync(join(directory, name + ".log"), k(["-n", ns, "logs", pod, "-c", "pronto"])); } catch {}
   };
+  const capturePodLogs = (pod, name) => {
+    const child = spawn("mise", ["exec", "--", "kubectl", "--kubeconfig", kubeconfig,
+      "--context", `k3d-${cluster}`, "-n", ns, "logs", "--follow", pod, "-c", "pronto"], {
+      cwd: process.cwd(), env: { ...process.env, KUBECONFIG: kubeconfig }, detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "", stderr = "", spawnError;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { spawnError = error; });
+    const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+    const signalGroup = (signal) => {
+      if (!child.pid) return;
+      try { process.kill(-child.pid, signal); }
+      catch { child.kill(signal); }
+    };
+    return {
+      get output() { return output; },
+      waitFor: (marker, message, timeout = 15_000) => until(() => {
+        if (spawnError) throw spawnError;
+        if (output.includes(marker)) return true;
+        if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Log stream for ${pod} exited before ${message}: ${stderr}`);
+        return false;
+      }, message, timeout),
+      async finish() {
+        if (child.exitCode === null && child.signalCode === null) signalGroup("SIGTERM");
+        let result = await Promise.race([closed, delay(2_000, undefined, { ref: false }).then(() => null)]);
+        if (!result) {
+          signalGroup("SIGKILL");
+          result = await closed;
+        }
+        writeFileSync(join(directory, `${name}.log`), output);
+        return { ...result, bytes: Buffer.byteLength(output), stderr: stderr.trim() || null, output };
+      },
+    };
+  };
   let stoppedController = false, stoppedStorage = false, clientProbeActive = false, clientPod;
+  let oldOwnerLogCapture, newOwnerLogCapture;
   const beginClientProbe = async (delivery, fault) => {
     clientProbe(clientPod, "start", delivery);
     clientProbeActive = true;
@@ -243,11 +283,20 @@ export async function verify() {
     record("rollout-standby-client-downtime", standbyClient);
 
     const ownerBeforeReplacement = afterStandbyReplacement.find((pod) => pod.ready === 200);
+    const nextOwnerBeforeReplacement = afterStandbyReplacement.find((pod) => pod.ready === 503);
+    assert.ok(ownerBeforeReplacement && nextOwnerBeforeReplacement);
     const ownerSnapshotBefore = probe(ownerBeforeReplacement.name, "snapshot", delivery);
     const ownerClientStart = await beginClientProbe(delivery, "owner image replacement");
     record("client-probe-armed-before-owner-replacement", { baselineSuccessAt: ownerClientStart.baselineSuccessAt,
       intervalMs: ownerClientStart.intervalMs, timeoutMs: ownerClientStart.timeoutMs });
-    logs(ownerBeforeReplacement.name, "rollout-old-owner");
+    oldOwnerLogCapture = capturePodLogs(ownerBeforeReplacement.name, "rollout-old-owner");
+    newOwnerLogCapture = capturePodLogs(nextOwnerBeforeReplacement.name, "rollout-new-owner");
+    await Promise.all([
+      oldOwnerLogCapture.waitFor(`Ready owner term ${ownerSnapshotBefore.owner}`, "old owner log stream is following"),
+      newOwnerLogCapture.waitFor("standby until owned-ready", "standby log stream is following"),
+    ]);
+    record("rollout-owner-log-followers-ready", { oldOwner: ownerBeforeReplacement.name, oldTerm: ownerSnapshotBefore.owner,
+      successor: nextOwnerBeforeReplacement.name, files: ["rollout-old-owner.log", "rollout-new-owner.log"] });
     record("rollout-owner-delete-requested", { pod: ownerBeforeReplacement.name, uid: ownerBeforeReplacement.uid,
       image: podImage(ownerBeforeReplacement.name).image, method: "graceful kubectl delete pod" });
     const ownerDeleteStartedAt = Date.now();
@@ -262,6 +311,22 @@ export async function verify() {
       "Client requests failed during owner replacement but never recovered");
     const ownerSnapshotAfter = probe(ownerAfterReplacement.name, "snapshot", delivery);
     assert.notEqual(ownerSnapshotAfter.owner, ownerSnapshotBefore.owner, "Owner replacement must acquire a new term");
+    assert.equal(ownerAfterReplacement.name, nextOwnerBeforeReplacement.name,
+      "The existing standby must take over before the deleted owner is recreated");
+    await Promise.all([
+      oldOwnerLogCapture.waitFor(`Released owner term ${ownerSnapshotBefore.owner}`, "old owner lease release log"),
+      newOwnerLogCapture.waitFor(`Ready owner term ${ownerSnapshotAfter.owner}`, "successor ready-owner log"),
+    ]);
+    assert.ok(newOwnerLogCapture.output.includes(`Acquired owner term ${ownerSnapshotAfter.owner}; bootstrapping (reason=explicit-release)`),
+      "The successor log must identify explicit release as the acquisition reason");
+    const oldOwnerCapture = await oldOwnerLogCapture.finish();
+    oldOwnerLogCapture = undefined;
+    const newOwnerCapture = await newOwnerLogCapture.finish();
+    newOwnerLogCapture = undefined;
+    record("rollout-owner-transition-logs-captured", {
+      oldOwner: { pod: ownerBeforeReplacement.name, term: ownerSnapshotBefore.owner, file: "rollout-old-owner.log", bytes: oldOwnerCapture.bytes },
+      newOwner: { pod: ownerAfterReplacement.name, term: ownerSnapshotAfter.owner, file: "rollout-new-owner.log", bytes: newOwnerCapture.bytes },
+    });
     const upgradedImages = afterOwnerReplacement.map((pod) => podImage(pod.name));
     assert.ok(upgradedImages.every((image) => image.image === candidateImage), "Both pods must run the candidate image tag");
     assert.deepEqual(json(["-n", storageNamespace, "get", "pvc"]).items.map((p) => ({ name: p.metadata.name, uid: p.metadata.uid, volume: p.spec.volumeName })), claims);
@@ -285,7 +350,10 @@ export async function verify() {
     record("failed", { message: error.message });
     throw error;
   } finally {
-    // Stop the independent monitor before restoring infrastructure on failure.
+    // Stop log followers as well as the client monitor if verification fails mid-handoff.
+    for (const capture of [oldOwnerLogCapture, newOwnerLogCapture]) {
+      if (capture) { try { await capture.finish(); } catch {} }
+    }
     if (clientProbeActive && clientPod) { try { clientProbe(clientPod, "stop"); } catch {} }
     // Restore infrastructure even if an assertion fails; never touch live credentials.
     if (stoppedStorage) k(["-n", storageNamespace, "scale", "deployment", "rustfs", "--replicas=1"]);
