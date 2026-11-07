@@ -179,7 +179,7 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 
 `--replicated-state` enables experimental term-isolated S3 state. It defaults to off; ordinary serve, audits and chat do not need replica configuration or start replication. See [replicated state setup, RustFS tests and safety limits](REPLICATED_STATE.md) before enabling it. `GET /readyz` reports admission readiness separately from `/healthz` liveness. An unready replicated process returns 503 for application requests, without forwarding them.
 
-`--mcp --mcp-public-url <https-url>` adds a read-only MCP endpoint to this listener. It requires a separate `PRONTO_MCP_TOKEN`. To let trusted clients run audits, add `--mcp-audit` and set a different `PRONTO_MCP_AUDIT_TOKEN`. Those clients can also publish reviews when they request `apply`. MCP is disabled by default and cannot be combined with `--replicated-state`. See [MCP setup](MCP.md) for access and client requirements.
+`--mcp --mcp-public-url <https-url>` adds an MCP endpoint to this listener. It requires `PRONTO_MCP_TOKEN`, which lets clients read and run audits and publish reviews when they request `apply`. Existing read-only MCP tokens gain these permissions. MCP is disabled by default and cannot be combined with `--replicated-state`. See [MCP setup](MCP.md) for access and client requirements.
 
 `--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
 
@@ -664,9 +664,9 @@ Pronto rejects a second chat process for the same working directory and state di
 
 ### Use another agent over MCP
 
-`pronto serve --mcp --mcp-public-url https://audits.example.com/mcp` exposes the retrieval tools and canonical discussion skill on the webhook listener. It adds no model runtime or conversation store. The process keeps its usual serve credentials and startup recovery. With `--mcp-audit` and a separate `PRONTO_MCP_AUDIT_TOKEN`, trusted clients can also run audits and request publication. MCP supports `2026-07-28` only. Terminate HTTPS at a reverse proxy and keep the HTTP listener private. MCP is disabled without the flag and cannot be combined with experimental replicated state.
+`pronto serve --mcp --mcp-public-url https://audits.example.com/mcp` exposes audit tools and the canonical discussion skill on the webhook listener. It adds no model runtime or conversation store. The process keeps its usual serve credentials and startup recovery. The MCP token grants both audit reads and execution, including publication when requested. MCP supports `2026-07-28` only. Terminate HTTPS at a reverse proxy and keep the HTTP listener private. MCP is disabled without the flag and cannot be combined with experimental replicated state.
 
-See [MCP setup and client requirements](MCP.md), including Caddy configuration, native skill loading and a runnable latest-SDK client. The token shares readable audits in the configured state directory; it is not a per-PR permission. The external agent owns its conversation history and selected audit reference.
+See [MCP setup and client requirements](MCP.md), including Caddy configuration, native skill loading and a runnable latest-SDK client. The token shares all readable audits and can run audits using the server's credentials; it is not a per-PR permission. The external agent owns its conversation history and selected audit reference.
 
 ## Development checks
 

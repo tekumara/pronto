@@ -27,17 +27,13 @@ function send(res: ServerResponse, status: number, body: object, headers: Record
 }
 
 /** Mounted on serve's HTTP listener; each request is authenticated independently. */
-export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDirectory(), allowedOrigins = [], audit }: {
+export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDirectory(), allowedOrigins = [], runAudit }: {
   token: string; publicUrl: string; root?: string; allowedOrigins?: string[];
-  audit?: { token: string; run: ReturnType<typeof createMcpAuditRunner> };
+  runAudit: ReturnType<typeof createMcpAuditRunner>;
 }) {
   if (!/^[A-Za-z0-9._~+/-]{32,512}={0,2}$/.test(token)) {
     throw new Error("PRONTO_MCP_TOKEN must be a dedicated bearer token of at least 32 characters. Generate one with openssl rand -hex 32.");
   }
-  if (audit && !/^[A-Za-z0-9._~+/-]{32,512}={0,2}$/.test(audit.token)) {
-    throw new Error("PRONTO_MCP_AUDIT_TOKEN must be a dedicated bearer token of at least 32 characters. Generate one with openssl rand -hex 32.");
-  }
-  if (audit && audit.token === token) throw new Error("PRONTO_MCP_AUDIT_TOKEN must differ from PRONTO_MCP_TOKEN.");
   const publicEndpoint = mcpPublicUrl(publicUrl);
   const origins = new Set([publicEndpoint.origin]);
   for (const value of allowedOrigins) {
@@ -48,12 +44,11 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
     origins.add(origin.origin);
   }
   const expectedTokenHash = createHash("sha256").update(token).digest();
-  const auditTokenHash = audit ? createHash("sha256").update(audit.token).digest() : undefined;
   const skills = await SkillsExtension.load(memorySkillFiles({ "pronto-audit-discussion/SKILL.md": auditSkillMarkdown }), { strict: true });
-  const makeHandler = (canAudit: boolean) => createMcpHandler(() => {
+  const handler = createMcpHandler(() => {
     const mcp = new McpServer({ name: "pronto-audits", version: "1.0.0" }, {
       supportedProtocolVersions: [MCP_PROTOCOL_VERSION],
-      instructions: `${canAudit ? "Pronto audit execution and evidence." : "Read-only Pronto audit evidence."} Load ${skillUri} through the skills extension or resources/read before discussing an audit. Retain the auditRef returned by read_audit; every request is independent.`,
+      instructions: `Pronto audit execution and evidence. Load ${skillUri} through the skills extension or resources/read before discussing an audit. Retain the auditRef returned by read_audit; every request is independent.`,
     });
     skills.attach(mcp);
     mcp.registerTool(savedAuditTool.name, {
@@ -72,22 +67,19 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
       const code = await readPinnedAuditFile(args, undefined, root, ctx.mcpReq.signal);
       return { content: [{ type: "text", text: JSON.stringify(code) }], structuredContent: code };
     });
-    if (canAudit && audit) mcp.registerTool(runAuditTool.name, {
+    mcp.registerTool(runAuditTool.name, {
       description: runAuditTool.description,
       inputSchema: fromJsonSchema<RunAuditArguments>(runAuditTool.parameters as JsonSchemaType),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, async (args, ctx) => {
-      const result = await audit.run(args, ctx.mcpReq.signal);
+      const result = await runAudit(args, ctx.mcpReq.signal);
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result,
         isError: result.results.some((item) => item.status === "failed") };
     });
     return mcp;
   }, { legacy: "reject", responseMode: "json", maxRequestBodySize: MAX_REQUEST_BYTES });
-  const reader = makeHandler(false);
-  const writer = audit ? makeHandler(true) : undefined;
-  const nodeOptions = { maxRequestBodySize: MAX_REQUEST_BYTES, onerror: () => console.error("Pronto MCP: HTTP request failed.") };
-  const readHandler = toNodeHandler(reader, nodeOptions);
-  const writeHandler = writer ? toNodeHandler(writer, nodeOptions) : undefined;
+  const nodeHandler = toNodeHandler(handler, { maxRequestBodySize: MAX_REQUEST_BYTES,
+    onerror: () => console.error("Pronto MCP: HTTP request failed.") });
   // Public Host is preserved by Caddy. Loopback hosts allow local diagnostics; never use X-Forwarded-Host.
   const validHost = hostHeaderValidation([publicEndpoint.hostname, "localhost", "127.0.0.1", "[::1]"]);
   let stopping = false;
@@ -103,16 +95,14 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
     // Dedicated manually provisioned tokens, not a pretend OAuth issuer or forwarded GitHub credentials.
     const auth = typeof req.headers.authorization === "string" ? /^Bearer ([A-Za-z0-9._~+/=-]{1,514})$/i.exec(req.headers.authorization) : null;
     const suppliedHash = createHash("sha256").update(auth?.[1] ?? "").digest();
-    const canRead = timingSafeEqual(suppliedHash, expectedTokenHash);
-    const canAudit = !!auditTokenHash && timingSafeEqual(suppliedHash, auditTokenHash);
-    if (!auth || (!canRead && !canAudit)) {
+    if (!auth || !timingSafeEqual(suppliedHash, expectedTokenHash)) {
       return send(res, 401, { error: "A valid Pronto MCP bearer token is required." }, { "WWW-Authenticate": "Bearer realm=\"pronto\"", Connection: "close" });
     }
     if (stopping) return send(res, 503, { error: "Server is shutting down." });
     // Match the configured path exactly. Query-string credentials and alternate routing are not accepted.
     if (req.url !== publicEndpoint.pathname) return send(res, 404, { error: "Not found." });
     if (req.method !== "POST") return send(res, 405, { error: "Only stateless MCP POST requests are supported." }, { Allow: "POST" });
-    await (canAudit ? writeHandler! : readHandler)(req, res);
+    await nodeHandler(req, res);
   }
   return {
     path: publicEndpoint.pathname,
@@ -127,7 +117,7 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
     },
     close(): Promise<void> {
       stopping = true;
-      return closed ??= Promise.all([reader.close(), writer?.close()]).then(() => {});
+      return closed ??= Promise.resolve(handler.close());
     },
   };
 }

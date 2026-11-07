@@ -4,6 +4,7 @@ import { createAuditMcpEndpoint } from "../src/discussion/mcp.ts";
 import { createWebhookServer } from "../src/server/serve.ts";
 
 const mcp = await createAuditMcpEndpoint({
+  runAudit: async () => { throw new Error("This read-only test host does not run audits"); },
   publicUrl: process.argv[2]!, allowedOrigins: process.argv.slice(3), token: process.env.PRONTO_MCP_TOKEN ?? "",
 });
 const server = createWebhookServer({

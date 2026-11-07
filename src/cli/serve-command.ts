@@ -19,9 +19,8 @@ function printServeHelp(): void {
   console.log(`--concurrency <n> sets how many audits run at once (default: ${DEFAULT_CONCURRENCY}).`);
   console.log("--webhook-path <path> sets the path that receives deliveries (default: /webhook). GET /healthz reports health.");
   console.log("--verbose includes ignored deliveries, delivery IDs, tool calls, cache changes and full reports.");
-  console.log("--mcp exposes read-only audit tools and the discussion skill on the same HTTP listener (default: off). Requires PRONTO_MCP_TOKEN and --mcp-public-url <https-url>; the URL sets the endpoint path. Terminate HTTPS at a reverse proxy. See MCP.md.");
+  console.log("--mcp exposes audit tools and the discussion skill on the same HTTP listener (default: off). Requires PRONTO_MCP_TOKEN and --mcp-public-url <https-url>; the token can run audits and publish reviews with apply=true. Terminate HTTPS at a reverse proxy. See MCP.md.");
   console.log("--mcp-allow-origin <https-origin> adds an exact allowed browser origin; repeat for multiple origins. MCP bearer auth is separate from webhook signatures. --mcp cannot yet be combined with --replicated-state.");
-  console.log("--mcp-audit enables remote audit execution with a separate PRONTO_MCP_AUDIT_TOKEN. This token can also publish reviews when the caller sets apply=true.");
   console.log("--replicated-state enables experimental term-isolated S3 state (default: off). Requires PRONTO_REPLICA_URL, PRONTO_LITESTREAM_BIN, AWS_REGION and AWS credentials. See REPLICATED_STATE.md. GET /readyz reports admission readiness; /healthz is liveness.");
   console.log("The audit flags apply to every webhook audit and work as they do for pronto. --force and --pr are not supported. Without --apply, new audits only log previews. Previously authorised publications can still recover.");
 }
@@ -34,10 +33,10 @@ export async function runServe(args: string[]): Promise<void> {
   let auditRunner: ReturnType<typeof createMcpAuditRunner> | undefined;
   const mcp = mcpOptions ? await import("../discussion/mcp.ts").then(({ createAuditMcpEndpoint }) => createAuditMcpEndpoint({
     publicUrl: mcpOptions.publicUrl, allowedOrigins: mcpOptions.allowedOrigins,
-    audit: mcpOptions.audit ? { token: process.env.PRONTO_MCP_AUDIT_TOKEN ?? "", run: (args, signal) => {
+    runAudit: (args, signal) => {
       if (!auditRunner) throw new Error("Audit runtime is not ready");
       return auditRunner(args, signal);
-    } } : undefined,
+    },
     token: process.env.PRONTO_MCP_TOKEN ?? "",
   })) : undefined;
   try {
@@ -55,8 +54,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
   const replica = replicatedState ? await import("../replication/s3-control.ts").then(({ replicaConfig }) => replicaConfig()) : undefined;
   const secret = process.env.PRONTO_WEBHOOK_SECRET;
   if (!secret) throw new Error("PRONTO_WEBHOOK_SECRET is required: set it to the secret configured on the GitHub webhook.");
-  if (mcp && secret === process.env.PRONTO_MCP_TOKEN) throw new Error("PRONTO_MCP_TOKEN must differ from PRONTO_WEBHOOK_SECRET: readers must not be able to sign webhook deliveries.");
-  if (config.mcp?.audit && secret === process.env.PRONTO_MCP_AUDIT_TOKEN) throw new Error("PRONTO_MCP_AUDIT_TOKEN must differ from PRONTO_WEBHOOK_SECRET.");
+  if (mcp && secret === process.env.PRONTO_MCP_TOKEN) throw new Error("PRONTO_MCP_TOKEN must differ from PRONTO_WEBHOOK_SECRET: MCP clients must not be able to sign webhook deliveries.");
   // Resolve credentials before listening, so a missing token or model fails at startup rather than on the first delivery.
   const login = await fetchViewerLogin();
   const { models, model } = await createModelRuntime(process.cwd(), requested);
@@ -85,7 +83,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
     return;
   }
   const auditor = createAuditor(models, { log, webhooks: { concurrency, options } });
-  if (config.mcp?.audit) setAuditRunner(createMcpAuditRunner(auditor, models, process.cwd()));
+  if (mcp) setAuditRunner(createMcpAuditRunner(auditor, models, process.cwd()));
   let stopping = false;
   const server = createWebhookServer({ secret, login, enqueue: async (url, id) => {
     if (stopping) return "closed";
@@ -104,7 +102,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
     const address = await server.listen(port, host);
     log("info", "serve", `Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · new webhook audits: previews only, add --apply to submit reviews; saved publications still recover"}`);
     log("info", "serve", `Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
-    if (mcp) log("info", "serve", `MCP at ${config.mcp!.publicUrl} · ${config.mcp!.audit ? "audit execution enabled with separate token" : "read-only"} · same listener, separate bearer authentication`);
+    if (mcp) log("info", "serve", `MCP at ${config.mcp!.publicUrl} · audit execution enabled · same listener, separate bearer authentication`);
     for (const url of recoverable) {
       if (stopping) break;
       log("info", auditLabel(url), "Recovering audit");

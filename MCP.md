@@ -1,6 +1,8 @@
 # Use Pronto audits from another agent
 
-`pronto serve --mcp` exposes saved audit evidence and the audit-discussion skill on the webhook server's HTTP listener. You can also enable audit execution with a separate credential. Your external agent supplies its own conversation history. Pronto does not host another chat agent or start a second process.
+`pronto serve --mcp` exposes audit evidence, audit execution and the audit-discussion skill on the webhook server's HTTP listener. Your external agent supplies its own conversation history. Pronto does not host another chat agent or start a second process.
+
+The MCP token can run audits and post GitHub reviews when a caller sets `apply: true`. Previously read-only MCP tokens now have these permissions. Rotate or restrict existing tokens before enabling the upgraded endpoint.
 
 The endpoint supports MCP `2026-07-28` only. It uses stateless Streamable HTTP with JSON responses, per-request metadata and `server/discover`. It does not support stdio, `initialize`, protocol sessions, GET event streams or older MCP versions.
 
@@ -22,8 +24,7 @@ MCP is disabled by default. It shares the `serve` listener, which defaults to `1
 
 | Option | Meaning |
 | --- | --- |
-| `--mcp` | Enable the MCP endpoint for read-only access |
-| `--mcp-audit` | Also enable audit execution for a separate execution token |
+| `--mcp` | Enable the MCP endpoint for audit reads and execution |
 | `--mcp-public-url` | Required with `--mcp`; public HTTPS URL, including the endpoint path |
 | `--mcp-allow-origin` | Additional trusted HTTPS browser origin; repeat as needed |
 | `--host` | Shared bind address; default `127.0.0.1` |
@@ -31,24 +32,15 @@ MCP is disabled by default. It shares the `serve` listener, which defaults to `1
 
 The MCP path must differ from the webhook path, `/healthz` and `/readyz`. MCP bearer credentials cannot authorise webhook admission. A webhook signature cannot authorise MCP reads. `--mcp` cannot yet be combined with experimental `--replicated-state`: reads need a term-aware audit source, not the replica's base state directory.
 
-Each token must contain at least 32 characters and differ from `PRONTO_WEBHOOK_SECRET`. The audit token must also differ from the read-only token. Do not reuse a GitHub credential. There is no token argument: putting secrets in command arguments exposes them to process listings and shell history. Never put a token in a URL. Changing a token revokes existing clients that use it. There are no per-client identities or per-repository permissions.
+The token must contain at least 32 characters and differ from `PRONTO_WEBHOOK_SECRET`. Do not reuse a GitHub credential. There is no token argument: putting secrets in command arguments exposes them to process listings and shell history. Never put a token in a URL. Changing the token revokes existing clients. There are no read-only tokens, per-client identities or per-repository permissions.
 
-The token grants access to all readable audits in that state directory, including private review text and saved code. It also allows additional file inspection within those audits' pinned repositories and commits, using the server's GitHub credentials. Use a separate state directory and process for a different access boundary. An `auditRef` identifies evidence; it is not a credential or permission grant.
+The token grants access to all readable audits in that state directory, including private review text and saved code. It also allows file inspection at pinned commits and audit execution using the server's GitHub credentials. Audits can spend model credits, force reassessments and publish reviews or approvals with `apply: true`. Give the token only to clients you trust with those permissions. An `auditRef` identifies evidence; it is not a credential or permission grant.
 
 Saved evidence reads do not contact GitHub. Additional `read_github_file` calls and audit execution use the server's GitHub authentication through `GITHUB_TOKEN`, `GH_TOKEN` or the existing `gh` fallback. Incoming MCP credentials are never used as GitHub credentials.
 
-## Enable audit execution
+## Run an audit
 
-To let selected clients run audits, generate another secret and set `PRONTO_MCP_AUDIT_TOKEN` on the server. Add `--mcp-audit` to the serve command. Give this token only to clients you trust to use the server's GitHub account and model credentials.
-
-```sh
-# Inject PRONTO_WEBHOOK_SECRET, PRONTO_MCP_TOKEN and PRONTO_MCP_AUDIT_TOKEN first.
-pronto serve --mcp --mcp-audit --mcp-public-url https://audits.example.com/mcp
-```
-
-The execution token can read audits and call `run_audit`. It can spend model credits, force reassessments and, with `apply: true`, post GitHub reviews or approvals. The read-only token cannot discover or call `run_audit`, even when execution is enabled. Both tokens apply to the whole server, not individual PRs.
-
-`run_audit` accepts these arguments:
+Authenticated clients can call `run_audit` with these arguments:
 
 | Argument | CLI equivalent and default |
 | --- | --- |
@@ -111,7 +103,7 @@ The canonical source is [`skills/pronto-audit-discussion/SKILL.md`](skills/pront
 
 The official SDK supplies the mandatory metadata and matching HTTP headers. Hand-written clients must supply:
 
-- `Authorization: Bearer <PRONTO_MCP_TOKEN>` or the authorised audit token on every request
+- `Authorization: Bearer <PRONTO_MCP_TOKEN>` on every request
 - `Content-Type: application/json` and an Accept header permitting JSON
 - `MCP-Protocol-Version: 2026-07-28`
 - `Mcp-Method` matching the JSON-RPC method
@@ -147,11 +139,11 @@ Its `content` is a character slice of section JSON, not always a complete JSON v
 
 Read saved `code` excerpts before requesting more code. `read_github_file` accepts only a repository-relative path and `head` or `base`, never arbitrary URLs, repositories, SHAs or moving branches. It returns at most 300 numbered lines. If an excerpt exceeds its 100,000-byte output limit, request fewer lines. A single oversized line is unavailable rather than silently truncated. Additional reads are labelled as new inspection, not evidence the original auditor necessarily saw.
 
-## Read-only guarantees and limits
+## Read tools and audit execution
 
 The read-only tools open saved databases through the audit reader. They do not create a repository Harness, take the audit owner's lock, migrate databases, initialise model credentials, resume assessments or recover authorised publications. They can read while the audit writer owns a database. MCP creates no conversation history.
 
-The enclosing `serve` process owns audit execution and startup recovery, including previously authorised publications. Read-only MCP requests do not start audits. The optional `run_audit` tool uses the same server auditor as webhook work. Shutdown closes the endpoints and audit runtime.
+The enclosing `serve` process owns audit execution and startup recovery, including previously authorised publications. Read tool calls do not start audits. `run_audit` uses the same server auditor as webhook work. Shutdown closes the endpoint and audit runtime.
 
 There are no shell, local file or editing tools. Missing audits and evidence remain errors or explicit limitations.
 
@@ -163,4 +155,4 @@ Saved evidence does not establish current GitHub comments, thread resolution, ap
 
 Run `npm run check` and `npm test`. The MCP tests use real HTTP, the pinned modern SDK client and its native skill verifier. Audits come from the real CLI against simulated external endpoints.
 
-They cover complete paginated sources, pinned code, malformed protocol traffic, credentials, origins, Host validation, oversized bodies, independent clients, restart and snapshot replacement. They also request read-only MCP tools against committed assessment and publication checkpoints while the audit owner lock is held, and verify unchanged state and external request counts. Combined serve tests cover the separate audit credential, CLI options and defaults, publication safeguards, shared concurrency, cancellation and recovery. MCP stays unavailable without the flag.
+They cover complete paginated sources, pinned code, malformed protocol traffic, credentials, origins, Host validation, oversized bodies, independent clients, restart and snapshot replacement. They also request read-only MCP tools against committed assessment and publication checkpoints while the audit owner lock is held, and verify unchanged state and external request counts. Combined serve tests cover the single credential, CLI options and defaults, publication safeguards, shared concurrency, cancellation and recovery. MCP stays unavailable without the flag.

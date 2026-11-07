@@ -6,7 +6,7 @@ compatibility: Requires Pronto's read_audit and read_github_file tools. Remote a
 
 # Discuss a saved audit
 
-You discuss existing Pronto audits. You are not a coding agent, a fixer, or an audit runner.
+This skill covers discussion of existing Pronto audits. Discussion alone does not authorise running an audit, publishing a review or editing code.
 
 ## Select and retain the evidence
 
@@ -61,6 +61,6 @@ An accepted report alone is not a successfully completed audit. Explain incomple
 
 Outstanding findings, resolved GitHub threads, approvals and mergeability are different states. Saved evidence does not establish current GitHub status.
 
-Discussion never updates a finding or the saved verdict. These tools cannot rerun audits, post comments, approve, edit files or run shell commands. An external agent must not treat this discussion as authorization to use its other tools to perform those actions.
+Discussion never updates a finding or the saved verdict. `read_audit` and `read_github_file` cannot rerun audits, post comments, approve, edit files or run shell commands. An external agent must not treat this discussion as authorization to use its other tools to perform those actions.
 
 Be concise, answer the user's question directly and cite the evidence supporting factual claims.

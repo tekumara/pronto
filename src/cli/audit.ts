@@ -10,7 +10,7 @@ async function main() {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(AUDIT_CLI_USAGE);
     console.log("pronto serve [options] starts a webhook server that audits a PR when you are asked to review it; see pronto serve --help.");
-    console.log("pronto serve --mcp --mcp-public-url <https-url> exposes saved audit tools and the discussion skill to remote agents. Add --mcp-audit and a separate token to permit audit execution.");
+    console.log("pronto serve --mcp --mcp-public-url <https-url> exposes audit tools and the discussion skill to remote agents, including audit execution.");
     console.log("--pr <target> adds a PR to a concurrent batch. Repeat for multiple targets; flags and the optional model apply to every PR.");
     console.log("Without a target, selects the current branch's PR using local Git configuration and the GitHub API. Set GH_REPO=owner/repo to select a number or branch without a checkout. Explicit URLs and owner/repo#number targets need neither Git nor a checkout.");
     console.log("--skip <label> skips the audit if the PR has that label (case-insensitive). Repeat for multiple labels; any match skips, even with --force or --apply.");

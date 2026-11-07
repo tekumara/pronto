@@ -196,6 +196,9 @@ test("MCP requires authorization on every request and enforces the latest HTTP p
   const namedControl = await request(rpc("tools/call", { name: "read_audit", arguments: { prUrl } }));
   assert.equal(namedControl.status, 200);
   assert.equal(namedControl.body.result.isError, true, "valid named calls must reach the saved-audit reader");
+  const auditCall = rpc("tools/call", { name: "run_audit", arguments: { targets: [prUrl], apply: true } });
+  const deniedAudit = await request({ ...auditCall, headers: { ...auditCall.headers, Authorization: "Bearer invalid" } });
+  assert.equal(deniedAudit.status, 401, "an invalid credential must not invoke audit execution");
   const tests: { name: string; patch: { headers?: Record<string, string>; body?: string; method?: string; path?: string }; status: number; code?: number }[] = [
     { name: "missing credential", patch: { headers: { Authorization: "" } }, status: 401 },
     { name: "wrong credential after prior success", patch: { headers: { Authorization: "Bearer invalid" } }, status: 401 },
