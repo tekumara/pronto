@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Accepted } from "./webhook-queue.ts";
+import type { AuditMcpEndpoint } from "./mcp.ts";
 import { auditLabel, createServeLogger, type Log } from "./logging.ts";
 import { classifyDelivery, formatDeliveryContext, verifySignature } from "./webhook.ts";
 
@@ -17,6 +18,8 @@ export type WebhookServerOptions = {
   enqueue: (url: string, deliveryId?: string) => Promise<Accepted>;
   /** Application admission gate. Health stays live while standby or bootstrapping. */
   ready?: () => boolean;
+  /** Optional read-only MCP endpoint. This listener also owns its shutdown. */
+  mcp?: AuditMcpEndpoint;
   path?: string;
   maxBodyBytes?: number;
   log?: Log;
@@ -58,9 +61,10 @@ function send(res: ServerResponse, status: number, body?: object, headers: Recor
 }
 
 /** Receives GitHub deliveries. Waits for durable admission, not audit execution: GitHub gives up on a slow response. */
-export function createWebhookServer({ secret, login, enqueue, ready = () => true, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
+export function createWebhookServer({ secret, login, enqueue, ready = () => true, mcp, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
   if (!secret) throw new Error("A webhook secret is required.");
   if (!login) throw new Error("The reviewer login is required.");
+  if (mcp && [path, "/healthz", "/readyz"].includes(mcp.path)) throw new Error("The MCP path must differ from the webhook, health and readiness paths.");
   let stopping = false;
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -74,6 +78,7 @@ export function createWebhookServer({ secret, login, enqueue, ready = () => true
     const available = !stopping && ready();
     if (pathname === "/readyz" && (req.method === "GET" || req.method === "HEAD")) return send(res, available ? 200 : 503, { status: available ? "ready" : "unready" });
     if (!available) return send(res, 503, { status: "unready" });
+    if (mcp && pathname === mcp.path) return mcp.handle(req, res);
     if (pathname !== path) return send(res, 404, { error: "not found" });
     if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { Allow: "POST" });
     const body = await readBody(req, maxBodyBytes);
@@ -141,15 +146,16 @@ export function createWebhookServer({ secret, login, enqueue, ready = () => true
         });
       });
     },
-    /** Stops accepting connections and waits for requests in flight. */
-    close(): Promise<void> {
+    /** Stops accepting connections, closes MCP and waits for requests in flight. */
+    async close(): Promise<void> {
       stopping = true;
-      return new Promise((resolve) => {
+      const closed = new Promise<void>((resolve) => {
         const force = setTimeout(() => server.closeAllConnections(), 5_000);
         // Not listening yet reports an error, but there is nothing to wait for either way.
         server.close(() => { clearTimeout(force); resolve(); });
         server.closeIdleConnections();
       });
+      await Promise.all([closed, mcp?.close()]);
     },
   };
 }

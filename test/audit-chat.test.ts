@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -9,7 +8,7 @@ import { createSession, defineDoc, type ConversationId } from "@earendil-works/p
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readAudit } from "../audit-reader.ts";
 import { fixture, reply, tool } from "./fixtures.ts";
-import { prUrl, headSha, baseSha, commentUrl, githubEvidence, assessments } from "./audit-evidence.ts";
+import { prUrl, headSha, baseSha, commentUrl, githubEvidence, assessments, auditCheckpointHook } from "./audit-evidence.ts";
 
 const auditEntry = resolve("audit.ts");
 const repositoryPath = (stateDir: string) => join(stateDir, "repos/github.com/acme~demo.sqlite");
@@ -138,25 +137,7 @@ for (const crash of ["report", "publication"] as const) {
         reply(response, [{ role: "assistant", content: "I read the saved attempt without executing its pending work." }]);
       }
     }, { github: github.handle });
-    const hook = join(f.directory, "checkpoint.mjs");
-    await writeFile(hook, `
-import { DatabaseSync } from 'node:sqlite';
-import { readAudit } from ${JSON.stringify(pathToFileURL(resolve("audit-reader.ts")).href)};
-const exec = DatabaseSync.prototype.exec;
-DatabaseSync.prototype.exec = function(sql) {
-  const result = exec.call(this, sql);
-  if (sql.trim().toUpperCase() === 'COMMIT') {
-    try {
-      const saved = readAudit({prUrl: ${JSON.stringify(prUrl)}});
-      const stop = ${JSON.stringify(crash)} === 'report'
-        ? saved.audit.reportAccepted && saved.audit.status === 'incomplete'
-        : this.prepare('SELECT id FROM tasks WHERE kind = ? AND status = ? LIMIT 1').get(JSON.stringify('app.publish-audit-review'), 'pending');
-      if (stop) process.exit(79);
-    } catch {}
-  }
-  return result;
-};
-`);
+    const hook = await auditCheckpointHook(f.directory, crash);
     const first = f.start([prUrl, ...(crash === "publication" ? ["--apply"] : [])], { entrypoint: auditEntry, nodeArgs: ["--import", hook] });
     first.child.stdin.end();
     const interrupted = await first.done;

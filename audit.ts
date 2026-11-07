@@ -1,17 +1,16 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { runAudits } from "./auditor.ts";
-import { createModelRuntime } from "./model.ts";
 import { AUDIT_CLI_USAGE, parseAuditOptions } from "./audit-options.ts";
 import { resolveAuditUrl } from "./pr-discovery.ts";
-import { runServe } from "./serve-command.ts";
 
 async function main() {
   const args = process.argv.slice(2);
-  // A branch named serve is still selectable with --pr serve.
-  if (args[0] === "serve") return runServe(args.slice(1));
+  // Reserved command names remain selectable as branches with --pr <branch>.
+  if (args[0] === "serve") return (await import("./serve-command.ts")).runServe(args.slice(1));
+  if (args[0] === "mcp") throw new Error("Use pronto serve --mcp --mcp-public-url <https-url>; the standalone MCP command has been removed. See pronto serve --help.");
   if (args.includes("--help") || args.includes("-h")) {
     console.log(AUDIT_CLI_USAGE);
     console.log("pronto serve [options] starts a webhook server that audits a PR when you are asked to review it; see pronto serve --help.");
+    console.log("pronto serve --mcp --mcp-public-url <https-url> also exposes saved audit tools and the discussion skill to remote agents on the same listener.");
     console.log("--pr <target> adds a PR to a concurrent batch. Repeat for multiple targets; flags and the optional model apply to every PR.");
     console.log("Without a target, selects the current branch's PR using local Git configuration and the GitHub API. Set GH_REPO=owner/repo to select a number or branch without a checkout. Explicit URLs and owner/repo#number targets need neither Git nor a checkout.");
     console.log("--skip <label> skips the audit if the PR has that label (case-insensitive). Repeat for multiple labels; any match skips, even with --force or --apply.");
@@ -28,6 +27,8 @@ async function main() {
   const { selectors, requested, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");
   const cwd = process.cwd();
   const urls = await Promise.all(selectors.map((selector) => resolveAuditUrl(selector, cwd)));
+  const { createModelRuntime } = await import("./model.ts");
+  const { runAudits } = await import("./auditor.ts");
   const { models, model } = await createModelRuntime(cwd, requested);
   await runAudits(urls, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply });
 }

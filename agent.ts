@@ -1,7 +1,8 @@
 import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { WatchHandle } from "@earendil-works/chord";
-import { AuditDiscussion, auditChatInstructions } from "./audit-chat.ts";
+import { AuditDiscussion } from "./audit-chat.ts";
+import { auditChatInstructions } from "./audit-skill.ts";
 import { createModelRuntime } from "./model.ts";
 import { openStateHarness } from "./state.ts";
 import { AssistantEntry, ConversationTranscript, createRegistry, LiveDoc, ToolResultEntry, type ConversationView, type LiveState } from "@earendil-works/pi-durable";

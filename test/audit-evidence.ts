@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { noDatabaseMigration, type Request } from "./fixtures.ts";
 
 export const prUrl = "https://github.com/acme/demo/pull/7";
@@ -83,6 +86,30 @@ export function githubEvidence(options: { moved?: boolean; incompleteFiles?: boo
     }
   };
   return { handle, requests };
+}
+
+/** Interrupt the real CLI at a committed resumable-work boundary, not a fabricated pending receipt. */
+export async function auditCheckpointHook(directory: string, crash: "report" | "publication") {
+  const hook = join(directory, "checkpoint.mjs");
+  await writeFile(hook, `
+import { DatabaseSync } from 'node:sqlite';
+import { readAudit } from ${JSON.stringify(pathToFileURL(resolve("audit-reader.ts")).href)};
+const exec = DatabaseSync.prototype.exec;
+DatabaseSync.prototype.exec = function(sql) {
+  const result = exec.call(this, sql);
+  if (sql.trim().toUpperCase() === 'COMMIT') {
+    try {
+      const saved = readAudit({prUrl: ${JSON.stringify(prUrl)}});
+      const stop = ${JSON.stringify(crash)} === 'report'
+        ? saved.audit.reportAccepted && saved.audit.status === 'incomplete'
+        : this.prepare('SELECT id FROM tasks WHERE kind = ? AND status = ? LIMIT 1').get(JSON.stringify('app.publish-audit-review'), 'pending');
+      if (stop) process.exit(79);
+    } catch {}
+  }
+  return result;
+};
+`);
+  return hook;
 }
 
 export function evidenceInput(body: Request) {

@@ -6,18 +6,21 @@ test("serve defaults to a local server that only previews", () => {
   assert.deepEqual(parseServeOptions([]), {
     selectors: [], requested: undefined, skipLabels: [], skipDrafts: true, skipApproved: true, exclude: [], force: false,
     approve: false, allowUncertain: false, approveMigrations: false, apply: false,
-    port: 8080, host: "127.0.0.1", concurrency: 4, path: "/webhook", verbose: false, replicatedState: false,
+    port: 8080, host: "127.0.0.1", concurrency: 4, path: "/webhook", verbose: false, replicatedState: false, mcp: undefined,
   });
 });
 
 test("serve takes its own flags as separate or joined values", () => {
   for (const args of [
-    ["--port", "9000", "--host", "0.0.0.0", "--concurrency", "2", "--webhook-path", "/hooks/github"],
-    ["--port=9000", "--host=0.0.0.0", "--concurrency=2", "--webhook-path=/hooks/github"],
+    ["--port", "9000", "--host", "0.0.0.0", "--concurrency", "2", "--webhook-path", "/hooks/github",
+      "--mcp", "--mcp-public-url", "https://audits.example.test/rpc", "--mcp-allow-origin", "https://first.example.test", "--mcp-allow-origin", "https://second.example.test"],
+    ["--port=9000", "--host=0.0.0.0", "--concurrency=2", "--webhook-path=/hooks/github",
+      "--mcp", "--mcp-public-url=https://audits.example.test/rpc", "--mcp-allow-origin=https://first.example.test", "--mcp-allow-origin=https://second.example.test"],
   ]) {
     assert.deepEqual(
-      (({ port, host, concurrency, path }) => ({ port, host, concurrency, path }))(parseServeOptions(args)),
-      { port: 9000, host: "0.0.0.0", concurrency: 2, path: "/hooks/github" },
+      (({ port, host, concurrency, path, mcp }) => ({ port, host, concurrency, path, mcp }))(parseServeOptions(args)),
+      { port: 9000, host: "0.0.0.0", concurrency: 2, path: "/hooks/github",
+        mcp: { publicUrl: "https://audits.example.test/rpc", allowedOrigins: ["https://first.example.test", "https://second.example.test"] } },
     );
   }
   assert.equal(parseServeOptions(["--port", "0"]).port, 0, "0 picks a free port");

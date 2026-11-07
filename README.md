@@ -67,7 +67,7 @@ The goal is less time chasing review feedback and waiting for another review rou
 
 ## Discuss a saved audit
 
-Run `make chat` to ask why an existing audit is outstanding, what the author said, or whether its evidence supports the reasoning. Follow-up questions keep the selected audit. The chat is read-only: it cannot rerun audits, change findings or post reviews. See [audit discussion chat](GUIDE.md#optional-audit-discussion-chat) for setup and examples.
+External agents can read saved audits and use the discussion skill through an authenticated endpoint available via MCP. The agent supplies its own model and retains the selected audit reference. See [remote audit discussion setup](MCP.md) for HTTPS, credentials and a runnable client.
 
 ## Technical guide
 

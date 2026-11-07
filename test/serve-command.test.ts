@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { SkillsClient } from "@modelcontextprotocol/client/ext/skills";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { test } from "node:test";
@@ -88,7 +91,10 @@ for (const verbose of [false, true]) {
         await gh.handler(request, response);
       },
     });
-    const run = f.start(["serve", "--port", "0", "--apply", ...(verbose ? ["--verbose"] : [])], { env });
+    const mcpToken = randomBytes(32).toString("hex");
+    const run = f.start(["serve", "--port", "0", "--apply", ...(verbose ? ["--verbose", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"] : [])], {
+      env: { ...env, PRONTO_MCP_TOKEN: mcpToken },
+    });
     const out = watchOutput(run.child);
     const errors = watchOutput(run.child, "stderr");
     const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
@@ -124,6 +130,37 @@ for (const verbose of [false, true]) {
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Already submitted · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · US\$0(?:\n|$)/);
     assert.equal(gh.reviews.length, 1);
     assert.equal(modelCalls, 1);
+    if (verbose) {
+      const reads = gh.requests.length;
+      const client = new Client({ name: "combined-serve-client", version: "1" }, {
+        versionNegotiation: { mode: { pin: "2026-07-28" } }, supportedProtocolVersions: ["2026-07-28"],
+      });
+      t.after(() => client.close());
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${mcpToken}` } },
+      }));
+      const skills = new SkillsClient(client);
+      const entry = (await skills.list()).skills.find((entry) => entry.frontmatter.name === "pronto-audit-discussion");
+      assert.ok(entry);
+      assert.equal((await skills.read(entry)).verified, true);
+      const saved = await client.callTool({ name: "read_audit", arguments: { prUrl } });
+      assert.ok(!saved.isError, JSON.stringify(saved));
+      const page = saved.structuredContent as { audit: { prUrl: string; headSha: string; status: string }; content: string };
+      assert.equal(page.audit.prUrl, prUrl);
+      assert.equal(page.audit.headSha, headSha);
+      assert.equal(page.audit.status, "completed");
+      assert.deepEqual(JSON.parse(page.content).findings, []);
+      assert.equal(gh.requests.length, reads, "MCP discovery and saved reads must not fetch GitHub or enter the audit lifecycle");
+      assert.equal(modelCalls, 1, "sharing the listener must not start another assessment");
+      assert.equal((await deliver(base, "{}", { event: "ping", path: "/mcp" })).status, 401, "a valid webhook signature is not an MCP credential");
+      const bearerOnly = await fetch(`${base}/webhook`, { method: "POST", headers: { Authorization: `Bearer ${mcpToken}` }, body: "{}" });
+      assert.equal(bearerOnly.status, 401, "MCP credentials must not authorise webhook admission");
+      assert.equal((await deliver(base, "{}", { event: "ping" })).status, 200, "signed webhooks still work on the same port");
+      await client.close();
+    } else {
+      assert.equal((await fetch(`${base}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${mcpToken}` }, body: "{}" })).status, 404,
+        "configuring a token must not expose MCP without --mcp");
+    }
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Queued · mentioned in a pull request comment · requester=maintainer/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+(Queued|Re-run queued) · review requested · requester=alice/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Started · 0 comments/);
@@ -517,4 +554,44 @@ test("serve prints its usage without a secret or token", { timeout: 20_000 }, as
   assert.match(output, /--concurrency <n>.*default: 4/);
   assert.match(output, /--verbose includes ignored deliveries/);
   assert.match(output, /--force and --pr are not supported/);
+  assert.match(output, /--mcp exposes read-only.*same HTTP listener/);
+  assert.match(output, /PRONTO_MCP_TOKEN and --mcp-public-url/);
+  const obsolete = await f.start(["mcp"], { env: { PRONTO_WEBHOOK_SECRET: "" } }).done;
+  assert.equal(obsolete.code, 1);
+  assert.match(obsolete.stderr, /Use pronto serve --mcp --mcp-public-url/);
+});
+
+test("serve rejects unsafe MCP configuration before credentials, recovery or listening", { timeout: 20_000 }, async (t) => {
+  const gh = github();
+  const f = await fixture(t, () => assert.fail("Invalid MCP configuration must not call a model"), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const bearer = randomBytes(32).toString("hex");
+  const url = "https://audits.example.test/mcp";
+  const cases = [
+    { args: [], bearer, error: /--mcp requires --mcp-public-url/ },
+    { args: ["--mcp-public-url", url], bearer: "", error: /PRONTO_MCP_TOKEN/ },
+    { args: ["--mcp-public-url", url], bearer: "short", error: /at least 32 characters/ },
+    { args: ["--mcp-public-url", url], bearer, webhook: bearer, error: /must differ from PRONTO_WEBHOOK_SECRET/ },
+    { args: ["--mcp-public-url", "http://audits.example.test/mcp"], bearer, error: /HTTPS/ },
+    { args: ["--mcp-public-url", "https://audits.example.test/webhook"], bearer, error: /path must differ/ },
+    { args: ["--mcp-public-url", "https://audits.example.test/healthz"], bearer, error: /path must differ/ },
+    { args: ["--mcp-public-url", "https://audits.example.test/readyz"], bearer, error: /path must differ/ },
+    { args: ["--mcp-public-url", url, "--webhook-path", "/mcp"], bearer, error: /path must differ/ },
+    { args: ["--mcp-public-url", url, "--mcp-allow-origin", "https://agents.example.test/path"], bearer, error: /HTTPS origin/ },
+    { args: ["--mcp-public-url", url, "--replicated-state"], bearer, error: /not yet supported with --replicated-state/ },
+    { args: ["--mcp-public-url", url, "--mcp"], bearer, error: /--mcp can be supplied only once/ },
+    { args: ["--mcp-public-url", url, "--stdio"], bearer, error: /Unknown audit option/ },
+  ];
+  for (const check of cases) {
+    const result = await f.start(["serve", "--mcp", ...check.args], { env: {
+      ...env, PRONTO_WEBHOOK_SECRET: check.webhook ?? webhookSecret, PRONTO_MCP_TOKEN: check.bearer, PI_CODING_AGENT_DIR: `${f.directory}/no-model-login`,
+    } }).done;
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, check.error);
+    assert.doesNotMatch(result.stdout, /Listening/);
+    assert.ok(!result.stderr.includes(bearer), "configuration errors must not expose the token");
+  }
+  const notEnabled = await f.start(["serve", "--mcp-public-url", url], { env }).done;
+  assert.equal(notEnabled.code, 1);
+  assert.match(notEnabled.stderr, /MCP options require --mcp/);
+  assert.deepEqual(gh.requests, [], "no credentials should reach GitHub before MCP configuration is valid");
 });

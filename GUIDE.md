@@ -6,7 +6,7 @@ Check whether human and bot review findings on a GitHub pull request have been a
 
 Audits are read-only by default. When you provide a PR URL, you do not need a local checkout. Pi Durable saves the evidence and assessment in SQLite, resumes interrupted audits and reuses assessments when the evidence is unchanged. Add `--apply` to post the verdict as a PR review comment; add `--approve` as well to make that review an approval when the verdict allows it. Without `--apply`, Pronto previews the comment and any selected approval.
 
-Use the [optional audit discussion chat](#optional-audit-discussion-chat) to ask about existing findings, author replies and evidence.
+Use the [optional audit discussion chat](#optional-audit-discussion-chat) to ask about existing findings, author replies and evidence. To discuss them from another agent, expose the same tools and skill through [the authenticated MCP endpoint](MCP.md).
 
 ## Quick start
 
@@ -178,6 +178,8 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 `--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup and apply to every audit, as described in the [quick start](#quick-start). Without `--apply`, the server only logs previews.
 
 `--replicated-state` enables experimental term-isolated S3 state. It defaults to off; ordinary serve, audits and chat do not need replica configuration or start replication. See [replicated state setup, RustFS tests and safety limits](REPLICATED_STATE.md) before enabling it. `GET /readyz` reports admission readiness separately from `/healthz` liveness. An unready replicated process returns 503 for application requests, without forwarding them.
+
+`--mcp --mcp-public-url <https-url>` adds the read-only MCP endpoint to this listener. It requires a separate `PRONTO_MCP_TOKEN`; webhook signatures and MCP bearer auth are independent. MCP is disabled by default. See [remote audit discussion setup](MCP.md) for TLS, state access and client requirements. It cannot yet be combined with `--replicated-state`.
 
 `--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
 
@@ -644,7 +646,7 @@ The model has 2 tools:
 | `read_audit` | Saved summary, findings with their original sources, discussion, patches, original instructions and successful code excerpts |
 | `read_github_file` | Additional numbered code lines at the selected audit's pinned head or base commit, with citable URLs |
 
-`read_audit` initially selects the latest saved attempt for a PR. Its default `auditId=0` keeps an existing selection. A positive `auditId` selects that particular attempt; `latest=true` explicitly switches to the latest. Sections use character offsets and return at most 16,000 characters per call, with `nextOffset` for continuation. Long replies are not silently dropped.
+`read_audit` initially selects the latest saved attempt for a PR. Its default `auditId=0` keeps an existing selection. A positive `auditId` selects that particular attempt; `latest=true` explicitly switches to the latest. Sections use character offsets and return at most 16,000 characters per call, with `nextOffset` for continuation. Long replies are not silently dropped. Both tools also accept the explicit `auditRef` returned by `read_audit`; remote MCP clients must retain and pass it because connections have no remembered selection.
 
 Audit retrieval uses a separate read-only SQLite connection. It can read while a CLI or server process owns the repository database. It cannot resume assessments, recover pending publications, migrate databases or create an audit when none exists.
 
@@ -660,6 +662,12 @@ Ctrl+C or SIGTERM saves unfinished discussion for restart. The next launch resum
 
 Pronto rejects a second chat process for the same working directory and state directory. To start a fresh discussion, stop the chat and move or delete its chat database and SQLite sidecars (`-wal` and `-shm`). Keep the repository databases to retain audits. Chat history contains your questions and retrieved evidence, so keep it private.
 
+### Use another agent over MCP
+
+`pronto serve --mcp --mcp-public-url https://audits.example.com/mcp` exposes the same retrieval tools and canonical discussion skill on the webhook listener. It adds no model runtime or conversation store. The process keeps its usual serve credentials and startup recovery. MCP requires a separate `PRONTO_MCP_TOKEN` and supports MCP `2026-07-28` only. Terminate HTTPS at a reverse proxy and keep the HTTP listener private. MCP is disabled without the flag and cannot yet be combined with experimental replicated state.
+
+See [MCP setup and client requirements](MCP.md), including Caddy configuration, native skill loading and a runnable latest-SDK client. The token shares readable audits in the configured state directory; it is not a per-PR permission. The external agent owns its conversation history and selected audit reference.
+
 ## Development checks
 
 ```sh
@@ -672,6 +680,8 @@ The tests use temporary state directories, simulated model providers and local G
 Audit tests cover source-backed CLI installation, evidence pagination, pinned fork code, report validation, citations, previews, approval safeguards, publication recovery, caching and concurrent batches. Serve tests cover verified webhook admission, queueing, process recovery and duplicate prevention.
 
 Chat tests exercise real audit-reading tools against assessments created by the CLI. They cover original replies and code citations, bounded long-source retrieval, selected attempts across restarts and newer audits, missing evidence, blocked coding tools, and read-only inspection of interrupted assessments and pending publications while a writer owns the database. Storage tests cover path selection, private permissions, process locks and separate discussion history.
+
+MCP tests exercise the latest SDK client and native skill verification over real HTTP. They cover authentication and protocol rejection, origin and Host validation, body limits, explicit references across clients and restarts, and inspection of interrupted assessments and pending publications without recovery or writes. Combined serve tests verify MCP on the webhook port, separate authentication and unchanged audit behaviour.
 
 Supplied model responses test retrieval, rendering, validation and action rules. They do not prove that a real model judges every explanation correctly.
 

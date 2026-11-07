@@ -1,0 +1,14 @@
+# Replace this hostname with one you control and point its DNS at the proxy.
+# Caddy obtains and renews public TLS certificates. Keep Pronto's HTTP port private.
+audits.example.com {
+	handle /mcp {
+		header Cache-Control "no-store"
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /webhook {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		respond 404
+	}
+}
