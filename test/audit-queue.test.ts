@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { setImmediate as tick } from "node:timers/promises";
 import { test } from "node:test";
-import { createAuditQueue } from "../audit-queue.ts";
+import { createAuditQueue } from "../src/server/audit-queue.ts";
 
 const pr = (number: number, repo = "repo") => `https://github.com/owner/${repo}/pull/${number}`;
 

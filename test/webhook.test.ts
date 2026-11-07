@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { classifyDelivery, verifySignature } from "../webhook.ts";
+import { classifyDelivery, verifySignature } from "../src/server/webhook.ts";
 
 const secret = "It's a Secret to Everybody";
 const sign = (body: string | Uint8Array, key = secret) => `sha256=${createHmac("sha256", key).update(body).digest("hex")}`;

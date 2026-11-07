@@ -8,7 +8,7 @@
     "skipLibCheck": true
   },
   "include": [
-    "*.ts",
+    "src/**/*.ts",
     "test/**/*.ts"
   ]
 }

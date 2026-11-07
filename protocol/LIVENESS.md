@@ -157,10 +157,10 @@ An expected counterexample is not a safety or liveness pass for that configurati
 
 | Model boundary | Production owner |
 | --- | --- |
-| acquisition through ready promotion | `primary-runtime.ts:attempt`, `serialize`, `mutate` |
+| acquisition through ready promotion | `src/replication/primary-runtime.ts:attempt`, `serialize`, `mutate` |
 | fixed recovery and independent baseline | `S3Control.inventory`, `Litestream.restore`, `sync`, `flush` |
-| accepted-work recovery and worker barrier | `createWebhookQueue.recover`, `Work.dispatch`, `auditor.ts:resume`, `beforeDispatch` |
-| attempt marker then remote confirmation | `publication.ts:publicationTask`, `beforePublish`, `primary-runtime.ts:confirm` |
+| accepted-work recovery and worker barrier | `createWebhookQueue.recover`, `Work.dispatch`, `src/audit/auditor.ts:resume`, `beforeDispatch` |
+| attempt marker then remote confirmation | `src/audit/publication.ts:publicationTask`, `beforePublish`, `src/replication/primary-runtime.ts:confirm` |
 | terminal failed publication | `publicationTask` catch branch: saved `failed=true`, terminal failed outcome |
 | external retry | `enqueuePublication`, startup `recoverPublications`; not a timer |
 

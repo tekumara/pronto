@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 MODEL = HERE / "LeaseElection.qnt"
 OUT = Path(tempfile.mkdtemp(prefix="pronto-quint-"))
-INPUTS = [*sorted(HERE.glob("*.*")), ROOT / "mise.toml", ROOT / "primary-runtime.ts",
-          ROOT / "s3-control.ts", ROOT / "litestream.ts",
+INPUTS = [*sorted(HERE.glob("*.*")), ROOT / "mise.toml", ROOT / "src/replication/primary-runtime.ts",
+          ROOT / "src/replication/s3-control.ts", ROOT / "src/replication/litestream.ts",
           ROOT / "test/integration/controlled-clock.mjs", ROOT / "test/integration/replicated.test.ts"]
 
 

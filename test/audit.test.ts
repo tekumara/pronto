@@ -23,7 +23,7 @@ for (const { name, metadata, flags = [] as string[], reason, approved = false, o
     const requests: string[] = [];
     const posted: { event: string; commit_id: string; body: string }[] = [];
     const f = await fixture(t, () => assert.fail("Skipped PRs must not reach the model"), {
-      entrypoint: resolve("audit.ts"),
+      entrypoint: resolve("src/cli/audit.ts"),
       github: async (request, response) => {
         const path = request.url!.split("?")[0];
         requests.push(`${request.method} ${path}`);
@@ -78,7 +78,7 @@ for (const { name, metadata, flags = [] as string[], reason, approved = false, o
 test("CLI audit does not skip a PR changing exactly 10000 lines", { timeout: 20000 }, async (t) => {
   const requests: string[] = [];
   const f = await fixture(t, () => assert.fail("The audit stops at the first failed evidence request"), {
-    entrypoint: resolve("audit.ts"),
+    entrypoint: resolve("src/cli/audit.ts"),
     github: (request, response) => {
       requests.push(request.url!);
       const path = request.url!.split("?")[0];
@@ -112,7 +112,7 @@ function auditModel(evidence: { files: { path: string; patch: string | null; exc
 
 test("--exclude still skips a PR that stays over 10000 lines, and reports the excluded files", { timeout: 20000 }, async (t) => {
   const github = githubEvidence({ large: true });
-  const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), { entrypoint: resolve("audit.ts"), github: github.handle });
+  const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const output = await f.run("", [prUrl, "--exclude", "src/access.ts", "--exclude=docs"]);
   assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR changes 34850 lines after excluding 150 lines, more than the 10000 line limit.`));
   assert.ok(output.includes("[audit] Excluded 1 changed file (--exclude):\n[audit]   - src/access.ts\n"));
@@ -122,7 +122,7 @@ test("--exclude still skips a PR that stays over 10000 lines, and reports the ex
 
 test("--exclude does not subtract an excluded file that GitHub returned without line counts", { timeout: 20000 }, async (t) => {
   const github = githubEvidence({ large: true, uncountedOther: true });
-  const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), { entrypoint: resolve("audit.ts"), github: github.handle });
+  const f = await fixture(t, () => assert.fail("Oversized PRs must not reach the model"), { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const output = await f.run("", [prUrl, "--exclude", "src/other.ts"]);
   assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR changes 35000 lines, more than the 10000 line limit.`));
   assert.ok(output.includes("[audit] GitHub gave no line counts for 1 excluded file, so it still counts toward the limit.\n"));
@@ -133,7 +133,7 @@ test("--exclude does not subtract an excluded file that GitHub returned without 
 test("--exclude brings an oversized PR under the limit and withholds the excluded patches from the audit", { timeout: 20000 }, async (t) => {
   const github = githubEvidence({ large: true });
   const evidence: Parameters<typeof auditModel>[0] = [];
-  const f = await fixture(t, auditModel(evidence), { entrypoint: resolve("audit.ts"), github: github.handle });
+  const f = await fixture(t, auditModel(evidence), { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   // 35000 changed lines in total, 34850 of them in src/other.ts.
   const output = await f.run("", [prUrl, "--exclude", "src/other.ts"]);
   assert.doesNotMatch(output, /Skipping/);
@@ -148,7 +148,7 @@ test("--exclude brings an oversized PR under the limit and withholds the exclude
 test("--exclude reports patterns that match nothing, and exclusions change cache identity", { timeout: 30000 }, async (t) => {
   const github = githubEvidence();
   const evidence: Parameters<typeof auditModel>[0] = [];
-  const f = await fixture(t, auditModel(evidence), { entrypoint: resolve("audit.ts"), github: github.handle });
+  const f = await fixture(t, auditModel(evidence), { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const unmatched = await f.run("", [prUrl, "--exclude", "nothing/**"]);
   assert.ok(unmatched.includes("[audit] --exclude matched no changed files."));
   assert.doesNotMatch(unmatched, /excluded from review/);
@@ -216,7 +216,7 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
         break;
       default: assert.fail("Unexpected model turn");
     }
-  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const output = await f.run("", [prUrl]);
   assert.match(rejection, /Missing assessments: review:302/);
   assert.match(rejection, new RegExp(`Missing awaiting for inline:${accessId}`));
@@ -296,7 +296,7 @@ test("file citations accept inspected subranges but reject unread lines and alte
     for (const assessment of report.assessments) for (const finding of assessment.findings) finding.evidence = [prUrl];
     report.assessments[0]!.findings[0]!.evidence = rejectedCount < rejected.length ? [rejected[rejectedCount++]!] : accepted;
     tool(response, "report_review_assessment", report);
-  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const output = await f.run("", [prUrl]);
   assert.equal(rejectedCount, rejected.length);
   assert.match(output, /Verdict:/);
@@ -333,7 +333,7 @@ test("incomplete audits log the latest saved assessment rejection after recovery
       default:
         return reply(response, [{ role: "assistant", content: "PRIVATE-FINAL-ANSWER" }]);
     }
-  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const interrupted = f.start([prUrl]);
   interrupted.child.stdin.end();
   await waitingForAnswer.promise;
@@ -362,7 +362,7 @@ test("audit logs connection causes and retry context before a successful recover
       for (const assessment of report.assessments) for (const finding of assessment.findings) finding.evidence = [prUrl];
       tool(response, "report_review_assessment", report);
     }
-  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const { child, done } = f.start([prUrl]);
   child.stdin.end();
   const result = await done;
@@ -386,7 +386,7 @@ test("audit logs HTTP failure metadata and retains the final model error", { tim
       "Set-Cookie": "private-cookie=secret",
     }).end(JSON.stringify({ error: { message: "Invalid credentials. Authorization: Bearer test-key; rejected credential test-key. "
       + "See https://user:password@models.example.test/v1?token=private-query\u001b " + "x".repeat(6_000) + " END-OF-MODEL-BODY" } }));
-  }, { entrypoint: resolve("audit.ts"), github: github.handle });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handle });
   const { child, done } = f.start([prUrl]);
   child.stdin.end();
   const result = await done;
@@ -440,7 +440,7 @@ for (const { name, path, method, status, body, headers, details, omitted } of [
     const github = githubEvidence();
     let failures = 0;
     const f = await fixture(t, () => assert.fail("Failed evidence fetching must not contact the model"), {
-      entrypoint: resolve("audit.ts"),
+      entrypoint: resolve("src/cli/audit.ts"),
       github: (request, response) => {
         if (request.url !== path) return github.handle(request, response);
         failures++;
@@ -467,7 +467,7 @@ for (const failure of ["moved", "incompleteFiles"] as const) {
   test(`audit refuses ${failure} evidence before contacting the model`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence({ [failure]: true });
     const f = await fixture(t, () => assert.fail("Model must not receive inconsistent evidence"), {
-      entrypoint: resolve("audit.ts"), github: github.handle,
+      entrypoint: resolve("src/cli/audit.ts"), github: github.handle,
     });
     const { child, done } = f.start([prUrl]);
     child.stdin.end();
@@ -513,7 +513,7 @@ test("restart checks live merge status, draft status and skip labels but preserv
         break;
       default: assert.fail("Unexpected model turn");
     }
-  }, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: async (request, response) => {
     const json = (value: unknown) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(value));
     if (request.url === "/github/user") { json({ login: "auditor" }); return; }
     if (request.method === "POST" && request.url === "/github/repos/acme/demo/pulls/7/reviews") {

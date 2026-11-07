@@ -1,5 +1,5 @@
 import { parseAuditOptions, SERVE_USAGE } from "./audit-options.ts";
-import { DEFAULT_WEBHOOK_PATH } from "./serve.ts";
+import { DEFAULT_WEBHOOK_PATH } from "../server/serve.ts";
 
 export const DEFAULT_PORT = 8080;
 export const DEFAULT_HOST = "127.0.0.1";

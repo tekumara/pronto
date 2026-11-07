@@ -93,7 +93,7 @@ export async function auditCheckpointHook(directory: string, crash: "report" | "
   const hook = join(directory, "checkpoint.mjs");
   await writeFile(hook, `
 import { DatabaseSync } from 'node:sqlite';
-import { readAudit } from ${JSON.stringify(pathToFileURL(resolve("audit-reader.ts")).href)};
+import { readAudit } from ${JSON.stringify(pathToFileURL(resolve("src/discussion/audit-reader.ts")).href)};
 const exec = DatabaseSync.prototype.exec;
 DatabaseSync.prototype.exec = function(sql) {
   const result = exec.call(this, sql);

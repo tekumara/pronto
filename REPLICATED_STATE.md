@@ -20,7 +20,7 @@ export PRONTO_LITESTREAM_BIN=/absolute/path/to/litestream
 # Supply AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY through your environment.
 # Supply AWS_SESSION_TOKEN too when using temporary credentials.
 # Supply the usual GitHub token, model credentials and PRONTO_WEBHOOK_SECRET.
-node --experimental-strip-types audit.ts serve --replicated-state --port 8080
+node --experimental-strip-types src/cli/audit.ts serve --replicated-state --port 8080
 ```
 
 Do not commit the local state directory, credentials or generated Litestream logs. Omit `--apply` to preview new verdicts. Previously authorised publications still recover, as they do in local mode.

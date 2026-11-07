@@ -5,8 +5,8 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import type { Log } from "./logging.ts";
-import { repositoryDatabasePath } from "./state.ts";
+import type { Log } from "../logging.ts";
+import { repositoryDatabasePath } from "../state.ts";
 import { replicaURL, type ReplicaConfig, type RestorePoint } from "./s3-control.ts";
 
 const exec = promisify(execFile);

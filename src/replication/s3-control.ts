@@ -1,6 +1,6 @@
 import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { isAbsolute } from "node:path";
-import { stateDirectory, repositoryDatabasePath } from "./state.ts";
+import { stateDirectory, repositoryDatabasePath } from "../state.ts";
 
 export type ReplicaConfig = {
   bucket: string; prefix: string; region: string; endpoint?: string; pathStyle: boolean;

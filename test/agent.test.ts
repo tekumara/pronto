@@ -163,7 +163,7 @@ test("chat retrieves original findings, replies, rubric and pinned code through 
       default: assert.fail("Unexpected model turn");
     }
   }, { github: github.handle });
-  await f.run("", [prUrl], { entrypoint: resolve("audit.ts") });
+  await f.run("", [prUrl], { entrypoint: resolve("src/cli/audit.ts") });
   building = false;
   const savedPath = join(f.stateDir, "repos/github.com/acme~demo.sqlite");
   const original = await readFile(savedPath);

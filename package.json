@@ -8,11 +8,11 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "pronto": "audit.ts"
+    "pronto": "src/cli/audit.ts"
   },
   "scripts": {
-    "start": "node --experimental-strip-types agent.ts",
-    "audit": "node --experimental-strip-types audit.ts",
+    "start": "node --experimental-strip-types src/cli/agent.ts",
+    "audit": "node --experimental-strip-types src/cli/audit.ts",
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "test:replicated": "node test/integration/run-rustfs.mjs",

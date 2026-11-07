@@ -43,7 +43,7 @@ async function selectionFixture(t: TestContext, labels: string[] = [], reviews: 
   return fixture(t, (_body, response) => {
     tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] });
   }, {
-    entrypoint: resolve("audit.ts"),
+    entrypoint: resolve("src/cli/audit.ts"),
     github: async (request, response) => {
       assert.equal(request.method, request.url === "/github/graphql" ? "POST" : "GET");
       const path = request.url!.split("?")[0];
@@ -266,7 +266,7 @@ for (const { name, args, message } of [
 ]) {
   test(`CLI stops before model or audit storage for ${name}`, { timeout: 20_000 }, async (t) => {
     const f = await fixture(t, () => assert.fail("Selection failures must not reach the model"), {
-      entrypoint: resolve("audit.ts"),
+      entrypoint: resolve("src/cli/audit.ts"),
       github: () => assert.fail("Selection failures must not fetch audit evidence"),
     });
     const { child, done } = f.start(args, { env: { PATH: f.cwd } });

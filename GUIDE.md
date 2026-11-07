@@ -95,7 +95,7 @@ The auditor uses your saved Pi default model, or the first available model if th
 pronto https://github.com/owner/repo/pull/42 provider/model-id
 ```
 
-Without `--pr`, a single positional argument is always a PR target, so branch names such as `feature/my-change` are not mistaken for models. Use a provider and model listed by Pi's `/model` command. The one-shot CLI is in [`audit.ts`](audit.ts).
+Without `--pr`, a single positional argument is always a PR target, so branch names such as `feature/my-change` are not mistaken for models. Use a provider and model listed by Pi's `/model` command. The one-shot CLI is in [`src/cli/audit.ts`](src/cli/audit.ts).
 
 ## Concurrent audit batches
 
@@ -125,11 +125,11 @@ Separate CLI processes cannot share a repository database concurrently. Use one 
 
 ### Embed concurrent audits
 
-The shared module in [`auditor.ts`](auditor.ts) accepts concurrent requests and keeps repository harnesses open until you close it:
+The shared module in [`src/audit/auditor.ts`](src/audit/auditor.ts) accepts concurrent requests and keeps repository harnesses open until you close it:
 
 ```typescript
-import { createAuditor } from "./auditor.ts";
-import { createModelRuntime } from "./model.ts";
+import { createAuditor } from "./src/audit/auditor.ts";
+import { createModelRuntime } from "./src/model.ts";
 
 const { models, model } = await createModelRuntime(process.cwd());
 const auditor = createAuditor(models);
@@ -549,7 +549,7 @@ Use `--force` after a temporary evidence-access failure, when revisiting a time-
 
 Cache pointers, fingerprints and recheck receipts live in Durable storage. Each assessment has a durable controller task that submits the saved evidence and publishes its result. Controller completion and cache publication share one transaction. They do not depend on the original caller still waiting. If the process dies before printing a completed report, the next invocation can reuse it after checking the evidence. Terminal output is not exactly-once delivery.
 
-Each PR has its own controller document in the repository database. Old per-PR databases in `audits/` remain untouched and are not imported. Their history, caches and unfinished audits do not participate in the new storage model. If an unfinished audit resumes under a changed assessment policy, it can finish but cannot publish a mixed-policy cache entry. A successful but uncacheable assessment clears the cache slot rather than falling back to an older success. When changing tool behaviour, validation rules or dependency defaults, bump `AUDITOR_VERSION` in `auditor.ts`. Prompt and tool-schema changes invalidate the cache automatically.
+Each PR has its own controller document in the repository database. Old per-PR databases in `audits/` remain untouched and are not imported. Their history, caches and unfinished audits do not participate in the new storage model. If an unfinished audit resumes under a changed assessment policy, it can finish but cannot publish a mixed-policy cache entry. A successful but uncacheable assessment clears the cache slot rather than falling back to an older success. When changing tool behaviour, validation rules or dependency defaults, bump `AUDITOR_VERSION` in `src/audit/auditor.ts`. Prompt and tool-schema changes invalidate the cache automatically.
 
 Within one shared auditor, Pronto rejects overlapping requests for the same PR but permits requests for other PRs. Across processes, the entire repository database has one owner.
 
@@ -605,7 +605,7 @@ Earlier hash-named repository databases in the root of `repos/`, old per-PR data
 
 ## Optional audit discussion chat
 
-The plain terminal chat in [`agent.ts`](agent.ts) discusses existing Pronto audits. It does not run audits or change their verdicts.
+The plain terminal chat in [`src/cli/agent.ts`](src/cli/agent.ts) discusses existing Pronto audits. It does not run audits or change their verdicts.
 
 Start it after installing dependencies and logging in to Pi:
 

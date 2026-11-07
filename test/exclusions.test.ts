@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compileExclusions } from "../exclusions.ts";
+import { compileExclusions } from "../src/audit/exclusions.ts";
 
 for (const [patterns, path, excluded] of [
   [["package-lock.json"], "package-lock.json", true],

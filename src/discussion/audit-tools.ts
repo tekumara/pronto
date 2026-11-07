@@ -1,6 +1,6 @@
 import { bool, compile, int, obj, oneOf, opt, str, type Static } from "@earendil-works/pi-schema";
 import { readAudit, type AuditSelection } from "./audit-reader.ts";
-import { parseReviewTarget, readGithubFile } from "./reviews.ts";
+import { parseReviewTarget, readGithubFile } from "../github/reviews.ts";
 
 const referencePrefix = "audit.v1:";
 const referenceValue = compile(obj({

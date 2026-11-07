@@ -144,7 +144,7 @@ for (const cached of [false, true]) {
     const f = await fixture(t, (body, response) => {
       calls++;
       assess(body, response, ["uncertain"], { status: "migration", reason: "This changes database data." });
-    }, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: async (request, response) => {
       // The durable publisher may start before report printing. Hold preflight so the
       // kill point is unambiguously before POST, not an ambiguous accepted response.
       if (interrupting && request.url === "/github/user") return;
@@ -191,7 +191,7 @@ for (const { revision, cached, status, event, crash, alreadyApproved } of [
       assess(body, response, [snapshots.length === 1 ? "uncertain" : status], {
         status: "migration", reason: "This changes database data.",
       });
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     if (cached) await f.run("", [url]);
     const flags = ["--apply", "--approve", "--allow-uncertain", "--approve-migrations"];
     const failed = f.start([url, ...flags]);
@@ -263,7 +263,7 @@ test("skip reviews deduplicate by head and reason and stay out of later audit ev
     const input = body.messages.findLast((message) => message.role === "user")!.content!;
     assert.doesNotMatch(input, /Review audit · Skipped/);
     assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
 
   await f.run("", [url, "--apply", "--approve"]);
   assert.equal(github.posted.length, 1);
@@ -295,7 +295,7 @@ test("a skip publication survives a crash without an assessment and recovers wit
   const publishing = Promise.withResolvers<void>();
   let interrupting = true;
   const f = await fixture(t, () => assert.fail("Skip publication must not run the model"), {
-    entrypoint: resolve("audit.ts"),
+    entrypoint: resolve("src/cli/audit.ts"),
     github: async (request, response) => {
       if (interrupting && request.url === "/github/user") { publishing.resolve(); return; }
       await github.handler(request, response);
@@ -324,7 +324,7 @@ for (const status of ["addressed", "uncertain"] as const) {
     const f = await fixture(t, (body, response) => {
       calls++;
       assess(body, response, [status]);
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const verdict = status === "addressed" ? /Verdict: All actionable findings appear addressed/ : /Verdict: Not all actionable findings are addressed/;
     const commentHeadline = status === "addressed" ? /## Review audit · All actionable findings addressed/ : /## Review audit · Verification needed/;
     const output = await f.run("", [url]);
@@ -408,7 +408,7 @@ test("--apply skips duplicate verdict reviews using local history across directo
   const f = await fixture(t, (body, response) => {
     calls++;
     assess(body, response, [status]);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
 
   const preview = await f.run("", [url]);
   assert.match(preview, /Comment would be posted/);
@@ -467,7 +467,7 @@ test("local approval history is not reconciled with GitHub dismissals, change re
   const f = await fixture(t, (body, response) => {
     calls++;
     assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
   const args = [url, "--skip-approved=false", "--approve", "--apply"];
   await f.run("", args);
   assert.equal(github.approvals.length, 1);
@@ -495,7 +495,7 @@ test("a fresh local history does not adopt matching reviews from GitHub", { time
   const f = await fixture(t, (body, response) => {
     calls++;
     assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
   await f.run("", [url, "--apply"]);
   assert.equal(github.comments.length, 1);
 
@@ -527,7 +527,7 @@ test("terminal reports number each finding and verdict comments keep open findin
           reason: "The requested policy documentation is still absent.", awaiting: "author", evidence: [issueUrl] },
       ] },
     ] }, { prompt_tokens: 1000, completion_tokens: 500 });
-  }, { entrypoint: resolve("audit.ts"), github: github.handler,
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler,
     modelCost: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 } });
   const terminal = await f.run("", ["--apply", url]);
   assert.match(terminal, /^Findings: 5 across 2 sources$/m);
@@ -600,7 +600,7 @@ test("terminal reports number each finding and verdict comments keep open findin
 test("an unstructured final answer cannot bypass complete report validation, post a verdict or approve", { timeout: 20000 }, async (t) => {
   const github = githubEvidence();
   const f = await fixture(t, (_body, response) => reply(response, [{ role: "assistant", content: "Everything is addressed." }]), {
-    entrypoint: resolve("audit.ts"), github: github.handler,
+    entrypoint: resolve("src/cli/audit.ts"), github: github.handler,
   });
   const { child, done } = f.start(["--approve", "--apply", url]);
   child.stdin.end();
@@ -623,7 +623,7 @@ test("a report without a database-migration classification cannot post a verdict
     ] }] });
     assert.match(body.messages.at(-1)?.content ?? "", /databaseMigration/);
     reply(response, [{ role: "assistant", content: "Done." }]);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
   const { child, done } = f.start(["--approve", "--apply", url]);
   child.stdin.end();
   const result = await done;
@@ -647,7 +647,7 @@ test("posted comments @-mention only the person who acts next and never bots, an
       { commentKey: "comment:4", findings: [{ summary: "Bot two", status: "outstanding", reason: "Open.", awaiting: "human",
         evidence: [`${url}#issuecomment-4`] }] },
     ] });
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
   const terminal = await f.run("", ["--apply", url]);
   const body = github.comments[0];
   assert.match(body, /Raised by: Copilot · Awaiting: @author/);
@@ -672,7 +672,7 @@ for (const awaiting of [undefined, "invented-person"]) {
         commentKey: comment.key, findings: [{ summary: "Open", status: "outstanding", reason: "Still open.", evidence: [comment.url],
           ...(awaiting ? { awaiting } : {}) }],
       })) });
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const { child, done } = f.start(["--apply", url]);
     child.stdin.end();
     const result = await done;
@@ -692,7 +692,7 @@ for (const crash of [false, true]) test(`${crash ? "a crash before the receipt" 
   const f = await fixture(t, (body, response) => {
     calls++;
     assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: async (request, response) => {
     await github.handler(request, response);
     if (request.method === "POST" && request.url?.endsWith("/reviews")) accepted.resolve();
   } });
@@ -735,7 +735,7 @@ test("submitting an audit review does not require a separate GitHub duplicate lo
   const f = await fixture(t, (body, response) => {
     assessed = true;
     assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: (request, response) => {
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: (request, response) => {
     if (assessed && request.method === "GET" && request.url?.includes("/reviews")) {
       response.writeHead(503).end("Review lookup unavailable");
       return;
@@ -754,7 +754,7 @@ for (const action of ["comment", "approve"] as const) {
     const f = await fixture(t, (body, response) => {
       calls++;
       assess(body, response);
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const { child, done } = f.start(["--apply", ...(action === "approve" ? ["--approve"] : []), url]);
     child.stdin.end();
     const result = await done;
@@ -796,7 +796,7 @@ for (const { statuses, migrationStatus } of [
     const f = await fixture(t, (body, response) => {
       calls++;
       assess(body, response, statuses, { status: migrationStatus, reason });
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const flags = ["--approve", "--allow-uncertain"];
     const verdict = !statuses.length ? /Verdict: No actionable findings identified/
       : statuses[0] === "addressed" ? /Verdict: All actionable findings appear addressed/
@@ -878,7 +878,7 @@ for (const { statuses, approve, allowUncertain, approveMigrations } of [
     const github = githubEvidence({ empty: !statuses.length });
     const f = await fixture(t, (body, response) => assess(body, response, statuses,
       approveMigrations ? { status: "migration", reason: "The PR backfills database records." } : noDatabaseMigration),
-    { entrypoint: resolve("audit.ts"), github: github.handler });
+    { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const noActionable = statuses.every((status) => status === "not-actionable");
     if (noActionable) {
       const preview = await f.run("", ["--approve", url]);
@@ -937,7 +937,7 @@ for (const { flags, status, approve } of [
     const f = await fixture(t, (body, response) => {
       calls++;
       assess(body, response, [status]);
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const run = () => f.run("", [...flags, url, "local/test"]);
     const output = await run();
     const preview = output.match(/\[audit:dry-run\] Verdict comment preview:\n\n([\s\S]*?)\n\n\[audit:dry-run\] Comment would/);
@@ -987,7 +987,7 @@ for (const revision of ["headSha", "baseSha"] as const) {
         calls++;
         github.state[revision] = "b".repeat(40);
         assess(body, response, [calls === 1 ? "addressed" : "outstanding"]);
-      }, { entrypoint: resolve("audit.ts"), github: github.handler });
+      }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
       const { child, done } = f.start(["--approve", ...(apply ? ["--apply"] : []), url]);
       child.stdin.end();
       const result = await done;

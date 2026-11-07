@@ -1,5 +1,5 @@
 import { defineDoc, defineDocFamily, type ConversationId, type ModelRef, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
-import type { ReviewSnapshot } from "./reviews.ts";
+import type { ReviewSnapshot } from "../github/reviews.ts";
 
 export type MigrationAssessment = { status: "migration" | "not-migration" | "uncertain"; reason: string };
 export type ModelCostInfo = { model: ModelRef | null; costUsd: string };

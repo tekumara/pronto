@@ -27,8 +27,8 @@ async function main() {
   const { selectors, requested, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");
   const cwd = process.cwd();
   const urls = await Promise.all(selectors.map((selector) => resolveAuditUrl(selector, cwd)));
-  const { createModelRuntime } = await import("./model.ts");
-  const { runAudits } = await import("./auditor.ts");
+  const { createModelRuntime } = await import("../model.ts");
+  const { runAudits } = await import("../audit/auditor.ts");
   const { models, model } = await createModelRuntime(cwd, requested);
   await runAudits(urls, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply });
 }

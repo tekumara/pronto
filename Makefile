@@ -28,7 +28,7 @@ audit: ## Audit the PR URLs supplied in PRS
 
 # Resolve gh auth outside nono so the sandbox doesn't need Keychain access.
 nono-serve: ## Run the Pronto server inside nono
-	GITHUB_TOKEN="$$(gh auth token)" nono run --profile pronto --allow-cwd --listen-port $(PORT) -- "$(NODE_BIN)" --experimental-strip-types audit.ts serve --apply --approve --port $(PORT) 2>&1 | tee -a /tmp/pronto-serve.log
+	GITHUB_TOKEN="$$(gh auth token)" nono run --profile pronto --allow-cwd --listen-port $(PORT) -- "$(NODE_BIN)" --experimental-strip-types src/cli/audit.ts serve --apply --approve --port $(PORT) 2>&1 | tee -a /tmp/pronto-serve.log
 
 # Start local-only RustFS for S3-compatible replication tests. Override S3_* as needed.
 s3: ## Start local RustFS for S3 replication tests

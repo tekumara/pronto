@@ -3,9 +3,9 @@ import { constants } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { createAuditor, type AuditOptions } from "./auditor.ts";
-import type { createModelRuntime } from "./model.ts";
-import type { Log } from "./logging.ts";
+import { createAuditor, type AuditOptions } from "../audit/auditor.ts";
+import type { createModelRuntime } from "../model.ts";
+import type { Log } from "../logging.ts";
 import { Litestream } from "./litestream.ts";
 import { S3Control, conditionalConflict, type ControlHead, type ReplicaConfig } from "./s3-control.ts";
 

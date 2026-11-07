@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { request } from "node:http";
 import { test, type TestContext } from "node:test";
-import type { Enqueued } from "../audit-queue.ts";
-import type { Accepted } from "../webhook-queue.ts";
-import type { LogLevel } from "../logging.ts";
-import { createWebhookServer, type WebhookServerOptions } from "../serve.ts";
+import type { Enqueued } from "../src/server/audit-queue.ts";
+import type { Accepted } from "../src/server/webhook-queue.ts";
+import type { LogLevel } from "../src/logging.ts";
+import { createWebhookServer, type WebhookServerOptions } from "../src/server/serve.ts";
 import { deliver, pullUrl as url, reviewRequested, sign, webhookSecret as secret } from "./webhook-fixtures.ts";
 
 async function start(t: TestContext, overrides: Partial<WebhookServerOptions> = {}, outcome: Accepted = "queued") {

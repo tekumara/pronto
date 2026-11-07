@@ -83,7 +83,7 @@ for (const verbose of [false, true]) {
       modelCalls++;
       tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] }, { prompt_tokens: 1000, completion_tokens: 500 });
     }, {
-      entrypoint: resolve("audit.ts"),
+      entrypoint: resolve("src/cli/audit.ts"),
       modelCost: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 },
       github: async (request, response) => {
         // Hold the first GitHub fetch until preparation is visible, not just logged after the fetch.
@@ -204,7 +204,7 @@ for (const { migration, apply, verbose, outcome } of [
           summary: `A ${status} finding`, status, reason: "Assessment supplied by the model fixture.", awaiting: "reviewer", evidence: [evidence],
         })) }],
       });
-    }, { entrypoint: resolve("audit.ts"), github: gh.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
     const run = f.start(["serve", "--port", "0", "--approve", ...(apply ? ["--apply"] : []), ...(verbose ? ["--verbose"] : [])], { env });
     const out = watchOutput(run.child);
     const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
@@ -272,7 +272,7 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
     const release = Promise.withResolvers<void>();
     t.after(() => release.resolve());
     const f = await fixture(t, model.respond, {
-      entrypoint: resolve("audit.ts"),
+      entrypoint: resolve("src/cli/audit.ts"),
       github: async (request, response) => {
         if (restarting && /^\/github\/repos\/acme\/demo\/pulls\/[78]$/.test(request.url!)) {
           if (++liveChecks === 2) checking.resolve();
@@ -334,7 +334,7 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
   for (const apply of [true, false]) test(`serve resumes ${apply ? "an applied" : "a preview"} audit after ${signal} without inferring new publication flags`, { timeout: 40_000 }, async (t) => {
     const gh = github();
     const model = hangingModel();
-    const f = await fixture(t, model.respond, { entrypoint: resolve("audit.ts"), github: gh.handler });
+    const f = await fixture(t, model.respond, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
     await interruptedServe(f, model, signal, apply ? ["--apply"] : []);
     assert.equal(gh.reviews.length, 0);
 
@@ -361,7 +361,7 @@ for (const failure of ["model error", "missing assessment"] as const) {
       else if (failure === "model error") {
         response.writeHead(401, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: "Model unavailable" } }));
       } else reply(response, [{ role: "assistant", content: "No structured report." }]);
-    }, { entrypoint: resolve("audit.ts"), github: gh.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
     // Keep an older, reusable success: recovery must retry the latest failed attempt, not reuse it.
     await f.run("", [prUrl]);
     const failed = f.start(["--force", "--apply", prUrl]);
@@ -407,7 +407,7 @@ for (const failure of ["model error", "missing assessment"] as const) {
 test("serve retains a bounded delivery window across restart", { timeout: 30_000 }, async (t) => {
   const gh = github();
   gh.state.merged = true;
-  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   const first = f.start(["serve", "--port", "0"], { env });
   const out = watchOutput(first.child);
   const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
@@ -436,7 +436,7 @@ test("serve retains a bounded delivery window across restart", { timeout: 30_000
 test("serve checks a resumed PR again, so one merged in the meantime is skipped", { timeout: 40_000 }, async (t) => {
   const gh = github();
   const model = hangingModel();
-  const f = await fixture(t, model.respond, { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, model.respond, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   await interruptedServe(f, model, "SIGKILL", ["--apply"]);
   gh.state.merged = true;
   const second = f.start(["serve", "--port", "0", "--apply"], { env });
@@ -451,7 +451,7 @@ test("serve checks a resumed PR again, so one merged in the meantime is skipped"
 
 test("serve does not hold repository databases that have nothing to resume", { timeout: 40_000 }, async (t) => {
   const gh = github();
-  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   // A finished audit leaves its repository database with no unfinished work.
   await f.run("", [prUrl]);
   const run = f.start(["serve", "--port", "0"], { env });
@@ -466,7 +466,7 @@ test("serve does not hold repository databases that have nothing to resume", { t
 
 test("serve starts and reports a repository database that another process holds", { timeout: 40_000 }, async (t) => {
   const gh = github();
-  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   const first = f.start(["serve", "--port", "0"], { env });
   const firstOut = watchOutput(first.child);
   const [, port] = await firstOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
@@ -500,7 +500,7 @@ test("serve keeps an interrupted audit's work for a later run to resume", { time
       response.write(": pending\n\n");
       started.resolve();
     } else assess(response);
-  }, { entrypoint: resolve("audit.ts"), github: gh.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   const run = f.start(["serve", "--port", "0"], { env });
   const out = watchOutput(run.child);
   const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
@@ -522,7 +522,7 @@ test("serve keeps an interrupted audit's work for a later run to resume", { time
 
 test("serve refuses to start without a webhook secret", { timeout: 20_000 }, async (t) => {
   const gh = github();
-  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   const result = await f.start(["serve", "--port", "0"], { env: { PRONTO_WEBHOOK_SECRET: "" } }).done;
   assert.equal(result.code, 1);
   assert.match(result.stderr, /PRONTO_WEBHOOK_SECRET is required/);
@@ -532,7 +532,7 @@ test("serve refuses to start without a webhook secret", { timeout: 20_000 }, asy
 
 test("serve refuses to start when GitHub rejects the token", { timeout: 20_000 }, async (t) => {
   const gh = github((response) => response.writeHead(401, { "Content-Type": "application/json" }).end(JSON.stringify({ message: "Bad credentials" })));
-  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   const result = await f.start(["serve", "--port", "0"], { env }).done;
   assert.equal(result.code, 1);
   assert.match(result.stderr, /GitHub request failed \(401\)/);
@@ -540,14 +540,14 @@ test("serve refuses to start when GitHub rejects the token", { timeout: 20_000 }
 });
 
 test("serve rejects unsupported options before any credentials are used", { timeout: 20_000 }, async (t) => {
-  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts") });
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts") });
   const result = await f.start(["serve", "--force"], { env }).done;
   assert.equal(result.code, 1);
   assert.match(result.stderr, /--force is not supported by pronto serve/);
 });
 
 test("serve prints its usage without a secret or token", { timeout: 20_000 }, async (t) => {
-  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("audit.ts") });
+  const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts") });
   const output = await f.run("", ["serve", "--help"], { env: { PRONTO_WEBHOOK_SECRET: "" } });
   assert.match(output, /^Usage: pronto serve /m);
   assert.match(output, /PRONTO_WEBHOOK_SECRET must be set/);
@@ -563,7 +563,7 @@ test("serve prints its usage without a secret or token", { timeout: 20_000 }, as
 
 test("serve rejects unsafe MCP configuration before credentials, recovery or listening", { timeout: 20_000 }, async (t) => {
   const gh = github();
-  const f = await fixture(t, () => assert.fail("Invalid MCP configuration must not call a model"), { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, () => assert.fail("Invalid MCP configuration must not call a model"), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   const bearer = randomBytes(32).toString("hex");
   const url = "https://audits.example.test/mcp";
   const cases = [

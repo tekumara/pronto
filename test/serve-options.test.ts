@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseServeOptions } from "../serve-options.ts";
+import { parseServeOptions } from "../src/cli/serve-options.ts";
 
 test("serve defaults to a local server that only previews", () => {
   assert.deepEqual(parseServeOptions([]), {

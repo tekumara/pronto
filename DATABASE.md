@@ -223,7 +223,7 @@ For an unchanged-evidence recheck, there is no new conversation, submission or m
 - Rechecks are `entries` with kind `app.review-audit-recheck`. They also update `latestSuccess.lastCheckedAt` in that PR's session-scoped `app.review-audit-runs` family member.
 - Commit sequences are not timestamps. Changes saved in the same atomic commit share a sequence.
 
-The audit document definitions are in [`audit-records.ts`](audit-records.ts). Publication tasks and receipts are in [`publication.ts`](publication.ts). Webhook task and queue definitions are in [`webhook-queue.ts`](webhook-queue.ts).
+The audit document definitions are in [`src/audit/audit-records.ts`](src/audit/audit-records.ts). Publication tasks and receipts are in [`src/audit/publication.ts`](src/audit/publication.ts). Webhook task and queue definitions are in [`src/server/webhook-queue.ts`](src/server/webhook-queue.ts).
 
 ## Audit database contents
 
@@ -335,7 +335,7 @@ Conversation IDs are numeric database identities, not PR numbers. These applicat
 
 There is no `findings` table. Findings live in the JSON value of the conversation-scoped `app.review-audit` document. The `documents` table identifies that document; `document_revisions` stores its value as a base and subsequent deltas. Use Durable's snapshot API to read the reconstructed value.
 
-The structure is defined in [`audit-records.ts`](audit-records.ts):
+The structure is defined in [`src/audit/audit-records.ts`](src/audit/audit-records.ts):
 
 ```text
 app.review-audit

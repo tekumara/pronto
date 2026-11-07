@@ -1,4 +1,4 @@
-import { parseReviewTarget } from "./reviews.ts";
+import { parseReviewTarget } from "./github/reviews.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 /** Extra delivery metadata is shown only in verbose output. */

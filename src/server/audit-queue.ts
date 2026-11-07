@@ -1,4 +1,4 @@
-import { parseReviewTarget } from "./reviews.ts";
+import { parseReviewTarget } from "../github/reviews.ts";
 
 /** `queued`: a new job, which may start at once. `rerun`: it runs again after the current audit. `coalesced`: already covered. */
 export type Enqueued = "queued" | "rerun" | "coalesced" | "closed";

@@ -3,9 +3,9 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { apply } from "@earendil-works/chord/delta";
 import { CURRENT_SQLITE_SCHEMA_VERSION } from "@earendil-works/pi-durable/storage/sqlite";
 import { ToolResultEntry, type AgentState, type EntryRecord, type SubmissionRecord, type TaskRecord } from "@earendil-works/pi-durable";
-import { AUDIT_CONTROLLER_KIND, AuditDocument, AuditIdentity, AuditRuns, type AuditResult, type AuditRunsState, type AuditState } from "./audit-records.ts";
-import { parseReviewTarget } from "./reviews.ts";
-import { repositoryDatabaseIdentity, repositoryDatabasePath, stateDirectory } from "./state.ts";
+import { AUDIT_CONTROLLER_KIND, AuditDocument, AuditIdentity, AuditRuns, type AuditResult, type AuditRunsState, type AuditState } from "../audit/audit-records.ts";
+import { parseReviewTarget } from "../github/reviews.ts";
+import { repositoryDatabaseIdentity, repositoryDatabasePath, stateDirectory } from "../state.ts";
 
 export type AuditSection = "summary" | "findings" | "discussion" | "files" | "instructions" | "code";
 export type AuditSelection = { prUrl: string; auditId: number; snapshotId: string };

@@ -1,7 +1,7 @@
 // Isolated HTTP host for the MCP request contract, without serve's independent startup recovery.
 // Uses the same endpoint and listener composition as production; no test-only production hooks.
-import { createAuditMcpEndpoint } from "../mcp.ts";
-import { createWebhookServer } from "../serve.ts";
+import { createAuditMcpEndpoint } from "../src/discussion/mcp.ts";
+import { createWebhookServer } from "../src/server/serve.ts";
 
 const mcp = await createAuditMcpEndpoint({
   publicUrl: process.argv[2]!, allowedOrigins: process.argv.slice(3), token: process.env.PRONTO_MCP_TOKEN ?? "",

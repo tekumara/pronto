@@ -6,11 +6,11 @@ import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { readAudit } from "../audit-reader.ts";
+import { readAudit } from "../src/discussion/audit-reader.ts";
 import { fixture, reply, tool } from "./fixtures.ts";
 import { prUrl, headSha, baseSha, commentUrl, githubEvidence, assessments, auditCheckpointHook } from "./audit-evidence.ts";
 
-const auditEntry = resolve("audit.ts");
+const auditEntry = resolve("src/cli/audit.ts");
 const repositoryPath = (stateDir: string) => join(stateDir, "repos/github.com/acme~demo.sqlite");
 
 test("discussion retains its selected attempt across restarts, newer successes and a failed latest audit", { timeout: 20000 }, async (t) => {

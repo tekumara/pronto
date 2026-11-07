@@ -1,10 +1,10 @@
 import { SERVE_USAGE } from "./audit-options.ts";
-import { createAuditor, type AuditOptions } from "./auditor.ts";
-import { createModelRuntime } from "./model.ts";
-import { auditLabel, createServeLogger } from "./logging.ts";
-import { fetchViewerLogin } from "./reviews.ts";
-import { createWebhookServer } from "./serve.ts";
-import type { AuditMcpEndpoint } from "./mcp.ts";
+import { createAuditor, type AuditOptions } from "../audit/auditor.ts";
+import { createModelRuntime } from "../model.ts";
+import { auditLabel, createServeLogger } from "../logging.ts";
+import { fetchViewerLogin } from "../github/reviews.ts";
+import { createWebhookServer } from "../server/serve.ts";
+import type { AuditMcpEndpoint } from "../discussion/mcp.ts";
 import { DEFAULT_CONCURRENCY, DEFAULT_HOST, DEFAULT_PORT, parseServeOptions } from "./serve-options.ts";
 
 const describe = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -29,7 +29,7 @@ export async function runServe(args: string[]): Promise<void> {
   const options = parseServeOptions(args);
   // Validate the MCP authority and credential before GitHub/model setup. No second listener or runtime.
   const mcpOptions = options.mcp;
-  const mcp = mcpOptions ? await import("./mcp.ts").then(({ createAuditMcpEndpoint }) => createAuditMcpEndpoint({
+  const mcp = mcpOptions ? await import("../discussion/mcp.ts").then(({ createAuditMcpEndpoint }) => createAuditMcpEndpoint({
     ...mcpOptions, token: process.env.PRONTO_MCP_TOKEN ?? "",
   })) : undefined;
   try {
@@ -43,7 +43,7 @@ export async function runServe(args: string[]): Promise<void> {
 async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, mcp?: AuditMcpEndpoint): Promise<void> {
   const { requested, port, host, concurrency, path, verbose, replicatedState, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply } = config;
   // Do not even load the S3 SDK or inspect replica configuration in ordinary serve.
-  const replica = replicatedState ? await import("./s3-control.ts").then(({ replicaConfig }) => replicaConfig()) : undefined;
+  const replica = replicatedState ? await import("../replication/s3-control.ts").then(({ replicaConfig }) => replicaConfig()) : undefined;
   const secret = process.env.PRONTO_WEBHOOK_SECRET;
   if (!secret) throw new Error("PRONTO_WEBHOOK_SECRET is required: set it to the secret configured on the GitHub webhook.");
   if (mcp && secret === process.env.PRONTO_MCP_TOKEN) throw new Error("PRONTO_MCP_TOKEN must differ from PRONTO_WEBHOOK_SECRET: readers must not be able to sign webhook deliveries.");
@@ -53,7 +53,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
   const options: AuditOptions = { model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply };
   const log = createServeLogger({ verbose });
   if (replica) {
-    const { createPrimaryRuntime } = await import("./primary-runtime.ts");
+    const { createPrimaryRuntime } = await import("../replication/primary-runtime.ts");
     const runtime = await createPrimaryRuntime(replica, { models, audit: options, concurrency, log });
     let stopping = false;
     const server = createWebhookServer({ secret, login, enqueue: (url, id) => runtime.enqueue(url, id),

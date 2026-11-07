@@ -12,7 +12,7 @@ const exec = promisify(execFile);
 
 export type Request = { model: string; messages: { role: string; content?: string; tool_calls?: unknown[] }[]; tools: { function: { name: string } }[] };
 export const noDatabaseMigration = { status: "not-migration", reason: "The PR changes application behaviour, not database schema or data." } as const;
-const entrypoint = resolve("agent.ts");
+const entrypoint = resolve("src/cli/agent.ts");
 type Launch = { nodeArgs?: string[]; entrypoint?: string; env?: NodeJS.ProcessEnv; cwd?: string };
 
 // External HTTP endpoints are simulated. The CLI, Pi auth, tools, and SQLite are real.

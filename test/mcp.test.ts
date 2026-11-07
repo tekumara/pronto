@@ -8,14 +8,14 @@ import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { AuditDocument } from "../audit-records.ts";
+import { AuditDocument } from "../src/audit/audit-records.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SkillsClient } from "@modelcontextprotocol/client/ext/skills";
-import { auditChatInstructions } from "../audit-skill.ts";
+import { auditChatInstructions } from "../src/discussion/audit-skill.ts";
 import { fixture, tool } from "./fixtures.ts";
 import { assessments, auditCheckpointHook, baseSha, codeUrl, commentUrl, githubEvidence, headSha, prUrl } from "./audit-evidence.ts";
 
-const auditEntry = resolve("audit.ts");
+const auditEntry = resolve("src/cli/audit.ts");
 const publicUrl = "https://audits.example.test/mcp";
 const secret = () => randomBytes(32).toString("hex");
 const repositoryPath = (stateDir: string) => join(stateDir, "repos/github.com/acme~demo.sqlite");

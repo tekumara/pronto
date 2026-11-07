@@ -1,8 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Accepted } from "./webhook-queue.ts";
-import type { AuditMcpEndpoint } from "./mcp.ts";
-import { auditLabel, createServeLogger, type Log } from "./logging.ts";
+import type { AuditMcpEndpoint } from "../discussion/mcp.ts";
+import { auditLabel, createServeLogger, type Log } from "../logging.ts";
 import { classifyDelivery, formatDeliveryContext, verifySignature } from "./webhook.ts";
 
 export const DEFAULT_WEBHOOK_PATH = "/webhook";

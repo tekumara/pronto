@@ -66,15 +66,15 @@ The relevant code is:
 
 | Boundary | Code | What it does |
 | --- | --- | --- |
-| Acquisition | `primary-runtime.ts`, `attempt()` | GET control; inspect wall-clock expiry; acquire with the observed ETag; create a fresh UUID term |
-| Local authority | `primary-runtime.ts`, `live()` and `ready()` | Require no cancellation or shutdown and monotonic time strictly before the local deadline |
-| Renewal and promotion | `primary-runtime.ts`, `mutate()` | Serialize writes using the captured head; after PUT, check the old deadline before extending it |
-| Bootstrap | `primary-runtime.ts`, `attempt()` | Restore the last complete prefix, sync an independent baseline, then conditionally promote before enabling readiness |
-| Durability check | `primary-runtime.ts`, `confirm()` | Sync, then fresh GET, then local deadline and owner/phase/prefix/expiry checks |
-| Cleanup | `primary-runtime.ts`, `cleanup()` | Stop work, drain the serialized mutation, fresh-read the same unique owner, then conditionally release without discarding recovery |
-| Storage | `s3-control.ts`, `S3Control.read()` and `.write()` | Strong-read assumption; conditional initialization/update; no SDK write retries |
-| Admission and dispatch | `auditor.ts`, `enqueue()` and `beforeDispatch` | Confirm durable admission and worker intent before dispatch |
-| Publication | `publication.ts`, `publicationTask()` | Commit attempted intent, confirm it, check cancellation, then POST |
+| Acquisition | `src/replication/primary-runtime.ts`, `attempt()` | GET control; inspect wall-clock expiry; acquire with the observed ETag; create a fresh UUID term |
+| Local authority | `src/replication/primary-runtime.ts`, `live()` and `ready()` | Require no cancellation or shutdown and monotonic time strictly before the local deadline |
+| Renewal and promotion | `src/replication/primary-runtime.ts`, `mutate()` | Serialize writes using the captured head; after PUT, check the old deadline before extending it |
+| Bootstrap | `src/replication/primary-runtime.ts`, `attempt()` | Restore the last complete prefix, sync an independent baseline, then conditionally promote before enabling readiness |
+| Durability check | `src/replication/primary-runtime.ts`, `confirm()` | Sync, then fresh GET, then local deadline and owner/phase/prefix/expiry checks |
+| Cleanup | `src/replication/primary-runtime.ts`, `cleanup()` | Stop work, drain the serialized mutation, fresh-read the same unique owner, then conditionally release without discarding recovery |
+| Storage | `src/replication/s3-control.ts`, `S3Control.read()` and `.write()` | Strong-read assumption; conditional initialization/update; no SDK write retries |
+| Admission and dispatch | `src/audit/auditor.ts`, `enqueue()` and `beforeDispatch` | Confirm durable admission and worker intent before dispatch |
+| Publication | `src/audit/publication.ts`, `publicationTask()` | Commit attempted intent, confirm it, check cancellation, then POST |
 
 The lease is 30,000 ms, the local margin 5,000 ms, and renewal timers run every
 5,000 ms. Both acquisition and successful mutation set the local deadline from

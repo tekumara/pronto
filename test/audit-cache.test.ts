@@ -7,11 +7,11 @@ import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, defineDoc, defineDocFamily, type ConversationId, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import type { ReviewSnapshot } from "../reviews.ts";
+import type { ReviewSnapshot } from "../src/github/reviews.ts";
 import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 const url = "https://github.com/acme/project/pull/9";
-const audit = resolve("audit.ts");
+const audit = resolve("src/cli/audit.ts");
 // Persisted document contracts used to inspect evidence and simulate a pre-filtering snapshot.
 const auditRuns = defineDocFamily<{ active: ConversationId | null }, null>({
   kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false, initial: () => ({ active: null }),

@@ -5,7 +5,7 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { createConnection, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import type { ReviewSnapshot } from "../reviews.ts";
+import type { ReviewSnapshot } from "../src/github/reviews.ts";
 import { fixture, gitCheckout, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 const urls = [42, 43].map((pr) => `https://github.com/acme/demo/pull/${pr}`);
@@ -73,7 +73,7 @@ test("CLI batches overlap PR assessments in one repo database and keep their cac
       // Neither assessment can finish until both model requests have actually arrived.
       if (pending.size === 2) for (const request of pending.values()) assess(request.body, request.response);
     } else assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
   const output = await f.run("", ["--pr", urls[0], `--pr=${urls[1]}`]);
   assert.deepEqual([...calls].sort(), [42, 43]);
   assert.match(output, /\[acme\/demo#42\]/);
@@ -105,7 +105,7 @@ test("GitHub metadata requests overlap through a configured HTTP proxy", { timeo
   let admitted = false;
   let calls = 0;
   const f = await fixture(t, (body, response) => { calls++; assess(body, response); }, {
-    entrypoint: resolve("audit.ts"),
+    entrypoint: resolve("src/cli/audit.ts"),
     github: (request, response) => {
       if (!admitted && /^\/github\/repos\/acme\/demo\/pulls\/(42|43)$/.test(request.url!)) {
         pending.push({ request, response });
@@ -187,7 +187,7 @@ for (const selection of ["unselected", "merged", "skip label"] as const) {
         response.write(": pending\n\n");
         started.resolve();
       } else assess(body, response);
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const first = f.start([urls[0]]);
     first.child.stdin.end();
     await started.promise;
@@ -214,7 +214,7 @@ for (const failure of ["fetch", "assessment"] as const) {
       calls.push(pr);
       if (pr === 42 && failure === "assessment") reply(response, [{ role: "assistant", content: "No complete assessment." }]);
       else assess(body, response);
-    }, { entrypoint: resolve("audit.ts"), github: (request, response) => {
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: (request, response) => {
       if (failure === "fetch" && request.url === "/github/repos/acme/demo/pulls/42") {
         response.writeHead(500).end("PR 42 is unavailable");
       } else github.handler(request, response);
@@ -250,7 +250,7 @@ for (const signal of ["SIGKILL", "SIGTERM"] as const) {
         assert.equal(snapshot.id, original.get(snapshot.target.pr), "recovery must reuse each PR's own snapshot");
         assess(body, response);
       }
-    }, { entrypoint: resolve("audit.ts"), github: github.handler });
+    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const batchArgs = ["--pr", urls[0], "--pr", urls[1]];
     const first = f.start(batchArgs);
     first.child.stdin.end();
@@ -292,8 +292,8 @@ test("the shared module rejects same-PR requests and caller cancellation does no
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT, withAbortSignal } from ${JSON.stringify(resolve("node_modules/@earendil-works/chord/dist/context/index.js"))};
-import { createAuditor } from ${JSON.stringify(resolve("auditor.ts"))};
-import { createModelRuntime } from ${JSON.stringify(resolve("model.ts"))};
+import { createAuditor } from ${JSON.stringify(resolve("src/audit/auditor.ts"))};
+import { createModelRuntime } from ${JSON.stringify(resolve("src/model.ts"))};
 const { models, model } = await createModelRuntime(process.cwd());
 const options = { model: { provider: model.provider, modelId: model.id } };
 const auditor = createAuditor(models);
@@ -354,7 +354,7 @@ test("forcing one recovered PR does not cancel another PR's saved attempt", { ti
       else assert.equal(snapshot.id, original.get(43));
       assess(body, response);
     }
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
   const first = f.start(["--pr", urls[0], "--pr", urls[1]]);
   first.child.stdin.end();
   await started.promise;
@@ -363,8 +363,8 @@ test("forcing one recovered PR does not cancel another PR's saved attempt", { ti
   recovering = true;
   const client = join(f.cwd, "force-one.ts");
   await writeFile(client, `
-import { createAuditor } from ${JSON.stringify(resolve("auditor.ts"))};
-import { createModelRuntime } from ${JSON.stringify(resolve("model.ts"))};
+import { createAuditor } from ${JSON.stringify(resolve("src/audit/auditor.ts"))};
+import { createModelRuntime } from ${JSON.stringify(resolve("src/model.ts"))};
 const { models, model } = await createModelRuntime(process.cwd());
 const options = { model: { provider: model.provider, modelId: model.id } };
 const auditor = createAuditor(models);
@@ -383,7 +383,7 @@ try { await Promise.all([
 
 test("CLI batches resolve numbers and branches in the caller's checkout without gh", { timeout: 20_000 }, async (t) => {
   const github = evidence();
-  const f = await fixture(t, assess, { entrypoint: resolve("audit.ts"), github: async (request, response) => {
+  const f = await fixture(t, assess, { entrypoint: resolve("src/cli/audit.ts"), github: async (request, response) => {
     if (request.url === "/github/graphql") {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
@@ -415,7 +415,7 @@ import assert from "node:assert/strict";
 import { createModels } from ${JSON.stringify(resolve("node_modules/@earendil-works/pi-ai/dist/index.js"))};
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from ${JSON.stringify(resolve("node_modules/@earendil-works/pi-ai/dist/providers/faux.js"))};
 import { AssistantMessageEventStream } from ${JSON.stringify(resolve("node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js"))};
-import { createAuditor } from ${JSON.stringify(resolve("auditor.ts"))};
+import { createAuditor } from ${JSON.stringify(resolve("src/audit/auditor.ts"))};
 const faux = fauxProvider({ deferred: { pollAfterMs: 0 } });
 const models = createModels();
 const handles = new Map();
@@ -486,7 +486,7 @@ test("batch targets in different repositories have separate databases even when 
   const f = await fixture(t, (body, response) => {
     calls.push(snapshotFrom(body).target.repo);
     assess(body, response);
-  }, { entrypoint: resolve("audit.ts"), github: github.handler });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
   const other = "https://github.com/acme/other/pull/42";
   await f.run("", ["--pr", urls[0], "--pr", other, "local/test"]);
   assert.deepEqual([...calls].sort(), ["demo", "other"]);

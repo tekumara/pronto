@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { test } from "node:test";
-import { replicaConfig } from "../s3-control.ts";
-import { repositoryDatabasePath } from "../state.ts";
-import { parseServeOptions } from "../serve-options.ts";
+import { replicaConfig } from "../src/replication/s3-control.ts";
+import { repositoryDatabasePath } from "../src/state.ts";
+import { parseServeOptions } from "../src/cli/serve-options.ts";
 import { fixture, tool, noDatabaseMigration } from "./fixtures.ts";
 import { webhookSecret } from "./webhook-fixtures.ts";
 
 // Configuration is a public startup contract; malformed input must fail before credentials or state are used.
 test("replicated serve is explicit and validates configuration before GitHub/model access", async (t) => {
   assert.equal(parseServeOptions(["--replicated-state"]).replicatedState, true);
-  const f = await fixture(t, (_body, response) => tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] }), { entrypoint: resolve("audit.ts") });
+  const f = await fixture(t, (_body, response) => tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [] }), { entrypoint: resolve("src/cli/audit.ts") });
   const result = await f.start(["serve", "--replicated-state"], { env: { PRONTO_REPLICA_URL: "", PRONTO_WEBHOOK_SECRET: webhookSecret } }).done;
   assert.equal(result.code, 1);
   assert.match(result.stderr, /PRONTO_REPLICA_URL must be/);
@@ -19,7 +19,7 @@ test("replicated serve is explicit and validates configuration before GitHub/mod
 
 test("ordinary serve ignores invalid replicated-state configuration and never starts the configured child", { timeout: 20_000 }, async (t) => {
   const f = await fixture(t, () => { throw new Error("No model work expected"); }, {
-    entrypoint: resolve("audit.ts"), github: (req, res) => {
+    entrypoint: resolve("src/cli/audit.ts"), github: (req, res) => {
       assert.equal(req.url, "/github/user", "no S3 or application calls are expected");
       res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ login: "me" }));
     },

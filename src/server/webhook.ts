@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { isAuditComment, parseReviewTarget } from "./reviews.ts";
+import { isAuditComment, parseReviewTarget } from "../github/reviews.ts";
 
 export type Delivery =
   | { kind: "pong" }

@@ -65,7 +65,7 @@ function directChildren(pid) {
 function startServer(name, stateDir) {
   const logPath = join(runDirectory, `${name}.log`);
   writeFileSync(logPath, "");
-  const child = spawn(process.execPath, ["--experimental-strip-types", "audit.ts", "serve", "--replicated-state", "--host", "127.0.0.1", "--port", "0"], {
+  const child = spawn(process.execPath, ["--experimental-strip-types", "src/cli/audit.ts", "serve", "--replicated-state", "--host", "127.0.0.1", "--port", "0"], {
     cwd: root,
     env: { ...env, PRONTO_STATE_DIR: stateDir },
     stdio: ["ignore", "pipe", "pipe"],

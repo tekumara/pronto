@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { findPullRequestUrl, parseReviewTarget } from "./reviews.ts";
+import { findPullRequestUrl, parseReviewTarget } from "../github/reviews.ts";
 
 // Selection rules follow gh's non-interactive finder and push-ref resolver:
 // https://github.com/cli/cli/tree/v2.100.0/pkg/cmd/pr/shared

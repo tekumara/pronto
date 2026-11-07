@@ -1,6 +1,6 @@
 import type { Context } from "@earendil-works/chord";
 import { defineDoc, defineDocFamily, defineExtension, defineTask, type ConversationId, type Cursor, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { fetchViewerLogin, reconcileAuditReview, StaleReviewSnapshotError, submitAuditReview, type ReviewSnapshot } from "./reviews.ts";
+import { fetchViewerLogin, reconcileAuditReview, StaleReviewSnapshotError, submitAuditReview, type ReviewSnapshot } from "../github/reviews.ts";
 
 export type PublicationChoices = { apply: boolean; approve: boolean; allowUncertain: boolean; approveMigrations: boolean };
 export type PublicationIntent = {

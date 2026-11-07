@@ -5,7 +5,7 @@ import { createMcpHandler, fromJsonSchema, McpServer, type JsonSchemaType } from
 import { memorySkillFiles, SkillsExtension } from "@modelcontextprotocol/server/ext/skills";
 import { auditSkillMarkdown } from "./audit-skill.ts";
 import { pinnedFileTool, readPinnedAuditFile, readSavedAuditPage, savedAuditTool, type PinnedFileArguments, type SavedAuditArguments } from "./audit-tools.ts";
-import { stateDirectory } from "./state.ts";
+import { stateDirectory } from "../state.ts";
 
 export const MCP_PROTOCOL_VERSION = "2026-07-28";
 const MAX_REQUEST_BYTES = 64 * 1024;

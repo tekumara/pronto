@@ -11,9 +11,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { CreateBucketCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { S3Control, replicaConfig, replicaURL, type ReplicaConfig } from "../../s3-control.ts";
-import { Litestream } from "../../litestream.ts";
-import { repositoryDatabasePath } from "../../state.ts";
+import { S3Control, replicaConfig, replicaURL, type ReplicaConfig } from "../../src/replication/s3-control.ts";
+import { Litestream } from "../../src/replication/litestream.ts";
+import { repositoryDatabasePath } from "../../src/state.ts";
 import { fixture, noDatabaseMigration, tool } from "../fixtures.ts";
 import { deliver, reviewRequested, webhookSecret } from "../webhook-fixtures.ts";
 
@@ -125,7 +125,7 @@ async function app(t: TestContext, config: ReplicaConfig, endpoint = config.endp
     }
   });
   const gh = github();
-  const f = await fixture(t, respond, { entrypoint: resolve("audit.ts"), github: gh.handler });
+  const f = await fixture(t, respond, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   const start = async (apply = false) => {
     const run = f.start(["serve", "--replicated-state", "--port", "0", ...(apply ? ["--apply"] : [])], { nodeArgs: launch.nodeArgs, env: {
       PRONTO_WEBHOOK_SECRET: webhookSecret, PRONTO_REPLICA_URL: `s3://${config.bucket}/${config.prefix}`, PRONTO_S3_ENDPOINT: endpoint,

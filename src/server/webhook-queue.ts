@@ -2,7 +2,7 @@ import type { Context } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { defineDoc, defineExtension, defineTask, ROOT_CONVERSATION_ID, type Harness, type TaskId } from "@earendil-works/pi-durable";
 import { createAuditQueue, type Enqueued } from "./audit-queue.ts";
-import { parseReviewTarget } from "./reviews.ts";
+import { parseReviewTarget } from "../github/reviews.ts";
 
 type Pending = { url: string; task: TaskId<null>; running: boolean; rerun: boolean };
 const Queue = defineDoc<{ recent: string[]; pending: Record<string, Pending> }>({

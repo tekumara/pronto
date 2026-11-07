@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry } from "@earendil-works/pi-durable";
-import { listRepositoryDatabases, openStateHarness } from "../state.ts";
+import { listRepositoryDatabases, openStateHarness } from "../src/state.ts";
 import { fixture, reply } from "./fixtures.ts";
 
 for (const location of ["override", "xdg", "home", "relative-xdg"] as const) {
