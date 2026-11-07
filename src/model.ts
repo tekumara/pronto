@@ -1,7 +1,6 @@
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 
-export async function createModelRuntime(cwd: string, requested?: string) {
-  const models = await ModelRuntime.create();
+export function selectModel(models: ModelRuntime, cwd: string, requested?: string) {
   const settings = SettingsManager.create(cwd);
   const preferred = requested ?? (
     settings.getDefaultProvider() && settings.getDefaultModel()
@@ -14,5 +13,10 @@ export async function createModelRuntime(cwd: string, requested?: string) {
   if (!model) {
     throw new Error(`No available model${preferred ? `: ${preferred}` : ""}. Log in with pi, then select provider/model-id.`);
   }
-  return { models, model, available };
+  return { model, available };
+}
+
+export async function createModelRuntime(cwd: string, requested?: string) {
+  const models = await ModelRuntime.create();
+  return { models, ...selectModel(models, cwd, requested) };
 }

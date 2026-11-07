@@ -3,7 +3,7 @@ import { parseReviewTarget } from "../github/reviews.ts";
 
 export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <owner/repo#number> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
 
-export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--replicated-state] [--mcp --mcp-public-url <https-url> [--mcp-allow-origin <https-origin>]...] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
+export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--replicated-state] [--mcp --mcp-public-url <https-url> [--mcp-allow-origin <https-origin>]... [--mcp-audit]] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "serve") {
   const usage = source === "cli" ? AUDIT_CLI_USAGE : SERVE_USAGE;

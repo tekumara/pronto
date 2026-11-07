@@ -5,15 +5,16 @@ import { createRegistry, ProviderDoc, type ConversationId, type Cursor, type Har
 import { parseReviewTarget, type ReviewTarget } from "../github/reviews.ts";
 import { stripControlCharacters, type Log } from "../logging.ts";
 import { createWebhookQueue } from "../server/webhook-queue.ts";
+import { auditTargetKey, createAuditScheduler } from "../server/audit-scheduler.ts";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "../state.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { AuditDocument, AuditRuns, type AuditResult } from "./audit-records.ts";
 import { auditAssessment } from "./assessment.ts";
 import { createPublisher, pendingReassessments, recoverPublications, waitForPublication } from "./publication.ts";
-import { auditRequest, type AuditLog, type AuditOptions, type RepositoryAudit } from "./request.ts";
+import { auditRequest, type AuditLog, type AuditOptions, type AuditOutcome, type RepositoryAudit } from "./request.ts";
 
-export type { AuditOptions } from "./request.ts";
+export type { AuditOptions, AuditOutcome } from "./request.ts";
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
 export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output, webhooks, state }: {
@@ -28,9 +29,10 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   const shutdown = new AbortController();
   let closing: Promise<void> | undefined;
   let recovering: Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> | undefined;
+  const scheduler = webhooks ? createAuditScheduler(webhooks.concurrency) : undefined;
   const webhookQueue = webhooks ? createWebhookQueue({
     concurrency: webhooks.concurrency,
-    audit: (url) => auditor.audit(url, webhooks.options),
+    audit: async (url) => { await auditor.scheduleAudit(url, webhooks.options); },
     beforeDispatch: state ? async (url) => {
       const repository = await repositoryFor(parseReviewTarget(url));
       await state.confirm(repository.database);
@@ -130,7 +132,16 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
         }
       }
     },
-    async audit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<void> {
+    /** Share serve's concurrency limit and per-PR exclusion with webhook work. */
+    async scheduleAudit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<AuditOutcome> {
+      if (!scheduler) throw new Error("Audit scheduling is not enabled");
+      const context = withAbortSignal(shutdown.signal, callerContext);
+      return scheduler.run(url, () => {
+        context.abortSignal?.throwIfAborted();
+        return auditor.audit(url, options, context);
+      }, context.abortSignal);
+    },
+    async audit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<AuditOutcome> {
       if (recovering) await recovering;
       if (closing) throw new Error("Auditor is closed");
       const target = parseReviewTarget(url);
@@ -155,12 +166,14 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
         }));
         const retryFailed = failedRecoveries.delete(requestKey);
         const restored = restoredRequests.delete(requestKey);
+        let outcome: AuditOutcome;
         do {
-          await auditRequest({ target, options: { ...options, retryFailed, restored, models },
+          outcome = await auditRequest({ target, options: { ...options, retryFailed, restored, models },
             repository: repositoryAudit, context, log, diagnostics });
           // A live assessment can also become stale before publication. Retire its old
           // approval and consume the durable reassessment without needing another webhook.
         } while ((await pendingReassessments(repositoryAudit.harness, context))[String(target.pr)]);
+        return outcome;
       } catch (error) {
         if (closing && webhooks) log("info", "Audit interrupted · saved work resumes when the server starts again", null);
         throw error;
@@ -231,6 +244,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
     close(): Promise<void> {
       if (!closing) {
         webhookQueue?.close();
+        scheduler?.close();
         shutdown.abort(new Error("Auditor is closed"));
         closing = (async () => {
           await recovering?.catch(() => {});
@@ -247,15 +261,19 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   return auditor;
 }
 
-/** CLI/chat batch lifecycle. A failed PR never closes another PR's harness or ends its request. */
-export async function runAudits(urls: string[], options: AuditOptions & { models: ModelRuntime }): Promise<void> {
+/** Validate the whole batch before any audit starts. */
+export function validateAuditTargets(urls: string[]): void {
   const keys = new Set<string>();
   for (const url of urls) {
-    const target = parseReviewTarget(url);
-    const key = `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`;
-    if (keys.has(key)) throw new Error(`Duplicate PR target: ${target.url}`);
+    const key = auditTargetKey(url);
+    if (keys.has(key)) throw new Error(`Duplicate PR target: ${parseReviewTarget(url).url}`);
     keys.add(key);
   }
+}
+
+/** CLI/chat batch lifecycle. A failed PR never closes another PR's harness or ends its request. */
+export async function runAudits(urls: string[], options: AuditOptions & { models: ModelRuntime }): Promise<void> {
+  validateAuditTargets(urls);
   const auditor = createAuditor(options.models, { labelOutput: urls.length > 1 });
   let interrupted = false;
   const quit = () => { interrupted = true; void auditor.close().catch((error) => console.error(error)); };

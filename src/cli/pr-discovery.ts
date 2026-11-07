@@ -8,11 +8,12 @@ const exec = promisify(execFile);
 type Repository = { host: string; owner: string; repo: string };
 type Remote = Repository & { name: string };
 
-async function git(cwd: string, args: string[], optionalExitCodes: number[] = []): Promise<string> {
+async function git(cwd: string, args: string[], optionalExitCodes: number[] = [], signal?: AbortSignal): Promise<string> {
   try {
-    const { stdout } = await exec("git", args, { cwd, timeout: 30_000 });
+    const { stdout } = await exec("git", args, { cwd, timeout: 30_000, signal });
     return stdout.trim();
   } catch (error) {
+    signal?.throwIfAborted();
     const failure = error as Error & { code?: string | number };
     if (typeof failure.code === "number" && optionalExitCodes.includes(failure.code)) return "";
     if (failure.code === "ENOENT") throw new Error("Git is required to select a PR from a checkout. Install Git or provide a GitHub PR URL (or GH_REPO with a number or branch).");
@@ -46,9 +47,9 @@ function configuredRepository(value: string, host: string): Repository {
   return repository;
 }
 
-async function readRemotes(cwd: string, host: string): Promise<Remote[]> {
+async function readRemotes(cwd: string, host: string, signal?: AbortSignal): Promise<Remote[]> {
   const entries = new Map<string, Remote>();
-  for (const line of (await git(cwd, ["remote", "-v"])).split("\n")) {
+  for (const line of (await git(cwd, ["remote", "-v"], [], signal)).split("\n")) {
     const match = line.match(/^(\S+)\s+(.+)\s+\((fetch|push)\)$/);
     if (!match) continue;
     const repository = remoteRepository(match[2]!, host);
@@ -59,8 +60,8 @@ async function readRemotes(cwd: string, host: string): Promise<Remote[]> {
   return [...entries.values()].sort((a, b) => priority(b.name) - priority(a.name));
 }
 
-async function readConfig(cwd: string): Promise<Map<string, string>> {
-  const output = await git(cwd, ["config", "--null", "--get-regexp", "^(branch\\..*\\.(remote|merge|pushremote)|remote\\..*\\.gh-resolved|remote\\.pushdefault|push\\.default)$"], [1]);
+async function readConfig(cwd: string, signal?: AbortSignal): Promise<Map<string, string>> {
+  const output = await git(cwd, ["config", "--null", "--get-regexp", "^(branch\\..*\\.(remote|merge|pushremote)|remote\\..*\\.gh-resolved|remote\\.pushdefault|push\\.default)$"], [1], signal);
   return new Map(output.split("\0").filter(Boolean).map((entry) => {
     const separator = entry.indexOf("\n");
     return [entry.slice(0, separator), entry.slice(separator + 1)];
@@ -77,15 +78,15 @@ function baseRepository(remotes: Remote[], config: Map<string, string>, host: st
   return repository;
 }
 
-async function currentBranchSelector(cwd: string, base: Repository, remotes: Remote[], config: Map<string, string>): Promise<number | string> {
-  const branch = await git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"], [1]);
+async function currentBranchSelector(cwd: string, base: Repository, remotes: Remote[], config: Map<string, string>, signal?: AbortSignal): Promise<number | string> {
+  const branch = await git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"], [1], signal);
   if (!branch) throw new Error("Could not determine current branch: not on any branch (detached HEAD). Provide a PR number, branch or GitHub PR URL.");
   const merge = config.get(`branch.${branch}.merge`) || "";
   const trackingPR = merge.match(/^refs\/pull\/([1-9]\d*)\/head$/);
   if (trackingPR) return Number(trackingPR[1]);
 
   // Let Git resolve push refspecs and renamed upstream branches before falling back to config.
-  const pushRef = await git(cwd, ["rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", `${branch}@{push}`], [1, 128]);
+  const pushRef = await git(cwd, ["rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", `${branch}@{push}`], [1, 128], signal);
   const pushRemote = [...remotes].sort((a, b) => b.name.length - a.name.length)
     .find((remote) => pushRef.startsWith(`refs/remotes/${remote.name}/`));
   let headRepository: Repository | undefined = pushRemote;
@@ -112,7 +113,8 @@ async function currentBranchSelector(cwd: string, base: Repository, remotes: Rem
 }
 
 /** Resolve a URL, repository PR shorthand, number or branch using local Git configuration and Pronto's GitHub credentials. */
-export async function resolveAuditUrl(selector: string, cwd: string): Promise<string> {
+export async function resolveAuditUrl(selector: string, cwd: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   if (selector.includes("://")) return parseReviewTarget(selector).url;
   const host = repositoryHost();
   const repositoryPR = selector.match(/^([\w-]+)\/([\w.-]+)#(\d+)$/);
@@ -120,15 +122,15 @@ export async function resolveAuditUrl(selector: string, cwd: string): Promise<st
     const number = Number(repositoryPR[3]);
     if (!Number.isSafeInteger(number) || number < 1) throw new Error("Expected a positive, safe PR number");
     const repository = configuredRepository(`${repositoryPR[1]}/${repositoryPR[2]}`, host);
-    return findPullRequestUrl(repository, number);
+    return findPullRequestUrl(repository, number, signal);
   }
   const override = process.env.GH_REPO ? configuredRepository(process.env.GH_REPO, host) : undefined;
   // Explicit selectors with GH_REPO need neither Git nor a checkout.
   const [remotes, config] = !override || !selector
-    ? await Promise.all([readRemotes(cwd, host), readConfig(cwd)]) : [[], new Map<string, string>()];
+    ? await Promise.all([readRemotes(cwd, host, signal), readConfig(cwd, signal)]) : [[], new Map<string, string>()];
   const repository = override ?? baseRepository(remotes, config, host);
-  const selected = !selector ? await currentBranchSelector(cwd, repository, remotes, config)
+  const selected = !selector ? await currentBranchSelector(cwd, repository, remotes, config, signal)
     : /^#?\d+$/.test(selector) ? Number(selector.replace(/^#/, "")) : selector;
   if (typeof selected === "number" && (!Number.isSafeInteger(selected) || selected < 1)) throw new Error("Expected a positive, safe PR number");
-  return findPullRequestUrl(repository, selected);
+  return findPullRequestUrl(repository, selected, signal);
 }

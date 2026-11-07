@@ -67,7 +67,7 @@ The goal is less time chasing review feedback and waiting for another review rou
 
 ## Discuss a saved audit
 
-External agents can read saved audits and use the discussion skill through an authenticated endpoint available via MCP. The agent supplies its own model and retains the selected audit reference. See [remote audit discussion setup](MCP.md) for HTTPS, credentials and a runnable client.
+External agents can read saved audits and use the discussion skill through an authenticated MCP endpoint. You can also allow trusted clients to run audits with a separate credential. The agent retains the selected audit reference. See [MCP setup](MCP.md) for HTTPS, credentials and a runnable client.
 
 ## Technical guide
 

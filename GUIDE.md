@@ -175,11 +175,11 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 
 ### Options
 
-`--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup and apply to every audit, as described in the [quick start](#quick-start). Without `--apply`, the server only logs previews.
+`--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup for webhook audits, as described in the [quick start](#quick-start). Without `--apply`, new webhook audits only log previews.
 
 `--replicated-state` enables experimental term-isolated S3 state. It defaults to off; ordinary serve, audits and chat do not need replica configuration or start replication. See [replicated state setup, RustFS tests and safety limits](REPLICATED_STATE.md) before enabling it. `GET /readyz` reports admission readiness separately from `/healthz` liveness. An unready replicated process returns 503 for application requests, without forwarding them.
 
-`--mcp --mcp-public-url <https-url>` adds the read-only MCP endpoint to this listener. It requires a separate `PRONTO_MCP_TOKEN`; webhook signatures and MCP bearer auth are independent. MCP is disabled by default. See [remote audit discussion setup](MCP.md) for TLS, state access and client requirements. It cannot yet be combined with `--replicated-state`.
+`--mcp --mcp-public-url <https-url>` adds a read-only MCP endpoint to this listener. It requires a separate `PRONTO_MCP_TOKEN`. To let trusted clients run audits, add `--mcp-audit` and set a different `PRONTO_MCP_AUDIT_TOKEN`. Those clients can also publish reviews when they request `apply`. MCP is disabled by default and cannot be combined with `--replicated-state`. See [MCP setup](MCP.md) for access and client requirements.
 
 `--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
 
@@ -664,7 +664,7 @@ Pronto rejects a second chat process for the same working directory and state di
 
 ### Use another agent over MCP
 
-`pronto serve --mcp --mcp-public-url https://audits.example.com/mcp` exposes the same retrieval tools and canonical discussion skill on the webhook listener. It adds no model runtime or conversation store. The process keeps its usual serve credentials and startup recovery. MCP requires a separate `PRONTO_MCP_TOKEN` and supports MCP `2026-07-28` only. Terminate HTTPS at a reverse proxy and keep the HTTP listener private. MCP is disabled without the flag and cannot yet be combined with experimental replicated state.
+`pronto serve --mcp --mcp-public-url https://audits.example.com/mcp` exposes the retrieval tools and canonical discussion skill on the webhook listener. It adds no model runtime or conversation store. The process keeps its usual serve credentials and startup recovery. With `--mcp-audit` and a separate `PRONTO_MCP_AUDIT_TOKEN`, trusted clients can also run audits and request publication. MCP supports `2026-07-28` only. Terminate HTTPS at a reverse proxy and keep the HTTP listener private. MCP is disabled without the flag and cannot be combined with experimental replicated state.
 
 See [MCP setup and client requirements](MCP.md), including Caddy configuration, native skill loading and a runnable latest-SDK client. The token shares readable audits in the configured state directory; it is not a per-PR permission. The external agent owns its conversation history and selected audit reference.
 
@@ -681,7 +681,7 @@ Audit tests cover source-backed CLI installation, evidence pagination, pinned fo
 
 Chat tests exercise real audit-reading tools against assessments created by the CLI. They cover original replies and code citations, bounded long-source retrieval, selected attempts across restarts and newer audits, missing evidence, blocked coding tools, and read-only inspection of interrupted assessments and pending publications while a writer owns the database. Storage tests cover path selection, private permissions, process locks and separate discussion history.
 
-MCP tests exercise the latest SDK client and native skill verification over real HTTP. They cover authentication and protocol rejection, origin and Host validation, body limits, explicit references across clients and restarts, and inspection of interrupted assessments and pending publications without recovery or writes. Combined serve tests verify MCP on the webhook port, separate authentication and unchanged audit behaviour.
+MCP tests exercise the latest SDK client and native skill verification over real HTTP. They cover authentication and protocol rejection, origin and Host validation, body limits, explicit references and read-only inspection. Combined serve tests cover audit execution, publication safeguards, shared concurrency and recovery.
 
 Supplied model responses test retrieval, rendering, validation and action rules. They do not prove that a real model judges every explanation correctly.
 

@@ -18,7 +18,7 @@ export type WebhookServerOptions = {
   enqueue: (url: string, deliveryId?: string) => Promise<Accepted>;
   /** Application admission gate. Health stays live while standby or bootstrapping. */
   ready?: () => boolean;
-  /** Optional read-only MCP endpoint. This listener also owns its shutdown. */
+  /** Optional MCP endpoint. This listener also owns its shutdown. */
   mcp?: AuditMcpEndpoint;
   path?: string;
   maxBodyBytes?: number;

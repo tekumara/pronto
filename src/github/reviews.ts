@@ -148,8 +148,8 @@ function github(signal?: AbortSignal) {
 }
 
 /** Match gh pr view's non-interactive selection: prefer open PRs, then the newest matching closed PR. */
-export async function findPullRequestUrl(repository: { owner: string; repo: string }, selector: number | string): Promise<string> {
-  const client = github();
+export async function findPullRequestUrl(repository: { owner: string; repo: string }, selector: number | string, signal?: AbortSignal): Promise<string> {
+  const client = github(signal);
   const { owner, repo } = repository;
   if (typeof selector === "number") {
     const pr = await client.request<{ html_url: string }>(`${client.base}/repos/${owner}/${repo}/pulls/${selector}`);

@@ -12,6 +12,7 @@ export function parseServeOptions(args: string[]) {
   let verbose = false;
   let replicatedState = false;
   let mcpEnabled = false;
+  let mcpAudit = false;
   const allowedOrigins: string[] = [];
   const values = new Map<string, string>();
   const rest: string[] = [];
@@ -25,6 +26,11 @@ export function parseServeOptions(args: string[]) {
     if (arg === "--mcp") {
       if (mcpEnabled) throw new Error(`--mcp can be supplied only once\n${SERVE_USAGE}`);
       mcpEnabled = true;
+      continue;
+    }
+    if (arg === "--mcp-audit") {
+      if (mcpAudit) throw new Error(`--mcp-audit can be supplied only once\n${SERVE_USAGE}`);
+      mcpAudit = true;
       continue;
     }
     if (arg === "--verbose") {
@@ -55,10 +61,10 @@ export function parseServeOptions(args: string[]) {
     throw new Error(`--webhook-path must start with / and cannot contain spaces, ? or #, and /healthz is reserved for health checks (/readyz is also reserved)\n${SERVE_USAGE}`);
   }
   const publicUrl = values.get("--mcp-public-url");
-  if (!mcpEnabled && (publicUrl || allowedOrigins.length)) throw new Error(`MCP options require --mcp\n${SERVE_USAGE}`);
+  if (!mcpEnabled && (publicUrl || allowedOrigins.length || mcpAudit)) throw new Error(`MCP options require --mcp\n${SERVE_USAGE}`);
   if (mcpEnabled && !publicUrl) throw new Error(`--mcp requires --mcp-public-url <https-url>\n${SERVE_USAGE}`);
   if (mcpEnabled && replicatedState) throw new Error(`--mcp is not yet supported with --replicated-state: MCP needs the active owner's term-isolated audit source\n${SERVE_USAGE}`);
-  const mcp = mcpEnabled ? { publicUrl: publicUrl!, allowedOrigins } : undefined;
+  const mcp = mcpEnabled ? { publicUrl: publicUrl!, allowedOrigins, ...(mcpAudit ? { audit: true as const } : {}) } : undefined;
   if (mcp) {
     let endpoint: URL;
     try { endpoint = new URL(mcp.publicUrl); }

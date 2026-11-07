@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SkillsClient } from "@modelcontextprotocol/client/ext/skills";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { fixture, noDatabaseMigration, reply, tool } from "./fixtures.ts";
+import { fixture, gitCheckout, noDatabaseMigration, reply, tool } from "./fixtures.ts";
 import { deliver, reviewRequested, webhookSecret } from "./webhook-fixtures.ts";
 
 const prUrl = "https://github.com/acme/demo/pull/7";
@@ -19,7 +20,7 @@ function github(user: (response: ServerResponse) => void = (response) => respons
   const repository = `/github/repos/${owner}/${repo}`;
   const pull = `${repository}/pulls/${number}`;
   const reviews: { event: string; body: string; commit_id: string }[] = [];
-  const state = { merged: false };
+  const state = { merged: false, draft: false, labels: [] as string[], files: [] as object[] };
   const requests: string[] = [];
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     const path = request.url!.split("?")[0]!;
@@ -37,10 +38,11 @@ function github(user: (response: ServerResponse) => void = (response) => respons
       return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } });
     }
     if (path === pull) {
-      return json({ title: "Served PR", body: "", merged: state.merged, draft: false, labels: [], changed_files: 0,
+      return json({ html_url: target, title: "Served PR", body: "", merged: state.merged, draft: state.draft, labels: state.labels.map((name) => ({ name })), changed_files: state.files.length,
         head: { sha: headSha, repo: { full_name: "acme/demo" } }, base: { sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
     }
     assert.ok([`${pull}/comments`, `${pull}/reviews`, `${pull}/files`, `${repository}/issues/${number}/comments`].includes(path), path);
+    if (path === `${pull}/files`) return json(state.files);
     json(path === `${pull}/reviews` ? reviews.map((review, index) => ({
       ...review, id: index + 1, user: { login: "Me" }, state: review.event === "APPROVE" ? "APPROVED" : "COMMENTED",
     })) : path === `${repository}/issues/${number}/comments` ? comments : []);
@@ -594,4 +596,274 @@ test("serve rejects unsafe MCP configuration before credentials, recovery or lis
   assert.equal(notEnabled.code, 1);
   assert.match(notEnabled.stderr, /MCP options require --mcp/);
   assert.deepEqual(gh.requests, [], "no credentials should reach GitHub before MCP configuration is valid");
+});
+
+async function auditMcpClient(url: string, token: string) {
+  const client = new Client({ name: "audit-contract", version: "1" }, {
+    versionNegotiation: { mode: { pin: "2026-07-28" } }, supportedProtocolVersions: ["2026-07-28"],
+  });
+  await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+  return client;
+}
+
+async function runMcpAudit(client: Client, args: Record<string, unknown>) {
+  const result = await client.callTool({ name: "run_audit", arguments: args });
+  assert.ok(!result.isError, JSON.stringify(result));
+  return result.structuredContent as { apply: boolean; results: ({ prUrl: string; status: string; auditId?: number; cached?: boolean; reason?: string })[] };
+}
+
+test("MCP audit uses a separate execution credential and CLI defaults, models, skips, cache and apply", { timeout: 30_000 }, async (t) => {
+  const gh = github();
+  gh.state.draft = true;
+  gh.state.labels = ["blocked"];
+  gh.state.files = [{ filename: "dist/bundle.js", status: "modified", patch: "@@ -1 +1 @@\n-old\n+new" }];
+  const modelNames: string[] = [];
+  const f = await fixture(t, (body, response) => { modelNames.push(body.model); assess(response); },
+    { entrypoint: resolve("src/cli/audit.ts"), github: async (request, response) => {
+      if (request.url === "/github/graphql") {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        if (body.variables.headRefName) {
+          assert.equal(body.variables.headRefName, "feature/pr-inference");
+          response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ data: { repository: {
+            defaultBranchRef: { name: "main" }, pullRequests: { nodes: [{ url: prUrl, state: "OPEN", headRefName: "feature/pr-inference", isCrossRepository: false }] },
+          } } }));
+          return;
+        }
+      }
+      return gh.handler(request, response);
+    } });
+  const gitEnv = await gitCheckout(f.cwd);
+  const modelPath = join(f.agentDir, "models.json");
+  const models = JSON.parse(await readFile(modelPath, "utf8"));
+  models.providers.local.models.push({ id: "variant", contextWindow: 128000, maxTokens: 1000 });
+  await writeFile(modelPath, JSON.stringify(models));
+  const readToken = randomBytes(32).toString("hex");
+  const auditToken = randomBytes(32).toString("hex");
+  const run = f.start(["serve", "--port", "0", "--apply", "--approve", "--mcp", "--mcp-audit", "--mcp-public-url", "https://audits.example.test/mcp"], {
+    env: { ...gitEnv, ...env, GH_REPO: "acme/demo", PRONTO_MCP_TOKEN: readToken, PRONTO_MCP_AUDIT_TOKEN: auditToken },
+  });
+  const [, port] = await watchOutput(run.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const url = `http://127.0.0.1:${port}/mcp`;
+  const reader = await auditMcpClient(url, readToken);
+  const writer = await auditMcpClient(url, auditToken);
+  t.after(() => Promise.all([reader.close(), writer.close()]));
+  assert.ok(!(await reader.listTools()).tools.some((tool) => tool.name === "run_audit"));
+  await assert.rejects(reader.callTool({ name: "run_audit", arguments: { targets: [prUrl], apply: true } }), /Tool run_audit not found/);
+  const auditTool = (await writer.listTools()).tools.find((tool) => tool.name === "run_audit");
+  assert.ok(auditTool);
+  assert.equal(auditTool.annotations?.readOnlyHint, false);
+
+  const skipped = await runMcpAudit(writer, { targets: [prUrl] });
+  assert.match(skipped.results[0]!.reason!, /draft/);
+  assert.equal(skipped.apply, false, "webhook --apply must not leak into remote CLI defaults");
+  const labelled = await runMcpAudit(writer, { targets: [prUrl], skipDrafts: false, skipLabels: ["unused", "BLOCKED"] });
+  assert.match(labelled.results[0]!.reason!, /matching skip label/);
+  assert.equal(gh.reviews.length, 0);
+  assert.deepEqual(modelNames, []);
+
+  const args = { targets: ["7"], model: "local/variant", skipDrafts: false, exclude: ["dist/**"] };
+  const first = await runMcpAudit(writer, args);
+  assert.equal(first.results[0]!.status, "completed");
+  assert.equal(first.results[0]!.prUrl, prUrl);
+  assert.equal(first.results[0]!.cached, false);
+  assert.deepEqual(modelNames, ["variant"]);
+  assert.equal(gh.reviews.length, 0);
+  const saved = await reader.callTool({ name: "read_audit", arguments: { prUrl, auditId: first.results[0]!.auditId } });
+  assert.equal((saved.structuredContent as { audit: { status: string } }).audit.status, "completed");
+  const files = await reader.callTool({ name: "read_audit", arguments: { prUrl, auditId: first.results[0]!.auditId, section: "files" } });
+  const file = JSON.parse((files.structuredContent as { content: string }).content)[0];
+  assert.equal(file.excluded, true);
+  assert.equal(file.patch, null);
+  const cached = await runMcpAudit(writer, args);
+  assert.equal(cached.results[0]!.cached, true);
+  const currentBranch = await runMcpAudit(writer, { model: "local/variant", skipDrafts: false, exclude: ["dist/**"] });
+  assert.equal(currentBranch.results[0]!.prUrl, prUrl);
+  assert.equal(currentBranch.results[0]!.cached, true);
+  const forced = await runMcpAudit(writer, { ...args, force: true });
+  assert.notEqual(forced.results[0]!.auditId, first.results[0]!.auditId);
+  assert.deepEqual(modelNames, ["variant", "variant"]);
+  await runMcpAudit(writer, { ...args, apply: true, approve: true });
+  assert.equal(gh.reviews.length, 1);
+  assert.equal(gh.reviews[0]!.event, "APPROVE");
+  const approved = await runMcpAudit(writer, args);
+  assert.match(approved.results[0]!.reason!, /already approved/);
+  assert.equal((await runMcpAudit(writer, { ...args, skipApproved: false })).results[0]!.status, "completed");
+  const duplicate = await writer.callTool({ name: "run_audit", arguments: { targets: [prUrl, `${prUrl}/`] } });
+  assert.equal(duplicate.isError, true);
+  assert.match(JSON.stringify(duplicate), /Duplicate PR target/);
+  const invalidModel = await writer.callTool({ name: "run_audit", arguments: { targets: [prUrl], model: "local/missing" } });
+  assert.equal(invalidModel.isError, true);
+  assert.match(JSON.stringify(invalidModel), /No available model/);
+  assert.equal(gh.reviews.length, 1);
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 0);
+});
+
+test("MCP approval flags preserve migration and uncertain-finding safeguards", { timeout: 30_000 }, async (t) => {
+  const evidence = `${prUrl}#issuecomment-1`;
+  const gh = github(undefined, [{ id: 1, body: "Please check compatibility.", html_url: evidence,
+    user: { login: "reviewer" }, created_at: "2026-01-01T00:00:00Z" }]);
+  let calls = 0;
+  const f = await fixture(t, (_body, response) => {
+    calls++;
+    tool(response, "report_review_assessment", { databaseMigration: { status: "migration", reason: "Adds a column." },
+      assessments: [{ commentKey: "comment:1", findings: [{ summary: "Compatibility", status: "uncertain", reason: "Needs verification.", awaiting: "reviewer", evidence: [evidence] }] }] });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+  const readToken = randomBytes(32).toString("hex");
+  const auditToken = randomBytes(32).toString("hex");
+  const run = f.start(["serve", "--port", "0", "--mcp", "--mcp-audit", "--mcp-public-url", "https://audits.example.test/mcp"],
+    { env: { ...env, PRONTO_MCP_TOKEN: readToken, PRONTO_MCP_AUDIT_TOKEN: auditToken } });
+  const [, port] = await watchOutput(run.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const client = await auditMcpClient(`http://127.0.0.1:${port}/mcp`, auditToken);
+  t.after(() => client.close());
+  const args = { targets: [prUrl], approve: true };
+  await runMcpAudit(client, { ...args, allowUncertain: true, approveMigrations: true });
+  assert.equal(gh.reviews.length, 0, "approval options alone must not publish");
+  await runMcpAudit(client, { ...args, apply: true });
+  assert.equal(gh.reviews[0]!.event, "COMMENT");
+  await runMcpAudit(client, { ...args, apply: true, allowUncertain: true, approveMigrations: true });
+  assert.equal(gh.reviews[1]!.event, "APPROVE");
+  assert.equal(calls, 1, "publication choices must not force another assessment");
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 0);
+});
+
+test("MCP audit rejects missing or reused execution credentials before GitHub access", { timeout: 20_000 }, async (t) => {
+  const gh = github();
+  const f = await fixture(t, () => assert.fail("invalid credentials must not call a model"), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+  const reader = randomBytes(32).toString("hex");
+  const webhook = randomBytes(32).toString("hex");
+  for (const [auditToken, expected] of [["", /PRONTO_MCP_AUDIT_TOKEN.*at least 32/], [reader, /must differ from PRONTO_MCP_TOKEN/],
+    [webhook, /must differ from PRONTO_WEBHOOK_SECRET/]] as const) {
+    const result = await f.start(["serve", "--mcp", "--mcp-audit", "--mcp-public-url", "https://audits.example.test/mcp"],
+      { env: { ...env, PRONTO_WEBHOOK_SECRET: webhook, PRONTO_MCP_TOKEN: reader, PRONTO_MCP_AUDIT_TOKEN: auditToken } }).done;
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, expected);
+    assert.ok(!result.stderr.includes(reader));
+  }
+  const withoutMcp = await f.start(["serve", "--mcp-audit"], { env }).done;
+  assert.match(withoutMcp.stderr, /MCP options require --mcp/);
+  assert.deepEqual(gh.requests, []);
+});
+
+test("MCP batches and webhooks share the concurrency limit and serialize the same PR", { timeout: 30_000 }, async (t) => {
+  const secondUrl = "https://github.com/acme/demo/pull/8";
+  const first = github();
+  const second = github(undefined, [], secondUrl);
+  const started = Promise.withResolvers<void>();
+  let held: ServerResponse | undefined;
+  let released = false;
+  let secondStartedEarly = false;
+  let calls = 0;
+  const f = await fixture(t, (_body, response) => {
+    calls++;
+    if (calls === 1) { held = response; started.resolve(); }
+    else assess(response);
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: async (request, response) => {
+    if (request.url === "/github/repos/acme/demo/pulls/9") { response.writeHead(503).end("Unavailable"); return; }
+    if (/\/(?:pulls|issues)\/8(?:\/|\?|$)/.test(request.url!)) {
+      if (!released) secondStartedEarly = true;
+      return second.handler(request, response);
+    }
+    return first.handler(request, response);
+  } });
+  const readToken = randomBytes(32).toString("hex");
+  const auditToken = randomBytes(32).toString("hex");
+  const run = f.start(["serve", "--port", "0", "--concurrency", "1", "--mcp", "--mcp-audit", "--mcp-public-url", "https://audits.example.test/mcp"],
+    { env: { ...env, PRONTO_MCP_TOKEN: readToken, PRONTO_MCP_AUDIT_TOKEN: auditToken } });
+  const out = watchOutput(run.child);
+  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const base = `http://127.0.0.1:${port}`;
+  const client = await auditMcpClient(`${base}/mcp`, auditToken);
+  t.after(() => client.close());
+  const batch = runMcpAudit(client, { targets: [prUrl, secondUrl] });
+  await started.promise;
+  assert.equal((await deliver(base, reviewRequested("me", prUrl))).status, 202);
+  // Give an incorrectly unbounded second request time to enter GitHub while PR 7 is held.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(secondStartedEarly, false);
+  released = true;
+  assess(held!);
+  const result = await batch;
+  assert.deepEqual(result.results.map((item) => [item.prUrl, item.status]), [[prUrl, "completed"], [secondUrl, "completed"]]);
+  await out.until(/acme\/demo#7\s+Reusing saved assessment/);
+  assert.equal(calls, 2, "the queued webhook should recheck rather than lose or duplicate the running audit");
+  const failedUrl = "https://github.com/acme/demo/pull/9";
+  const partial = await client.callTool({ name: "run_audit", arguments: { targets: [prUrl, failedUrl] } });
+  assert.equal(partial.isError, true);
+  const results = (partial.structuredContent as { results: { prUrl: string; status: string; error?: string }[] }).results;
+  assert.deepEqual(results.map(({ prUrl: url, status }) => [url, status]), [[prUrl, "completed"], [failedUrl, "failed"]]);
+  assert.match(results[1]!.error!, /GitHub request failed/);
+  run.child.kill("SIGTERM");
+  const stopped = await run.done;
+  assert.equal(stopped.code, 0, stopped.stderr);
+  assert.doesNotMatch(stopped.stderr, /already in progress/);
+});
+
+test("cancelling a queued MCP audit prevents it from starting", { timeout: 30_000 }, async (t) => {
+  const secondUrl = "https://github.com/acme/demo/pull/8";
+  const first = github();
+  const second = github(undefined, [], secondUrl);
+  const started = Promise.withResolvers<void>();
+  let held: ServerResponse | undefined;
+  const f = await fixture(t, (_body, response) => { held = response; started.resolve(); },
+    { entrypoint: resolve("src/cli/audit.ts"), github: (request, response) =>
+      /\/(?:pulls|issues)\/8(?:\/|\?|$)/.test(request.url!) ? second.handler(request, response) : first.handler(request, response) });
+  const readToken = randomBytes(32).toString("hex");
+  const auditToken = randomBytes(32).toString("hex");
+  const run = f.start(["serve", "--port", "0", "--concurrency", "1", "--mcp", "--mcp-audit", "--mcp-public-url", "https://audits.example.test/mcp"],
+    { env: { ...env, PRONTO_MCP_TOKEN: readToken, PRONTO_MCP_AUDIT_TOKEN: auditToken } });
+  const [, port] = await watchOutput(run.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const client = await auditMcpClient(`http://127.0.0.1:${port}/mcp`, auditToken);
+  t.after(() => client.close());
+  const active = runMcpAudit(client, { targets: [prUrl] });
+  await started.promise;
+  const controller = new AbortController();
+  const queued = client.callTool({ name: "run_audit", arguments: { targets: [secondUrl] } }, { signal: controller.signal }).catch((error) => error);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  controller.abort();
+  await queued;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assess(held!);
+  assert.equal((await active).results[0]!.status, "completed");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.deepEqual(second.requests, [], "a cancelled queued request must not fetch PR evidence later");
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 0);
+});
+
+test("an interrupted MCP audit is recovered by serve after shutdown", { timeout: 30_000 }, async (t) => {
+  const gh = github();
+  const started = Promise.withResolvers<void>();
+  let calls = 0;
+  const f = await fixture(t, (_body, response) => {
+    if (++calls === 1) {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write(": pending\n\n");
+      started.resolve();
+    } else assess(response);
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+  const readToken = randomBytes(32).toString("hex");
+  const auditToken = randomBytes(32).toString("hex");
+  const args = ["serve", "--port", "0", "--mcp", "--mcp-audit", "--mcp-public-url", "https://audits.example.test/mcp"];
+  const launch = { env: { ...env, PRONTO_MCP_TOKEN: readToken, PRONTO_MCP_AUDIT_TOKEN: auditToken } };
+  const initial = f.start(args, launch);
+  const [, port] = await watchOutput(initial.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const client = await auditMcpClient(`http://127.0.0.1:${port}/mcp`, auditToken);
+  t.after(() => client.close());
+  const pending = client.callTool({ name: "run_audit", arguments: { targets: [prUrl], apply: true } }).catch(() => undefined);
+  await started.promise;
+  initial.child.kill("SIGTERM");
+  const stopped = await initial.done;
+  assert.equal(stopped.code, 0, stopped.stderr);
+  await pending;
+  const resumed = f.start(args, launch);
+  const out = watchOutput(resumed.child);
+  await out.until(/acme\/demo#7\s+Review: /);
+  assert.equal(calls, 2);
+  assert.equal(gh.reviews.length, 1, "saved explicit apply must survive interruption");
+  resumed.child.kill("SIGTERM");
+  assert.equal((await resumed.done).code, 0);
 });

@@ -124,6 +124,10 @@ export type AuditOptions = {
   exclude?: string[];
 };
 
+export type AuditOutcome =
+  | { status: "skipped"; reason: string }
+  | { status: "completed"; auditId: ConversationId; cached: boolean };
+
 export type RepositoryAudit = {
   database: string;
   harness: Harness;
@@ -136,7 +140,7 @@ export async function auditRequest({ target, options, repository, context, log, 
   target: ReviewTarget;
   options: AuditOptions & { models: ModelRuntime; retryFailed: boolean; restored: boolean };
   repository: RepositoryAudit; context: Context; log: AuditLog; diagnostics: AuditDiagnostics;
-}): Promise<void> {
+}): Promise<AuditOutcome> {
   const started = performance.now();
   const { harness } = repository;
   const { warn, text: diagnosticText } = diagnostics;
@@ -170,18 +174,21 @@ export async function auditRequest({ target, options, repository, context, log, 
       if (reassessment) await harness.commit((tx) => completeReassessment(tx, prKey, reassessment), context);
     };
     if (pr.merged) {
-      await skip("PR has already been merged.");
-      return;
+      const reason = "PR has already been merged.";
+      await skip(reason);
+      return { status: "skipped", reason };
     }
     if ((options.skipDrafts ?? true) && pr.draft) {
-      await skip("PR is a draft. Use --skip-drafts=false to audit anyway.");
-      return;
+      const reason = "PR is a draft. Use --skip-drafts=false to audit anyway.";
+      await skip(reason);
+      return { status: "skipped", reason };
     }
     const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));
     const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
     if (skippedLabel) {
-      await skip(`PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`);
-      return;
+      const reason = `PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`;
+      await skip(reason);
+      return { status: "skipped", reason };
     }
     const isExcluded = compileExclusions(options.exclude ?? []);
     let changedLines = (pr.additions ?? 0) + (pr.deletions ?? 0);
@@ -198,10 +205,11 @@ export async function auditRequest({ target, options, repository, context, log, 
       changedLines -= excludedLines;
     }
     if (changedLines > MAX_CHANGED_LINES) {
-      await skip(`PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`);
+      const reason = `PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`;
+      await skip(reason);
       if (uncounted) log("debug", `GitHub gave no line counts for ${uncounted} excluded file${uncounted === 1 ? "" : "s"}, so ${uncounted === 1 ? "it still counts" : "they still count"} toward the limit.`);
       if (excluded.length) outputExcludedFiles(excluded.map((file) => file.path), log);
-      return;
+      return { status: "skipped", reason };
     }
     if (options.skipApproved ?? true) {
       const approvers = await findApprovals(target, pr.head.sha, context.abortSignal);
@@ -209,8 +217,9 @@ export async function auditRequest({ target, options, repository, context, log, 
         const viewer = await fetchViewerLogin(context.abortSignal);
         const ownApproval = approvers.find((login) => login.toLowerCase() === viewer.toLowerCase());
         const approver = ownApproval ?? approvers[0]!;
-        await skip(`PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`, { publish: !ownApproval });
-        return;
+        const reason = `PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`;
+        await skip(reason, { publish: !ownApproval });
+        return { status: "skipped", reason };
       }
     }
     // Persist restart intent before cancellation/evidence fetching. A crash must not turn a requested restart into
@@ -304,7 +313,7 @@ export async function auditRequest({ target, options, repository, context, log, 
           outputSnapshotExclusions(snapshot, options.exclude, log);
           await outputReport({ harness, plan, log, context, started, conversationId: cached.conversationId,
             taskId: publication, existing, cached: true });
-          return;
+          return { status: "completed", auditId: cached.conversationId, cached: true };
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
         else {
@@ -432,6 +441,7 @@ export async function auditRequest({ target, options, repository, context, log, 
       // Keep the repository open for every handoff, not just the current output's review type.
       await Promise.allSettled(Object.values(publications).map((id) => waitForPublication(harness, id, context)));
     }
+    return { status: "completed", auditId: conversation.id, cached: false };
   } finally {
     await stream?.stop();
   }
