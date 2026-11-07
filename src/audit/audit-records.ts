@@ -1,5 +1,6 @@
 import { defineDoc, defineDocFamily, type ConversationId, type ModelRef, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
 import type { ReviewSnapshot } from "../github/reviews.ts";
+import type { PublicationChoices, PublicationResult } from "./publication.ts";
 
 export type MigrationAssessment = { status: "migration" | "not-migration" | "uncertain"; reason: string };
 export type ModelCostInfo = { model: ModelRef | null; costUsd: string };
@@ -32,3 +33,11 @@ export const AuditIdentity = defineDoc<{ fingerprint: string | null; policy: str
   initial: () => ({ fingerprint: null, policy: null }),
 });
 export const AUDIT_CONTROLLER_KIND = "app.review-audit-controller";
+
+// Explicit caller choices saved before model execution. Recovery never substitutes server flags.
+export const PublicationRequests = defineDoc<{
+  choices: PublicationChoices[]; tasks: Record<string, TaskId<PublicationResult>>;
+}>({
+  kind: "app.audit-publication-requests", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false,
+  initial: () => ({ choices: [], tasks: {} }),
+});

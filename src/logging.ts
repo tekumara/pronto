@@ -4,6 +4,11 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 /** Extra delivery metadata is shown only in verbose output. */
 export type Log = (level: LogLevel, scope: string, message: string, detail?: string) => void;
 
+/** Never emit terminal control sequences copied from remote content. */
+export function stripControlCharacters(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
 export function auditLabel(url: string): string {
   const { owner, repo, pr } = parseReviewTarget(url);
   return `${owner}/${repo}#${pr}`;

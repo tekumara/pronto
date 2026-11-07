@@ -597,7 +597,8 @@ test("Litestream death ends the term and creates a fresh independently recoverab
   await until(async () => { const current = await storage.read(); return current?.record.phase === "ready" && current.record.owner !== before.record.owner; });
   const after = (await storage.read())!;
   assert.notEqual(after.record.recovery, before.record.recovery);
-  assert.match(run.output, /Owner term ended; admission disabled and work interrupted: Error: Litestream child exited; ending owner term/);
+  // Child exit and the interrupted IPC request race to report the term's first failure.
+  assert.match(run.output, /Owner term ended; admission disabled and work interrupted: (?:Error: Litestream child exited; ending owner term|.*ECONNRESET)/);
   const duplicate = await deliver(run.base, body, { id: "survive-child" });
   assert.equal(duplicate.status, 202);
   assert.deepEqual(await duplicate.json(), { status: "duplicate" });

@@ -1,4 +1,12 @@
+import type { ReviewSnapshot } from "../github/reviews.ts";
+
 export type ExcludableFile = { path: string; previousPath?: string | null };
+
+/** Excluded paths come from the repository, so cap the list wherever they are displayed. */
+export const MAX_LISTED_FILES = 20;
+export function excludedPaths(snapshot: ReviewSnapshot): string[] {
+  return snapshot.files.filter((file) => file.excluded).map((file) => file.path);
+}
 
 function globToRegExp(glob: string): RegExp {
   let source = "";
