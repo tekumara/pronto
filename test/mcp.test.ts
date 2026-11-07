@@ -206,7 +206,8 @@ test("MCP requires authorization on every request and enforces the latest HTTP p
     { name: "same host on a different port", patch: { headers: { Origin: "https://audits.example.test:444" } }, status: 403 },
     { name: "forwarded headers cannot override Host", patch: { headers: { Host: "evil.example.test", "X-Forwarded-Host": "audits.example.test", "X-Forwarded-Proto": "https" } }, status: 403 },
     { name: "no GET stream", patch: { method: "GET", body: undefined }, status: 405 },
-    { name: "no session DELETE", patch: { method: "DELETE" }, status: 405 },
+    // Node's HTTP client does not automatically frame a DELETE body.
+    { name: "no session DELETE", patch: { method: "DELETE", headers: { "Content-Length": String(Buffer.byteLength(valid.body)) } }, status: 405 },
     { name: "no legacy protocol", patch: rpc("server/discover", {}, "2025-11-25"), status: 400, code: -32022 },
     { name: "no initialize handshake", patch: rpc("initialize"), status: 404, code: -32601 },
     { name: "missing method header", patch: { headers: { "Mcp-Method": "" } }, status: 400, code: -32020 },
