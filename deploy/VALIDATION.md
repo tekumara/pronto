@@ -52,6 +52,17 @@ Additional checks passed:
 - Node.js syntax checks, `bash -n`, and ShellCheck with the shared wizard template's unused colour warning excluded
 - `git diff --check`
 
+## Client-observed downtime sample
+
+A complete two-pod verification run on 7 November 2026 included an independent in-cluster client sending the same signed webhook through the ClusterIP Service every 100 ms, with a 1-second request timeout. The client-observed gap is the time between its last HTTP 202 response before failures and its first HTTP 202 response after recovery.
+
+| Fault | Client-observed success gap | Failed probes | Related measurement |
+| --- | ---: | ---: | --- |
+| Kill the owner pod | 30,221 ms | 48 | Successor takeover and Service routing: 30,146 ms |
+| Stop RustFS | 25,823 ms | 247 | Both Pronto pods stayed live but unready; Service had no ready endpoints |
+
+These are sampled measurements from one local run, not an SLO or zero-downtime guarantee. The probe exercises the in-cluster Service, not an external ingress or public webhook client. The full request timeline is in the ignored local artifact `.k3d/evidence/2026-11-07T11-10-50.131Z/observations.json`.
+
 ## Not verified
 
 No real GitHub/model credentials were supplied or copied from the host. Live authentication, model inference, repository access and OAuth refresh were not exercised. The credential wizard was checked statically, not run interactively by the agent.

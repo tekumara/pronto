@@ -30,6 +30,9 @@ spec:
         - name: fixture
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           command: ["node", "/app/verification/fixture.mjs"]
+          env:
+            - name: PRONTO_WEBHOOK_SECRET
+              valueFrom: {secretKeyRef: {name: pronto-app, key: PRONTO_WEBHOOK_SECRET}}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -11,6 +11,13 @@ import { apply, assertRouting, copyStorageSecret, endpoints, healthy, installApp
   podStates, run, secret, state, storageNamespace, until } from "./k3d.mjs";
 
 const ns = "pronto-verification", release = "pronto-verify";
+function clientProbe(pod, action, delivery) {
+  const method = action === "status" ? "GET" : "POST";
+  const query = delivery ? `?delivery=${encodeURIComponent(delivery)}` : "";
+  const url = `http://127.0.0.1:8081/client-probe/${action}${query}`;
+  const script = `const response = await fetch(${JSON.stringify(url)}, {method:${JSON.stringify(method)}, headers:{"x-client-probe-control":process.env.PRONTO_WEBHOOK_SECRET}}); const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); console.log(JSON.stringify(result));`;
+  return JSON.parse(k(["-n", ns, "exec", pod, "-c", "fixture", "--", "node", "--input-type=module", "-e", script]));
+}
 export async function verify() {
   assert.equal(json(["-n", "pronto", "get", "pods"]).items.length, 0,
     "Storage fault testing disrupts shared RustFS. Run verification before enabling live Pronto.");
@@ -28,7 +35,18 @@ export async function verify() {
   const logs = (pod, name = pod) => {
     try { writeFileSync(join(directory, name + ".log"), k(["-n", ns, "logs", pod, "-c", "pronto"])); } catch {}
   };
-  let stoppedController = false, stoppedStorage = false;
+  let stoppedController = false, stoppedStorage = false, clientProbeActive = false, clientPod;
+  const beginClientProbe = async (delivery, fault) => {
+    clientProbe(clientPod, "start", delivery);
+    clientProbeActive = true;
+    await until(() => clientProbe(clientPod, "status").baselineSuccessAt, `client reaches Service before ${fault}`, 15_000);
+    return clientProbe(clientPod, "arm");
+  };
+  const finishClientProbe = () => {
+    const result = clientProbe(clientPod, "finish");
+    clientProbeActive = false;
+    return result;
+  };
   try {
     try {
       const existing = json(["get", "namespace", ns]);
@@ -52,6 +70,9 @@ export async function verify() {
     apply({ apiVersion: "v1", kind: "ConfigMap", metadata: { namespace: ns, name: "pronto-verification" },
       data: Object.fromEntries(["fixture.mjs", "probe.mjs"].map((file) => [file, readFileSync(join("deploy/verification", file), "utf8")])) });
     installApp(ns, release, `verification/${randomUUID()}`, { verification: true });
+    clientPod = await until(() => json(["-n", ns, "get", "pods", "-l", `pronto-fixture=${release}`]).items
+      .find((pod) => pod.status.containerStatuses?.some((container) => container.name === "fixture" && container.ready))?.metadata.name,
+    "independent client fixture is Ready", 60_000);
     const initial = await healthy(ns, release, 2, 120_000);
     const owner = initial.find((p) => p.ready === 200), standby = initial.find((p) => p.ready === 503);
     await assertRouting(ns, release, owner.name);
@@ -70,6 +91,9 @@ export async function verify() {
     record("acknowledged", probe(owner.name, "deliver", delivery, "queued"));
     const before = probe(owner.name, "snapshot", delivery);
     record("independent-restore-before-crash", before);
+    const crashClientStart = await beginClientProbe(delivery, "owner crash");
+    record("client-probe-armed-before-crash", { baselineSuccessAt: crashClientStart.baselineSuccessAt,
+      intervalMs: crashClientStart.intervalMs, timeoutMs: crashClientStart.timeoutMs });
     logs(owner.name, "crashed-owner");
     const containerId = json(["-n", ns, "get", "pod", owner.name]).status.containerStatuses.find((c) => c.name === "pronto").containerID.split("://")[1];
     const crashedAt = Date.now();
@@ -92,6 +116,12 @@ export async function verify() {
     assert.ok(takeoverMs < 60_000, "Takeover exceeded the cluster test bound");
     assert.ok(takeoverMs >= before.leaseExpires - crashedAt - 1_500, "Takeover occurred before the killed owner\'s lease could expire");
     record("crash-takeover", { takeoverMs, owner: survivor.name, endpoints: endpoints(ns, release) });
+    const crashClient = finishClientProbe();
+    assert.ok(crashClient.attempts > 0, "Independent client made no requests during owner takeover");
+    assert.equal(crashClient.finishTimedOut, false, "Client did not receive a successful response after owner takeover");
+    assert.ok(crashClient.firstFailureAt === null || crashClient.firstRecoveryAt,
+      "Client requests failed during takeover but never recovered");
+    record("crash-client-downtime", crashClient);
     // The old container must be exited or already garbage-collected, never running.
     let oldContainer;
     try { oldContainer = JSON.parse(run("docker", ["exec", owner.node, "crictl", "inspect", containerId])); }
@@ -110,6 +140,9 @@ export async function verify() {
 
     const claims = json(["-n", storageNamespace, "get", "pvc"]).items.map((p) => ({ name: p.metadata.name, uid: p.metadata.uid, volume: p.spec.volumeName }));
     assert.ok(claims.length > 0);
+    const storageClientStart = await beginClientProbe(delivery, "RustFS outage");
+    record("client-probe-armed-before-storage-outage", { baselineSuccessAt: storageClientStart.baselineSuccessAt,
+      intervalMs: storageClientStart.intervalMs, timeoutMs: storageClientStart.timeoutMs });
     k(["-n", storageNamespace, "scale", "deployment", "rustfs", "--replicas=0"]);
     stoppedStorage = true;
     await until(() => {
@@ -125,6 +158,12 @@ export async function verify() {
     const final = await healthy(ns, release, 2, 120_000);
     const finalOwner = final.find((p) => p.ready === 200);
     await assertRouting(ns, release, finalOwner.name);
+    const storageClient = finishClientProbe();
+    assert.ok(storageClient.attempts > 0, "Independent client made no requests during the RustFS outage");
+    assert.equal(storageClient.finishTimedOut, false, "Client did not receive a successful response after the RustFS restart");
+    assert.ok(storageClient.firstFailureAt === null || storageClient.firstRecoveryAt,
+      "Client requests failed during the RustFS outage but never recovered");
+    record("storage-client-downtime", storageClient);
     assert.deepEqual(json(["-n", storageNamespace, "get", "pvc"]).items.map((p) => ({ name: p.metadata.name, uid: p.metadata.uid, volume: p.spec.volumeName })), claims);
     record("deduplicated-after-storage-restart", probe(finalOwner.name, "deliver", delivery, "duplicate"));
     record("independent-restore-after-storage-restart", probe(finalOwner.name, "snapshot", delivery));
@@ -138,6 +177,8 @@ export async function verify() {
     record("failed", { message: error.message });
     throw error;
   } finally {
+    // Stop the independent monitor before restoring infrastructure on failure.
+    if (clientProbeActive && clientPod) { try { clientProbe(clientPod, "stop"); } catch {} }
     // Restore infrastructure even if an assertion fails; never touch live credentials.
     if (stoppedStorage) k(["-n", storageNamespace, "scale", "deployment", "rustfs", "--replicas=1"]);
     if (stoppedController) k(["-n", ns, "scale", "statefulset", stoppedController, "--replicas=1"]);

@@ -44,6 +44,8 @@ The check:
 8. Replaces the RustFS pod, checks that its PVC identity remains unchanged, and repeats the restore and deduplication checks.
 9. Requires zero model calls and zero review publication attempts.
 
+An independent client in the fixture pod also sends the same signed, already-acknowledged webhook through the ClusterIP Service every 100 ms, with a 1-second request timeout, across owner-crash and RustFS-outage recovery. Evidence records the last successful response, failed attempts, first recovery response, and `clientObservedGapMs` (last 202 response to first 202 response after failures). This is sampled in-cluster Service downtime, not an external ingress or public-webhook measurement; the repeated delivery ID makes probes idempotent.
+
 The webhook targets a fixture draft PR, so no inference is needed. Existing local integration tests cover the audit/model path separately.
 
 Verification refuses to run while live Pronto pods exist: stopping shared RustFS would disrupt them. It restores scaled-down controllers on failure and leaves the test namespace for diagnosis. Logs and observations go under `.k3d/evidence/`. Retained test prefixes are not deleted.
