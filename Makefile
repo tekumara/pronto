@@ -4,6 +4,8 @@ SHELL := /bin/bash
 # config tracking needs extra permissions. Fall back to PATH if mise can't resolve it.
 NODE_BIN := $(shell mise which node --tool=node 2>/dev/null || command -v node)
 PORT ?= 43221
+# Canonical MCP URL; override this when serving through a TLS reverse proxy.
+MCP_PUBLIC_URL ?= https://localhost:$(PORT)/mcp
 S3_PORT ?= 9000
 S3_DATA_DIR ?= $(HOME)/.local/state/pronto-rustfs
 S3_ACCESS_KEY ?= pronto-local
@@ -27,8 +29,8 @@ audit: ## Audit the PR URLs supplied in PRS
 	npm run audit -- $(foreach pr,$(PRS),--pr '$(pr)') --approve --apply --skip human-review
 
 # Resolve gh auth outside nono so the sandbox doesn't need Keychain access.
-nono-serve: ## Run the Pronto server inside nono
-	GITHUB_TOKEN="$$(gh auth token)" nono run --profile pronto --allow-cwd --listen-port $(PORT) -- "$(NODE_BIN)" --experimental-strip-types src/cli/audit.ts serve --apply --approve --port $(PORT) 2>&1 | tee -a /tmp/pronto-serve.log
+nono-serve: ## Run the Pronto server with MCP inside nono
+	GITHUB_TOKEN="$$(gh auth token)" nono run --profile pronto --allow-cwd --listen-port $(PORT) -- "$(NODE_BIN)" --experimental-strip-types src/cli/audit.ts serve --apply --approve --port $(PORT) --mcp --mcp-public-url "$(MCP_PUBLIC_URL)" 2>&1 | tee -a /tmp/pronto-serve.log
 
 # Start local-only RustFS for S3-compatible replication tests. Override S3_* as needed.
 s3: ## Start local RustFS for S3 replication tests
