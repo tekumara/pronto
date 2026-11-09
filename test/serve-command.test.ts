@@ -573,7 +573,7 @@ test("serve rejects unsafe MCP configuration before credentials, recovery or lis
     { args: ["--mcp-public-url", url], bearer: "", error: /PRONTO_MCP_TOKEN/ },
     { args: ["--mcp-public-url", url], bearer: "short", error: /at least 32 characters/ },
     { args: ["--mcp-public-url", url], bearer, webhook: bearer, error: /must differ from PRONTO_WEBHOOK_SECRET/ },
-    { args: ["--mcp-public-url", "http://audits.example.test/mcp"], bearer, error: /HTTPS/ },
+    { args: ["--mcp-public-url", "http://audits.example.test/mcp"], bearer, error: /HTTPS.*loopback/ },
     { args: ["--mcp-public-url", "https://audits.example.test/webhook"], bearer, error: /path must differ/ },
     { args: ["--mcp-public-url", "https://audits.example.test/healthz"], bearer, error: /path must differ/ },
     { args: ["--mcp-public-url", "https://audits.example.test/readyz"], bearer, error: /path must differ/ },

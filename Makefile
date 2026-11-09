@@ -4,8 +4,8 @@ SHELL := /bin/bash
 # config tracking needs extra permissions. Fall back to PATH if mise can't resolve it.
 NODE_BIN := $(shell mise which node --tool=node 2>/dev/null || command -v node)
 PORT ?= 43221
-# Canonical MCP URL; override this when serving through a TLS reverse proxy.
-MCP_PUBLIC_URL ?= https://localhost:$(PORT)/mcp
+# Canonical MCP URL; HTTP is allowed on loopback. Override for a TLS reverse proxy.
+MCP_PUBLIC_URL ?= http://127.0.0.1:$(PORT)/mcp
 S3_PORT ?= 9000
 S3_DATA_DIR ?= $(HOME)/.local/state/pronto-rustfs
 S3_ACCESS_KEY ?= pronto-local

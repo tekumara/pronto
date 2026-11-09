@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { hostHeaderValidation, toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, fromJsonSchema, McpServer, type JsonSchemaType } from "@modelcontextprotocol/server";
@@ -12,11 +13,19 @@ export const MCP_PROTOCOL_VERSION = "2026-07-28";
 const MAX_REQUEST_BYTES = 64 * 1024;
 const skillUri = "skill://pronto-audit-discussion/SKILL.md";
 
-/** The public URL is configuration, never inferred from untrusted forwarded headers. */
+/** The canonical URL is configuration, never inferred from untrusted forwarded headers. */
+function isLoopbackHostname(hostname: string): boolean {
+  if (hostname === "localhost") return true;
+  const address = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  return address === "::1" || (isIP(address) === 4 && address.startsWith("127."));
+}
+
 function mcpPublicUrl(value: string): URL {
   const url = new URL(value);
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname === "/") {
-    throw new Error("The MCP public URL must be HTTPS with an endpoint path, no credentials, query or fragment.");
+  const secure = url.protocol === "https:";
+  const localHttp = url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  if ((!secure && !localHttp) || url.username || url.password || url.search || url.hash || url.pathname === "/") {
+    throw new Error("The MCP public URL must be HTTPS, or HTTP on localhost/loopback, with an endpoint path, no credentials, query or fragment.");
   }
   return url;
 }

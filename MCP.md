@@ -12,7 +12,7 @@ Install and configure `pronto serve` as described in the [technical guide](GUIDE
 
 1. Choose the absolute `PRONTO_STATE_DIR` containing the repository databases you want to share.
 2. Generate a dedicated secret once with `openssl rand -hex 32`. Store it in your secret manager. Inject it as `PRONTO_MCP_TOKEN` on the server and transfer it securely to authorised clients.
-3. Start Pronto behind an HTTPS reverse proxy.
+3. For remote access, start Pronto behind an HTTPS reverse proxy. For loopback-only local use, the MCP URL can use HTTP.
 
 ```sh
 # Inject PRONTO_WEBHOOK_SECRET and PRONTO_MCP_TOKEN before running this command.
@@ -25,7 +25,7 @@ MCP is disabled by default. It shares the `serve` listener, which defaults to `1
 | Option | Meaning |
 | --- | --- |
 | `--mcp` | Enable the MCP endpoint for audit reads and execution |
-| `--mcp-public-url` | Required with `--mcp`; public HTTPS URL, including the endpoint path |
+| `--mcp-public-url` | Required with `--mcp`; an HTTPS URL, or an HTTP URL on `localhost` or a loopback IP, including the endpoint path |
 | `--mcp-allow-origin` | Additional trusted HTTPS browser origin; repeat as needed |
 | `--host` | Shared bind address; default `127.0.0.1` |
 | `--port` | Shared HTTP port; default `8080`; `0` selects a free port for local checks |
@@ -77,9 +77,9 @@ The example proxies `/mcp` and `/webhook` to the same port. Health and readiness
 
 Pronto validates Host against the configured public hostname and loopback diagnostic hosts. It does not trust `X-Forwarded-Host` or `X-Forwarded-Proto`. The configured public URL determines routing and the default allowed browser origin.
 
-Requests without an Origin header are accepted with valid authentication, as needed by server-side agents. When Origin is present, it must exactly match the public HTTPS origin or a configured `--mcp-allow-origin`. Opaque, HTTP and unlisted origins are rejected. This is not a CORS-enabled browser API: no browser preflight endpoint or wildcard origin is provided.
+Requests without an Origin header are accepted with valid authentication, as needed by server-side agents. When Origin is present, it must exactly match the origin of `--mcp-public-url` or a configured `--mcp-allow-origin`. HTTP is permitted only for the loopback public URL; additional allowed origins must use HTTPS. Opaque and unlisted origins are rejected. This is not a CORS-enabled browser API: no browser preflight endpoint or wildcard origin is provided.
 
-Use a trusted certificate and normal TLS verification on the client. Do not disable certificate checks. Avoid logging credentials or raw evidence at the proxy or client.
+For remote access, use a trusted certificate and normal TLS verification on the client. Do not disable certificate checks. Avoid logging credentials or raw evidence at the proxy or client.
 
 ## Connect a current client
 

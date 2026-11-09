@@ -20,8 +20,8 @@ const publicUrl = "https://audits.example.test/mcp";
 const secret = () => randomBytes(32).toString("hex");
 const repositoryPath = (stateDir: string) => join(stateDir, "repos/github.com/acme~demo.sqlite");
 
-async function launchMcp(f: Awaited<ReturnType<typeof fixture>>, token: string, origins: string[] = []) {
-  const running = f.start([publicUrl, ...origins], {
+async function launchMcp(f: Awaited<ReturnType<typeof fixture>>, token: string, origins: string[] = [], endpointUrl = publicUrl) {
+  const running = f.start([endpointUrl, ...origins], {
     entrypoint: resolve("test/mcp-host.ts"), env: { PRONTO_MCP_TOKEN: token, PI_CODING_AGENT_DIR: join(f.directory, "no-model-login") },
   });
   running.child.stdin.end();
@@ -163,6 +163,28 @@ function rpc(method = "server/discover", params: Record<string, unknown> = {}, v
     } } }),
   };
 }
+
+test("MCP accepts HTTP only for loopback public URLs and still validates Origin", { timeout: 20000 }, async (t) => {
+  const f = await fixture(t, () => assert.fail("MCP Origin checks must not call a model"));
+  const token = secret();
+  const configuredUrl = "http://127.0.0.1:43221/mcp";
+  const server = await launchMcp(f, token, [], configuredUrl);
+  const message = rpc();
+  const request = (origin: string) => new Promise<number>((done, reject) => {
+    const req = httpRequest(server.url, {
+      method: message.method,
+      headers: { ...message.headers, Authorization: `Bearer ${token}`, Origin: origin },
+    }, (response) => {
+      response.resume();
+      response.on("end", () => done(response.statusCode!));
+    });
+    req.on("error", reject);
+    req.end(message.body);
+  });
+  assert.equal(await request(new URL(configuredUrl).origin), 200, "the configured loopback Origin is allowed");
+  assert.equal(await request("http://evil.example.test"), 403, "other HTTP Origins remain denied");
+  await server.stop();
+});
 
 test("MCP requires authorization on every request and enforces the latest HTTP protocol without creating state", { timeout: 20000 }, async (t) => {
   const f = await fixture(t, () => assert.fail("MCP must not call a model"));

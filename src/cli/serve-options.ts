@@ -56,13 +56,13 @@ export function parseServeOptions(args: string[]) {
   }
   const publicUrl = values.get("--mcp-public-url");
   if (!mcpEnabled && (publicUrl || allowedOrigins.length)) throw new Error(`MCP options require --mcp\n${SERVE_USAGE}`);
-  if (mcpEnabled && !publicUrl) throw new Error(`--mcp requires --mcp-public-url <https-url>\n${SERVE_USAGE}`);
+  if (mcpEnabled && !publicUrl) throw new Error(`--mcp requires --mcp-public-url <https-url-or-http-loopback-url>\n${SERVE_USAGE}`);
   if (mcpEnabled && replicatedState) throw new Error(`--mcp is not yet supported with --replicated-state: MCP needs the active owner's term-isolated audit source\n${SERVE_USAGE}`);
   const mcp = mcpEnabled ? { publicUrl: publicUrl!, allowedOrigins } : undefined;
   if (mcp) {
     let endpoint: URL;
     try { endpoint = new URL(mcp.publicUrl); }
-    catch { throw new Error(`--mcp-public-url must be an absolute HTTPS URL\n${SERVE_USAGE}`); }
+    catch { throw new Error(`--mcp-public-url must be an absolute URL\n${SERVE_USAGE}`); }
     if ([path, "/healthz", "/readyz"].includes(endpoint.pathname)) throw new Error(`The MCP path must differ from the webhook, health and readiness paths\n${SERVE_USAGE}`);
   }
   return { ...parseAuditOptions(rest, "serve"), port, host: values.get("--host") ?? DEFAULT_HOST, concurrency, path, verbose, replicatedState, mcp };

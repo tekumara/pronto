@@ -179,7 +179,7 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 
 `--replicated-state` enables experimental term-isolated S3 state. It defaults to off; ordinary serve, audits and chat do not need replica configuration or start replication. See [replicated state setup, RustFS tests and safety limits](REPLICATED_STATE.md) before enabling it. `GET /readyz` reports admission readiness separately from `/healthz` liveness. An unready replicated process returns 503 for application requests, without forwarding them.
 
-`--mcp --mcp-public-url <https-url>` adds an MCP endpoint to this listener. It requires `PRONTO_MCP_TOKEN`, which lets clients read and run audits and publish reviews when they request `apply`. Existing read-only MCP tokens gain these permissions. MCP is disabled by default and cannot be combined with `--replicated-state`. See [MCP setup](MCP.md) for access and client requirements.
+`--mcp --mcp-public-url <https-url-or-http-loopback-url>` adds an MCP endpoint to this listener. It requires `PRONTO_MCP_TOKEN`, which lets clients read and run audits and publish reviews when they request `apply`. Existing read-only MCP tokens gain these permissions. MCP is disabled by default and cannot be combined with `--replicated-state`. See [MCP setup](MCP.md) for access and client requirements.
 
 `--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
 
