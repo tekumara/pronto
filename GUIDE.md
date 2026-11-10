@@ -197,7 +197,7 @@ Serve mode logs a compact activity feed. Each line has a UTC timestamp, level an
 
 `Queued` means the delivery was accepted, even if an audit slot is available immediately. `Preparing` means the audit is making GitHub checks and fetching evidence. `Started` means the evidence is saved and ready for assessment. Preparation can instead end with a skip, a resumed snapshot or a reused assessment. The final elapsed time includes the GitHub checks and evidence fetch, not just model work.
 
-Add `--verbose` to include ignored deliveries, duplicates, coalesced requests, delivery IDs, tool calls, cache changes and full reports. Every line of a multiline report keeps its timestamp and PR label so concurrent audits remain identifiable. The regular CLI still prints its full report by default.
+Add `--verbose` to include ignored deliveries, duplicates, coalesced requests, delivery IDs, tool calls, MCP tool names, outcomes and durations, cache changes and full reports. Every line of a multiline report keeps its timestamp and PR label so concurrent audits remain identifiable. The regular CLI still prints its full report by default.
 
 Retries, failures, recovery and shutdown messages remain visible without `--verbose`. Warnings and errors go to stderr; activity and debug messages go to stdout. For example, capture both with `pronto serve --apply 2>&1 | tee -a pronto.log`.
 

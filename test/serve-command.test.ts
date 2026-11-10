@@ -152,6 +152,11 @@ for (const verbose of [false, true]) {
       assert.equal(page.audit.headSha, headSha);
       assert.equal(page.audit.status, "completed");
       assert.deepEqual(JSON.parse(page.content).findings, []);
+      await out.until(/DEBUG\s+mcp\s+pronto-audits\/read_audit completed · duration=\d+\.\d+ms/);
+      assert.match(out.output, /DEBUG\s+mcp\s+pronto-audits\/read_audit started/);
+      const missing = await client.callTool({ name: "read_audit", arguments: { prUrl: "https:\/\/github.com\/acme\/demo\/pull\/999" } });
+      assert.equal(missing.isError, true);
+      await out.until(/DEBUG\s+mcp\s+pronto-audits\/read_audit failed · duration=\d+\.\d+ms/);
       assert.equal(gh.requests.length, reads, "MCP discovery and saved reads must not fetch GitHub or enter the audit lifecycle");
       assert.equal(modelCalls, 1, "sharing the listener must not start another assessment");
       assert.equal((await deliver(base, "{}", { event: "ping", path: "/mcp" })).status, 401, "a valid webhook signature is not an MCP credential");
@@ -181,7 +186,7 @@ for (const verbose of [false, true]) {
     assert.match(result.stdout, /Received SIGTERM; stopping/);
     assert.equal(gh.reviews.length, 1);
     for (const line of result.stdout.trim().split("\n")) {
-      assert.match(line, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (INFO|DEBUG)\s+(serve|webhook|acme\/demo#7)\s+\S/,
+      assert.match(line, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (INFO|DEBUG)\s+(serve|webhook|mcp|acme\/demo#7)\s+\S/,
         "every line, including multiline reports, needs its own timestamp, level and context");
     }
   });
