@@ -9,7 +9,7 @@ import { selectModel } from "../model.ts";
 
 export const runAuditTool = {
   name: "run_audit",
-  description: "Run the CLI audit for one or more PRs. This can spend model credits; apply=true can post GitHub reviews, including approvals. Use only when explicitly requested. Defaults match pronto, not serve's webhook flags. Omitted targets select the server's current branch; numbers and branches use the server's Git/GH_REPO, never the client's checkout. Waits for each audit; interrupted work may be recovered. Use read_audit with the returned auditId to inspect completed evidence.",
+  description: "Run the CLI audit for one or more PRs. This can spend model credits; apply=true can post GitHub reviews, including approvals. Use only when explicitly requested. Defaults match pronto, not serve's webhook flags. Omitted targets select the server's current branch; numbers and branches use the server's Git/GH_REPO, never the client's checkout. Returns a normal result if the audit finishes within one second. If the client declares io.modelcontextprotocol/tasks, longer calls return a durable task; poll tasks/get at its pollIntervalMs. tasks/cancel is cooperative and cannot undo saved audit or publication work. Use read_audit with the returned auditId to inspect completed evidence.",
   parameters: obj({
     targets: opt(arr(str({ minLength: 1 }), { minItems: 1, description: "CLI PR selectors: URL, owner/repo#number, number or branch. Omit for the server's current branch." })),
     model: opt(str({ minLength: 1, description: "CLI provider/model-id; omitted uses the server's CLI default model." })),

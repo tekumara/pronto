@@ -1,0 +1,199 @@
+import assert from "node:assert/strict";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { test } from "node:test";
+import type { ConversationId } from "@earendil-works/pi-durable";
+import { createAuditMcpEndpoint, MCP_PROTOCOL_VERSION } from "../src/discussion/mcp.ts";
+import { createMcpAuditRunner } from "../src/discussion/run-audit.ts";
+import { MCP_TASKS_EXTENSION, MCP_TASK_POLL_INTERVAL_MS } from "../src/discussion/mcp-tasks.ts";
+
+const target = "https://github.com/acme/demo/pull/42";
+type AuditRunner = ReturnType<typeof createMcpAuditRunner>;
+type AuditResult = Awaited<ReturnType<AuditRunner>>;
+const result: AuditResult = {
+  results: [{ prUrl: target, status: "completed", auditId: 31 as unknown as ConversationId, cached: false }],
+  apply: false,
+};
+type TaskView = { taskId?: string; status?: string; ttlMs?: number; pollIntervalMs?: number; result?: { resultType?: string; structuredContent?: unknown } };
+type RpcResult = {
+  resultType?: string;
+  structuredContent?: unknown;
+  task?: TaskView;
+  taskId?: string;
+  status?: string;
+  ttlMs?: number;
+  pollIntervalMs?: number;
+  result?: { resultType?: string; structuredContent?: unknown };
+  capabilities?: { extensions?: Record<string, unknown> };
+};
+type RpcBody = { result?: RpcResult; error?: { code: number; message: string } };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+async function host(root: string, runAudit: AuditRunner) {
+  const token = randomBytes(32).toString("hex");
+  const endpoint = await createAuditMcpEndpoint({
+    token, root, publicUrl: "http://127.0.0.1:43210/mcp", runAudit, log: () => {},
+  });
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => { void endpoint.handle(req, res); });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
+  });
+  const address = server.address() as AddressInfo;
+  let id = 0;
+  let closed = false;
+  return {
+    url: `http://127.0.0.1:${address.port}/mcp`, token, endpoint,
+    async request(method: string, params: Record<string, unknown> = {}, supportsTasks = true) {
+      const capabilities = supportsTasks ? { extensions: { [MCP_TASKS_EXTENSION]: {} } } : {};
+      const body = JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params: {
+        ...params,
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": capabilities,
+          "io.modelcontextprotocol/clientInfo": { name: "task-contract-test", version: "1" },
+        },
+      } });
+      const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+          "Mcp-Method": method,
+          ...(typeof (params.name ?? params.uri ?? params.taskId) === "string"
+            ? { "Mcp-Name": String(params.name ?? params.uri ?? params.taskId) } : {}),
+        },
+        body,
+      });
+      return { status: response.status, body: await response.json() as RpcBody };
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      await endpoint.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    },
+  };
+}
+
+async function untilCompleted(request: (method: string, params?: Record<string, unknown>, supportsTasks?: boolean) => Promise<{ status: number; body: RpcBody }>, taskId: string) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const response = await request("tasks/get", { taskId });
+    assert.equal(response.status, 200);
+    const task = response.body.result;
+    assert.ok(task, JSON.stringify(response.body));
+    if (task.status === "completed") return task;
+    assert.equal(task.status, "working", JSON.stringify(response.body));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail("MCP task did not complete before the test deadline");
+}
+
+test("MCP task-capable clients get fast results synchronously and can resume long tasks after restart", { timeout: 20_000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pronto-mcp-tasks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const started = deferred<void>();
+  const quickRunner: AuditRunner = async (args, signal) => {
+    if (!args.targets) return result;
+    started.resolve();
+    return new Promise<AuditResult>((_resolve, reject) => {
+      const abort = () => reject(signal.reason ?? new Error("aborted"));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+  };
+  const first = await host(root, quickRunner);
+  t.after(() => first.close());
+
+  const discovered = await first.request("server/discover");
+  assert.deepEqual(discovered.body.result?.capabilities?.extensions?.[MCP_TASKS_EXTENSION], {});
+  const quick = await first.request("tools/call", { name: "run_audit", arguments: {} });
+  assert.equal(quick.status, 200);
+  assert.equal(quick.body.result?.resultType, "complete");
+  assert.deepEqual(quick.body.result?.structuredContent, result);
+
+  const pendingCall = first.request("tools/call", { name: "run_audit", arguments: { targets: [target] } });
+  await started.promise;
+  const created = await pendingCall;
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(created.body.result?.resultType, "task");
+  const task = created.body.result?.task;
+  assert.ok(task?.taskId);
+  const taskId = task.taskId;
+  assert.equal(task.status, "working");
+  assert.equal(task.pollIntervalMs, MCP_TASK_POLL_INTERVAL_MS);
+  assert.ok(task.ttlMs && task.ttlMs > 0);
+  const databaseHeader = await readFile(join(root, "mcp-tasks.sqlite"));
+  assert.equal(databaseHeader.subarray(0, 16).toString("utf8"), "SQLite format 3\0");
+  const working = await first.request("tasks/get", { taskId });
+  assert.equal(working.body.result?.status, "working");
+
+  await first.close();
+  const resumed = deferred<void>();
+  const finish = deferred<AuditResult>();
+  const recoveredRunner: AuditRunner = async () => {
+    resumed.resolve();
+    return finish.promise;
+  };
+  const second = await host(root, recoveredRunner);
+  t.after(() => second.close());
+  await second.endpoint.resumeTasks();
+  await resumed.promise;
+  const afterRestart = await second.request("tasks/get", { taskId });
+  assert.equal(afterRestart.body.result?.status, "working");
+  finish.resolve(result);
+  const completed = await untilCompleted(second.request, taskId);
+  assert.deepEqual(completed.result?.structuredContent, result);
+  assert.equal(completed.result?.resultType, "complete");
+});
+
+test("MCP tasks/cancel asks cooperative audit work to stop", { timeout: 10_000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pronto-mcp-tasks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const started = deferred<void>();
+  const runner: AuditRunner = async (_args, signal) => {
+    started.resolve();
+    return new Promise<AuditResult>((_resolve, reject) => {
+      const abort = () => reject(signal.reason ?? new Error("aborted"));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+  };
+  const server = await host(root, runner);
+  t.after(() => server.close());
+  const pendingCall = server.request("tools/call", { name: "run_audit", arguments: { targets: [target] } });
+  await started.promise;
+  const created = await pendingCall;
+  assert.equal(created.body.result?.resultType, "task");
+  const taskId = created.body.result?.task?.taskId;
+  assert.ok(taskId);
+
+  const cancelled = await server.request("tasks/cancel", { taskId });
+  assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
+  assert.equal(cancelled.body.result?.resultType, "complete");
+  const deadline = Date.now() + 3_000;
+  let state: RpcResult | undefined;
+  do {
+    const response = await server.request("tasks/get", { taskId });
+    state = response.body.result;
+    if (state?.status === "cancelled") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } while (Date.now() < deadline);
+  assert.equal(state?.status, "cancelled", JSON.stringify(state));
+
+  const unsupported = await server.request("tasks/get", { taskId }, false);
+  assert.equal(unsupported.body.error?.code, -32602);
+});

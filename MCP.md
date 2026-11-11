@@ -4,7 +4,7 @@
 
 The MCP token can run audits and post GitHub reviews when a caller sets `apply: true`. Previously read-only MCP tokens now have these permissions. Rotate or restrict existing tokens before enabling the upgraded endpoint.
 
-The endpoint supports MCP `2026-07-28` only. It uses stateless Streamable HTTP with JSON responses, per-request metadata and `server/discover`. It does not support stdio, `initialize`, protocol sessions, GET event streams or older MCP versions.
+The endpoint supports MCP `2026-07-28` only. It uses stateless Streamable HTTP with JSON responses, per-request metadata and `server/discover`. It advertises the `io.modelcontextprotocol/tasks` extension for long `run_audit` calls. It does not support stdio, `initialize`, protocol sessions, GET event streams or older MCP versions.
 
 ## Start the endpoint
 
@@ -60,7 +60,13 @@ For example, `run_audit({targets: ["https://github.com/owner/repo/pull/42"], for
 
 Numbers and branches use the server's `GH_REPO` or Git checkout, not the client's. An omitted target uses the server's current branch. Use explicit PR URLs when that context is not intended. The tool resolves and validates the whole batch before starting audits. The request body is limited to 64 KiB.
 
-The call waits for each audit. Its structured and text results contain `apply` and a `results` array in target order. Each result has a `prUrl` and a `status`: `completed`, `skipped` or `failed`. A completed result includes `auditId` and `cached`; a skipped result includes `reason`; a failed result includes `error`. If any PR fails, the tool result has `isError: true` and still includes the other results. Use the completed result's `prUrl` and `auditId` with `read_audit` for its evidence. A skip does not select an older audit.
+If an audit finishes within one second, `run_audit` returns the usual tool result. If it takes longer and the client declares `io.modelcontextprotocol/tasks` in its per-request capabilities, Pronto returns a task handle instead. Clients that do not declare the extension retain the synchronous behavior.
+
+The synchronous result, or the completed task's `result`, contains `apply` and a `results` array in target order. Each result has a `prUrl` and a `status`: `completed`, `skipped` or `failed`. A completed result includes `auditId` and `cached`; a skipped result includes `reason`; a failed result includes `error`. If any PR fails, the tool result has `isError: true` and still includes the other results. Use the completed result's `prUrl` and `auditId` with `read_audit` for its evidence. A skip does not select an older audit.
+
+The task handle includes a `taskId`, `ttlMs` and `pollIntervalMs`. Call `tasks/get` with that ID, sending the tasks extension capability on every request, and wait at least the advertised poll interval between polls. Pronto currently asks clients to poll every 1,000 ms. Task IDs and results are stored in the `mcp-tasks.sqlite` database under the configured state directory; completed task records are retained for 24 hours. In-progress tasks resume after a server restart using the audit runner's existing recovery behavior.
+
+`tasks/cancel` requests cooperative cancellation. Pronto aborts waiting or active work where possible, but cancellation cannot undo an audit or publication that has already been saved. A server restart may also recover durable audit work independently of the task handle. Check the audit and GitHub before retrying an `apply: true` request.
 
 MCP and webhook audits share `--concurrency` and do not overlap on the same PR. Work waiting for a slot is held in memory; cancellation removes a waiting call. A disconnect or shutdown can interrupt an active call. Once audit work or publication intent is saved, it may continue or recover after restart, including an explicitly requested `apply`. A lost response does not prove that no review was posted. Check the saved audit and GitHub before retrying.
 
@@ -107,7 +113,7 @@ The official SDK supplies the mandatory metadata and matching HTTP headers. Hand
 - `Content-Type: application/json` and an Accept header permitting JSON
 - `MCP-Protocol-Version: 2026-07-28`
 - `Mcp-Method` matching the JSON-RPC method
-- `Mcp-Name` matching the tool name or resource URI when required by that method
+- `Mcp-Name` matching the tool name, resource URI or task ID when required by that method
 - `params._meta` with `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities`, and preferably `io.modelcontextprotocol/clientInfo`
 
 Bodies are limited to 64 KiB, including chunked requests. Pronto does not mint, retain or resume a `Mcp-Session-Id`. Legacy session and event-ID headers have no meaning.
@@ -155,4 +161,4 @@ Saved evidence does not establish current GitHub comments, thread resolution, ap
 
 Run `npm run check` and `npm test`. The MCP tests use real HTTP, the pinned modern SDK client and its native skill verifier. Audits come from the real CLI against simulated external endpoints.
 
-They cover complete paginated sources, pinned code, malformed protocol traffic, credentials, origins, Host validation, oversized bodies, independent clients, restart and snapshot replacement. They also request read-only MCP tools against committed assessment and publication checkpoints while the audit owner lock is held, and verify unchanged state and external request counts. Combined serve tests cover the single credential, CLI options and defaults, publication safeguards, shared concurrency, cancellation and recovery. MCP stays unavailable without the flag.
+They cover complete paginated sources, pinned code, malformed protocol traffic, credentials, origins, Host validation, oversized bodies, independent clients, restart and snapshot replacement. They also request read-only MCP tools against committed assessment and publication checkpoints while the audit owner lock is held, and verify unchanged state and external request counts. Task tests cover capability discovery, synchronous quick results, durable polling across restart and cooperative cancellation. Combined serve tests cover the single credential, CLI options and defaults, publication safeguards, shared concurrency, cancellation and recovery. MCP stays unavailable without the flag.
