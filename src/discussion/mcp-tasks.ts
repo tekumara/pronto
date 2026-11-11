@@ -320,7 +320,7 @@ function raceQuickWindow<T>(operation: Promise<T>, signal: AbortSignal): Promise
 /** Implements the Tasks extension around Pronto's existing audit runner. */
 export function createMcpTaskManager({ root, execute, onError = () => {} }: {
   root: string;
-  execute(args: RunAuditArguments, signal: AbortSignal): Promise<CallToolResult>;
+  execute(args: RunAuditArguments, signal: AbortSignal, requestId?: string): Promise<CallToolResult>;
   onError?: (message: string) => void;
 }) {
   const store = new DurableTaskStore(root);
@@ -345,13 +345,13 @@ export function createMcpTaskManager({ root, execute, onError = () => {} }: {
   }
 
   return {
-    async run(args: RunAuditArguments, requestSignal: AbortSignal, supportsTasks: boolean): Promise<CallToolResult> {
+    async run(args: RunAuditArguments, requestSignal: AbortSignal, supportsTasks: boolean, requestId?: string): Promise<CallToolResult> {
       if (closing) throw new Error("Pronto MCP endpoint is closing");
       const controller = new AbortController();
       const abortForRequest = () => controller.abort(requestSignal.reason);
       if (requestSignal.aborted) abortForRequest();
       else requestSignal.addEventListener("abort", abortForRequest, { once: true });
-      const operation = Promise.resolve().then(() => execute(args, controller.signal));
+      const operation = Promise.resolve().then(() => execute(args, controller.signal, requestId));
       const detachRequest = () => requestSignal.removeEventListener("abort", abortForRequest);
 
       if (!supportsTasks) {

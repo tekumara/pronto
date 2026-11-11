@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { isIP } from "node:net";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -51,28 +51,29 @@ function send(res: ServerResponse, status: number, body: object, headers: Record
   res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(json), "Cache-Control": "no-store", ...headers }).end(json);
 }
 
-async function logMcpToolCall<T>(log: Log, name: string, call: () => Promise<T>): Promise<T> {
+async function logMcpToolCall<T>(log: Log, name: string, call: () => Promise<T>, requestId?: string): Promise<T> {
   const label = `${MCP_SERVER_NAME}/${name}`;
+  const request = requestId ? ` requestId=${requestId}` : "";
   const started = performance.now();
-  log("debug", "mcp", `${label} started`);
+  log("debug", "mcp", `${label} started${request}`);
   try {
     const result = await call();
     const failed = typeof result === "object" && result !== null && "isError" in result && result.isError === true;
-    log("debug", "mcp", `${label} ${failed ? "failed" : "completed"}`, `duration=${(performance.now() - started).toFixed(1)}ms`);
+    log("debug", "mcp", `${label} ${failed ? "failed" : "completed"}${request}`, `duration=${(performance.now() - started).toFixed(1)}ms`);
     return result;
   } catch (error) {
-    log("debug", "mcp", `${label} failed`, `duration=${(performance.now() - started).toFixed(1)}ms`);
+    log("debug", "mcp", `${label} failed${request}`, `duration=${(performance.now() - started).toFixed(1)}ms`);
     throw error;
   }
 }
 
-function logAbortedMcpTool(log: Log, name: string, signal: AbortSignal): void {
+function logAbortedMcpTool(log: Log, name: string, signal: AbortSignal, requestId: string): void {
   const reason = signal.reason;
   const reasonName = reason !== null && typeof reason === "object" && "name" in reason && typeof reason.name === "string"
     ? reason.name.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown"
     : "unknown";
   const outcome = reasonName === "TimeoutError" ? "timed out" : "aborted";
-  log("info", "mcp", `${MCP_SERVER_NAME}/${name} request ${outcome}`, `reason=${reasonName}`);
+  log("info", "mcp", `${MCP_SERVER_NAME}/${name} request ${outcome} requestId=${requestId}`, `reason=${reasonName}`);
 }
 
 /** Mounted on serve's HTTP listener; each request is authenticated independently. */
@@ -94,11 +95,11 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
   }
   const expectedTokenHash = createHash("sha256").update(token).digest();
   const skills = await SkillsExtension.load(memorySkillFiles({ "pronto-audit-discussion/SKILL.md": auditSkillMarkdown }), { strict: true });
-  const taskManager = createMcpTaskManager({ root, execute: async (args, signal) => logMcpToolCall(log, runAuditTool.name, async () => {
+  const taskManager = createMcpTaskManager({ root, execute: async (args, signal, requestId) => logMcpToolCall(log, runAuditTool.name, async () => {
     const result = await runAudit(args, signal);
     return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result,
       isError: result.results.some((item) => item.status === "failed") };
-  }), onError: (message) => log("error", "mcp", message) });
+  }, requestId), onError: (message) => log("error", "mcp", message) });
   const handler = createMcpHandler(() => {
     const mcp = new McpServer({ name: MCP_SERVER_NAME, version: "1.0.0" }, {
       supportedProtocolVersions: [MCP_PROTOCOL_VERSION],
@@ -143,11 +144,12 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, async (args, ctx) => {
       const signal = ctx.mcpReq.signal;
-      const onAbort = () => logAbortedMcpTool(log, runAuditTool.name, signal);
+      const requestId = randomUUID();
+      const onAbort = () => logAbortedMcpTool(log, runAuditTool.name, signal, requestId);
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
       try {
-        return await taskManager.run(args, signal, clientSupportsTasks(ctx.mcpReq.envelope));
+        return await taskManager.run(args, signal, clientSupportsTasks(ctx.mcpReq.envelope), requestId);
       } finally {
         signal.removeEventListener("abort", onAbort);
       }

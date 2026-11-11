@@ -175,9 +175,7 @@ test("MCP logs when a synchronous run_audit request is aborted", { timeout: 10_0
     });
   };
   const entries: string[] = [];
-  const server = await host(root, runner, (level, _scope, message) => {
-    if (level === "info") entries.push(message);
-  });
+  const server = await host(root, runner, (level, _scope, message) => entries.push(`${level} ${message}`));
   t.after(() => server.close());
 
   const clientWait = new AbortController();
@@ -187,10 +185,16 @@ test("MCP logs when a synchronous run_audit request is aborted", { timeout: 10_0
   await assert.rejects(request);
 
   const deadline = Date.now() + 1_000;
-  while (Date.now() < deadline && !entries.some((entry) => /run_audit request (?:aborted|timed out)$/.test(entry))) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.ok(entries.some((entry) => /run_audit request (?:aborted|timed out)$/.test(entry)), entries.join("\n"));
+  const abortedLog = () => entries.find((entry) => /info pronto-audits\/run_audit request (?:aborted|timed out) requestId=/.test(entry));
+  while (Date.now() < deadline && !abortedLog()) await new Promise((resolve) => setTimeout(resolve, 10));
+  const startedLog = entries.find((entry) => /debug pronto-audits\/run_audit started requestId=/.test(entry));
+  const abortEntry = abortedLog();
+  assert.ok(startedLog, entries.join("\n"));
+  assert.ok(abortEntry, entries.join("\n"));
+  const startedRequestId = startedLog.match(/requestId=([a-f0-9-]+)/)?.[1];
+  const abortedRequestId = abortEntry.match(/requestId=([a-f0-9-]+)/)?.[1];
+  assert.ok(startedRequestId);
+  assert.equal(abortedRequestId, startedRequestId);
 });
 
 test("MCP tasks/cancel asks cooperative audit work to stop", { timeout: 10_000 }, async (t) => {
