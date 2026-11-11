@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import type { Log } from "../src/logging.ts";
 import { createAuditMcpEndpoint, MCP_PROTOCOL_VERSION } from "../src/discussion/mcp.ts";
 import { createMcpAuditRunner } from "../src/discussion/run-audit.ts";
 import { MCP_TASKS_EXTENSION, MCP_TASK_POLL_INTERVAL_MS } from "../src/discussion/mcp-tasks.ts";
@@ -39,10 +40,10 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-async function host(root: string, runAudit: AuditRunner) {
+async function host(root: string, runAudit: AuditRunner, log: Log = () => {}) {
   const token = randomBytes(32).toString("hex");
   const endpoint = await createAuditMcpEndpoint({
-    token, root, publicUrl: "http://127.0.0.1:43210/mcp", runAudit, log: () => {},
+    token, root, publicUrl: "http://127.0.0.1:43210/mcp", runAudit, log,
   });
   const server = createServer((req: IncomingMessage, res: ServerResponse) => { void endpoint.handle(req, res); });
   await new Promise<void>((resolve, reject) => {
@@ -54,7 +55,7 @@ async function host(root: string, runAudit: AuditRunner) {
   let closed = false;
   return {
     url: `http://127.0.0.1:${address.port}/mcp`, token, endpoint,
-    async request(method: string, params: Record<string, unknown> = {}, supportsTasks = true) {
+    async request(method: string, params: Record<string, unknown> = {}, supportsTasks = true, signal?: AbortSignal) {
       const capabilities = supportsTasks ? { extensions: { [MCP_TASKS_EXTENSION]: {} } } : {};
       const body = JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params: {
         ...params,
@@ -76,6 +77,7 @@ async function host(root: string, runAudit: AuditRunner) {
             ? { "Mcp-Name": String(params.name ?? params.uri ?? params.taskId) } : {}),
         },
         body,
+        signal,
       });
       return { status: response.status, body: await response.json() as RpcBody };
     },
@@ -158,6 +160,37 @@ test("MCP task-capable clients get fast results synchronously and can resume lon
   const completed = await untilCompleted(second.request, taskId);
   assert.deepEqual(completed.result?.structuredContent, result);
   assert.equal(completed.result?.resultType, "complete");
+});
+
+test("MCP logs when a synchronous run_audit request is aborted", { timeout: 10_000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pronto-mcp-tasks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const started = deferred<void>();
+  const runner: AuditRunner = async (_args, signal) => {
+    started.resolve();
+    return new Promise<AuditResult>((_resolve, reject) => {
+      const abort = () => reject(signal.reason ?? new Error("aborted"));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+  };
+  const entries: string[] = [];
+  const server = await host(root, runner, (level, _scope, message) => {
+    if (level === "info") entries.push(message);
+  });
+  t.after(() => server.close());
+
+  const clientWait = new AbortController();
+  const request = server.request("tools/call", { name: "run_audit", arguments: { targets: [target] } }, false, clientWait.signal);
+  await started.promise;
+  clientWait.abort(new DOMException("client wait timed out", "TimeoutError"));
+  await assert.rejects(request);
+
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline && !entries.some((entry) => /run_audit request (?:aborted|timed out)$/.test(entry))) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(entries.some((entry) => /run_audit request (?:aborted|timed out)$/.test(entry)), entries.join("\n"));
 });
 
 test("MCP tasks/cancel asks cooperative audit work to stop", { timeout: 10_000 }, async (t) => {

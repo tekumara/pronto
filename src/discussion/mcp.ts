@@ -66,6 +66,15 @@ async function logMcpToolCall<T>(log: Log, name: string, call: () => Promise<T>)
   }
 }
 
+function logAbortedMcpTool(log: Log, name: string, signal: AbortSignal): void {
+  const reason = signal.reason;
+  const reasonName = reason !== null && typeof reason === "object" && "name" in reason && typeof reason.name === "string"
+    ? reason.name.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown"
+    : "unknown";
+  const outcome = reasonName === "TimeoutError" ? "timed out" : "aborted";
+  log("info", "mcp", `${MCP_SERVER_NAME}/${name} request ${outcome}`, `reason=${reasonName}`);
+}
+
 /** Mounted on serve's HTTP listener; each request is authenticated independently. */
 export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDirectory(), allowedOrigins = [], runAudit, log = createServeLogger() }: {
   token: string; publicUrl: string; root?: string; allowedOrigins?: string[]; log?: Log;
@@ -132,8 +141,17 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
       description: runAuditTool.description,
       inputSchema: fromJsonSchema<RunAuditArguments>(runAuditTool.parameters as JsonSchemaType),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    }, async (args, ctx) => taskManager.run(args, ctx.mcpReq.signal,
-      clientSupportsTasks(ctx.mcpReq.envelope)));
+    }, async (args, ctx) => {
+      const signal = ctx.mcpReq.signal;
+      const onAbort = () => logAbortedMcpTool(log, runAuditTool.name, signal);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        return await taskManager.run(args, signal, clientSupportsTasks(ctx.mcpReq.envelope));
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    });
     return mcp;
   }, { legacy: "reject", responseMode: "json", maxRequestBodySize: MAX_REQUEST_BYTES });
   const nodeHandler = toNodeHandler(handler, { maxRequestBodySize: MAX_REQUEST_BYTES,
