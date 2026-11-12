@@ -76,6 +76,25 @@ A later verifier run on 7 November sets `Connection: close` on each synthetic re
 
 The verifier passed. It updated StatefulSet templates using `OnDelete`, replaced the standby first without changing the owner or losing a client success, then gracefully replaced the owner. Both pods ended on the candidate tag; the candidate and baseline tags referenced the same image digest, so this validates pod replacement and routing, not compatibility between different binaries. There were zero model calls, publication attempts or unexpected fixture requests, and the RustFS PVC identity was unchanged. Evidence is in `.k3d/evidence/2026-11-07T22-26-32.116Z/observations.json` (local and ignored by Git).
 
+## Stateless Deployment baseline
+
+`mise exec -- node deploy/k3d.mjs verify-stateless` passed twice on 8 November 2026 against the local k3d cluster. Each run deployed a two-replica stateless HTTP fixture behind a ClusterIP Service, established 20 consecutive baseline successes, then gracefully deleted one Pod and let its Deployment replace it. The fixture used no persistent storage, ownership protocol, or RustFS dependency. Both runs restored two ready Service endpoints in about 2 seconds and held them for the following 10 seconds.
+
+| Trial | Deletion to two ready endpoints | Attempts | Successes | Failures | Max gap between successful responses |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,932 ms | 148 | 147 | 1 transport error | 200 ms |
+| 2 | 2,196 ms | 158 | 158 | 0 | 110 ms |
+
+Each trial had 24/24 successful baseline requests before deletion (the test requires at least 20 consecutive successes). In trial 1, the failed request was a `TypeError: fetch failed` during pod deletion. The preceding success was at 05:16:49.515Z and the first subsequent success at 05:16:49.715Z: a 200 ms client-observed gap. The surviving Pod answered 17 requests before the replacement was ready; in trial 2 it answered 21. The replacements then answered 57 and 77 requests, respectively. Across these two final-code runs, 305 of 306 requests succeeded; one run had no observed failures and the other had one. This is a small local sample through the in-cluster ClusterIP, not a guarantee for persistent connections, external ingress, or another application. Evidence is in `.k3d/evidence/2026-11-08T05-16-43.603Z/` and `.k3d/evidence/2026-11-08T05-17-41.365Z/` (local and ignored by Git).
+
+A high-resolution diagnostic rerun used `PRONTO_K3D_PROBE_INTERVAL_MS=5` and retained nested fetch-error details, including socket error code and address when available. The post-deletion measurement window recorded 3,153 requests, all successful; maximum observed gap between successful responses was 14 ms, and the surviving Pod answered 523 requests before the replacement was ready. The replacement restored two ready endpoints 3,316 ms after the deletion request. Because no request failed in this run, it produced no socket-cause details; this does not explain the one failure from the 100 ms trial. Evidence is in `.k3d/evidence/2026-11-08T06-32-54.549Z/`.
+
+A retry at the same 5 ms interval recorded 3,400 successful requests and zero failures, with an 11 ms maximum success gap. The survivor answered 330 requests before the replacement was ready; two ready endpoints were restored 1,771 ms after deletion. No fetch error occurred, so the enhanced cause-chain capture was not exercised. Evidence is in `.k3d/evidence/2026-11-08T06-39-19.948Z/`.
+
+A further retry at a 2 ms target interval recorded 7,740 successful requests and zero failures, with a 12 ms maximum success gap. The survivor answered 1,392 requests before the replacement was ready; two ready endpoints were restored 3,281 ms after deletion. No fetch error occurred, so this run also could not reveal the original socket cause. Evidence is in `.k3d/evidence/2026-11-08T06-49-39.078Z/`.
+
+A later 100 ms retry recorded 141 successful requests and zero failures, with a 111 ms maximum success gap. Two endpoints were restored 1,408 ms after deletion; the survivor answered 10 requests before replacement readiness and the replacement answered 61 afterward. No fetch error occurred. Evidence is in `.k3d/evidence/2026-11-08T07-19-46.196Z/`.
+
 ## Not verified
 
 No real GitHub/model credentials were supplied or copied from the host. Live authentication, model inference, repository access and OAuth refresh were not exercised. The credential wizard was checked statically, not run interactively by the agent.

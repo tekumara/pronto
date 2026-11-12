@@ -212,6 +212,7 @@ async function main() {
     case "up": return up();
     case "credentials": return credentials();
     case "verify": requireCluster(); return (await import("./verify-k3d.mjs")).verify();
+    case "verify-stateless": requireCluster(); return (await import("./verify-stateless-k3d.mjs")).verifyStateless();
     case "status":
       requireCluster();
       k(["get", "pods,pvc,services", "--all-namespaces"], { inherit: true });
@@ -221,7 +222,7 @@ async function main() {
       assert.ok(process.argv.includes("--confirm-delete"), "This deletes RustFS data. Re-run down --confirm-delete only if intended.");
       run("k3d", ["cluster", "delete", cluster], { inherit: true });
       console.log("Cluster deleted. Local credential files remain in .k3d; remove them explicitly when no longer needed."); return;
-    default: throw new Error("Usage: mise exec -- node deploy/k3d.mjs up|credentials|verify|status|down [--confirm-delete]");
+    default: throw new Error("Usage: mise exec -- node deploy/k3d.mjs up|credentials|verify|verify-stateless|status|down [--confirm-delete]");
   }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

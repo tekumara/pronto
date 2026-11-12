@@ -51,6 +51,18 @@ The webhook targets a fixture draft PR, so no inference is needed. Existing loca
 
 Verification refuses to run while live Pronto pods exist: stopping shared RustFS would disrupt them. It restores scaled-down controllers on failure and leaves the test namespace for diagnosis. Logs and observations go under `.k3d/evidence/`. Retained test prefixes are not deleted.
 
+## Measure a stateless two-replica baseline
+
+```sh
+mise exec -- node deploy/k3d.mjs verify-stateless
+```
+
+This is a Kubernetes Service/EndpointSlice baseline, not Pronto configured without replicated state. It runs a minimal stateless HTTP responder with two Deployment replicas in the isolated `pronto-stateless-baseline` namespace. The local Pronto image is used only as a Node runtime; the fixture has no database, lease, RustFS access or persistent volume. The test does not modify the live `pronto`, RustFS, or the existing `pronto-verification` namespace, and refuses to run if live Pronto pods exist.
+
+An in-cluster client makes fresh connections to the ClusterIP with a 1-second timeout. The default probe interval is 100 ms; set `PRONTO_K3D_PROBE_INTERVAL_MS=5` for higher-resolution transition diagnostics. Each failure record preserves the nested fetch error details (including socket code/address when Node provides them). After 20 consecutive baseline successes, the test gracefully deletes one pod, leaves the other pod alone, and samples until the Deployment has two ready replicas and endpoints again, plus at least 10 seconds of stable routing. Each successful response identifies its pod and UID. The test reports failures rather than treating any failed request as an invalid experiment; completion requires that the surviving pod remains and the replacement restores two ready endpoints.
+
+Evidence under `.k3d/evidence/` includes the UTC observation timeline, per-request `requests.jsonl`, `probe-report.json`, Kubernetes events and pod logs. The namespace is retained for diagnosis. The sample measures fresh connections through the in-cluster Service, not persistent connections or external ingress.
+
 ## Supply credentials and start live Pronto
 
 Do not paste credentials into chat. Run the interactive wizard yourself:
