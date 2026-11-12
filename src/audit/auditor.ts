@@ -3,8 +3,9 @@ import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createRegistry, ProviderDoc, type ConversationId, type Cursor, type Harness } from "@earendil-works/pi-durable";
 import { auditTargetKey, parseReviewTarget, type ReviewTarget } from "../github/reviews.ts";
-import { stripControlCharacters, type Log } from "../logging.ts";
-import { createWebhookQueue } from "../server/webhook-queue.ts";
+import { auditLabel, stripControlCharacters, type Log } from "../logging.ts";
+import { createWebhookQueue, type WebhookAdmission } from "../server/webhook-queue.ts";
+import { waitForReviewerReviews } from "./reviewer-gate.ts";
 import { createAuditScheduler } from "../server/audit-scheduler.ts";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "../state.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
@@ -15,17 +16,17 @@ import { createPublisher, pendingReassessments, recoverPublications, waitForPubl
 import { auditRequest, type AuditLog, type AuditOptions, type AuditOutcome, type RepositoryAudit } from "./request.ts";
 
 export type { AuditOptions } from "./request.ts";
-export type AuditTrigger = { source: "webhook" } | { source: "mcp"; tool: string; requestId?: string };
+export type AuditTrigger = { source: "webhook"; reason?: string } | { source: "mcp"; tool: string; requestId?: string };
 
 function describeTrigger(trigger: AuditTrigger): string {
-  return trigger.source === "webhook" ? "GitHub webhook"
+  return trigger.source === "webhook" ? `GitHub webhook${trigger.reason ? ` · ${trigger.reason}` : ""}`
     : `MCP tool ${trigger.tool}${trigger.requestId ? ` requestId=${trigger.requestId}` : ""}`;
 }
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
 export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output, webhooks, state }: {
   labelOutput?: boolean; log?: Log;
-  webhooks?: { concurrency: number; options: AuditOptions };
+  webhooks?: { concurrency: number; options: AuditOptions; requiredReviewers?: string[] };
   state?: { root: string; enroll(relative: string): Promise<void>; confirm(relative: string): Promise<void>; strictRecovery: boolean };
 } = {}) {
   const repositories = new Map<string, Promise<RepositoryAudit>>();
@@ -38,7 +39,10 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   const scheduler = webhooks ? createAuditScheduler(webhooks.concurrency) : undefined;
   const webhookQueue = webhooks ? createWebhookQueue({
     concurrency: webhooks.concurrency,
-    audit: async (url) => { await auditor.scheduleAudit(url, webhooks.options, { source: "webhook" }); },
+    requiredReviewers: webhooks.requiredReviewers,
+    audit: async (url, reason) => {
+      await auditor.scheduleAudit(url, webhooks.options, { source: "webhook", ...(reason ? { reason } : {}) }, BACKGROUND_CONTEXT, true);
+    },
     beforeDispatch: state ? async (url) => {
       const repository = await repositoryFor(parseReviewTarget(url));
       await state.confirm(repository.database);
@@ -47,6 +51,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       const target = parseReviewTarget(url);
       output?.("error", `${target.owner}/${target.repo}#${target.pr}`, `Audit failed: ${error instanceof Error ? error.message : String(error)}`);
     },
+    onReviewWait: (url, missing) => output?.("info", auditLabel(url), `Waiting for required review from ${missing.join(", ")}`),
+    onReviewSatisfied: (url) => output?.("info", auditLabel(url), "Required reviewer review received"),
+    onReviewError: (url, error) => output?.("warn", auditLabel(url), `Could not check required reviewer reviews; gate remains closed: ${error instanceof Error ? error.message : String(error)}`),
   }) : undefined;
 
   const repositoryKey = (target: ReviewTarget) => `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}`;
@@ -100,13 +107,13 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   }
 
   const auditor = {
-    async enqueue(url: string, deliveryId?: string) {
+    async enqueue(url: string, deliveryId?: string, admission?: WebhookAdmission) {
       if (!webhookQueue) throw new Error("Webhook queue is not enabled");
       if (closing) return "closed" as const;
       if (recovering) await recovering;
       if (closing) return "closed" as const;
       const { harness, database } = await repositoryFor(parseReviewTarget(url));
-      const outcome = await webhookQueue.admit(harness, url, deliveryId);
+      const outcome = await webhookQueue.admit(harness, url, deliveryId, admission);
       // Includes duplicate and coalesced admissions: every 202 needs fresh remote confirmation.
       if (outcome !== "closed") await state?.confirm(database);
       // Admission is already durable. Scheduler startup is reconstructible, not acceptance.
@@ -139,9 +146,27 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       }
     },
     /** Share serve's concurrency limit and per-PR exclusion with webhook work. */
-    async scheduleAudit(url: string, options: AuditOptions, trigger: AuditTrigger, callerContext: Context = BACKGROUND_CONTEXT): Promise<AuditOutcome> {
+    async scheduleAudit(url: string, options: AuditOptions, trigger: AuditTrigger, callerContext: Context = BACKGROUND_CONTEXT,
+      reviewerGateSatisfied = false): Promise<AuditOutcome> {
       if (!scheduler) throw new Error("Audit scheduling is not enabled");
       const context = withAbortSignal(shutdown.signal, callerContext);
+      const requiredReviewers = webhooks?.requiredReviewers ?? [];
+      if (requiredReviewers.length && !reviewerGateSatisfied) {
+        const target = parseReviewTarget(url);
+        let announcedWait = false;
+        await waitForReviewerReviews(target, requiredReviewers, context.abortSignal, (status, detail) => {
+          const scope = `${target.owner}/${target.repo}#${target.pr}`;
+          if (status === "waiting") {
+            announcedWait = true;
+            output?.("info", scope, `Waiting for required review from ${(detail as string[]).join(", ")}`);
+          } else if (status === "satisfied") {
+            if (announcedWait) output?.("info", scope, "Required reviewer review received");
+          } else {
+            const error = detail;
+            output?.("warn", scope, `Could not check required reviewer reviews; gate remains closed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        });
+      }
       return scheduler.run(url, () => {
         context.abortSignal?.throwIfAborted();
         return auditor.audit(url, options, context, trigger);

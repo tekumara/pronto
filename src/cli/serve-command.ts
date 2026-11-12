@@ -12,13 +12,14 @@ const describe = (error: unknown) => error instanceof Error ? error.message : St
 
 function printServeHelp(): void {
   console.log(SERVE_USAGE);
-  console.log("Starts a server for a GitHub webhook. Review requests and PR comment mentions of the token's GitHub user audit that PR. Drafts becoming ready while they are requested also start an audit.");
+  console.log("Starts a server for GitHub webhooks. Review requests and PR comment mentions of the token's GitHub user audit that PR. --audit-on-ready audits a PR once when it first becomes ready, including PRs created as ready.");
   console.log("PRONTO_WEBHOOK_SECRET must be set to the secret configured on the webhook. Set the webhook content type to application/json and send Pull requests, Issue comments, Pull request review comments and Pull request reviews events.");
   console.log(`--port <n> sets the port to listen on (default: ${DEFAULT_PORT}; 0 picks a free port).`);
   console.log(`--host <address> sets the address to bind (default: ${DEFAULT_HOST}; use 0.0.0.0 to accept outside connections, behind TLS).`);
   console.log(`--concurrency <n> sets how many audits run at once (default: ${DEFAULT_CONCURRENCY}).`);
   console.log("--webhook-path <path> sets the path that receives deliveries (default: /webhook). GET /healthz reports health.");
-  console.log("--verbose includes ignored deliveries, delivery IDs, model tool calls, cache changes and full reports. MCP tool calls and audit trigger sources are logged at INFO.");
+  console.log("--audit-on-ready triggers one audit at the PR's first ready-for-review event; --require-review-from <login> waits for at least one submitted review from that GitHub login before any audit proceeds. Repeat --require-review-from for multiple logins.");
+  console.log("--verbose includes observed GitHub events and review metadata, ignored deliveries, delivery IDs, model tool calls, cache changes and full reports. MCP tool calls and audit trigger sources are logged at INFO.");
   console.log("--mcp exposes audit tools and the discussion skill on the same HTTP listener (default: off), including task-based delivery of long audits to clients that declare MCP Tasks support. Requires PRONTO_MCP_TOKEN and --mcp-public-url <https-url> (or an HTTP loopback URL for local use); the token can run audits and publish reviews with apply=true. Terminate public HTTPS at a reverse proxy. See MCP.md.");
   console.log("--mcp-allow-origin <https-origin> adds an exact allowed browser origin; repeat for multiple origins. MCP bearer auth is separate from webhook signatures. --mcp cannot yet be combined with --replicated-state.");
   console.log("--replicated-state enables experimental term-isolated S3 state (default: off). Requires PRONTO_REPLICA_URL, PRONTO_LITESTREAM_BIN, AWS_REGION and AWS credentials. See REPLICATED_STATE.md. GET /readyz reports admission readiness; /healthz is liveness.");
@@ -50,7 +51,8 @@ export async function runServe(args: string[]): Promise<void> {
 
 async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, mcp: AuditMcpEndpoint | undefined,
   setAuditRunner: (runner: ReturnType<typeof createMcpAuditRunner>) => void, log: Log): Promise<void> {
-  const { requested, port, host, concurrency, path, replicatedState, skipLabels, skipDrafts, skipApproved, reportSkips, exclude, approve, allowUncertain, approveMigrations, apply } = config;
+  const { requested, port, host, concurrency, path, replicatedState, skipLabels, skipDrafts, skipApproved, reportSkips, exclude,
+    approve, allowUncertain, approveMigrations, apply, auditOnReady, requiredReviewers } = config;
   // Do not even load the S3 SDK or inspect replica configuration in ordinary serve.
   const replica = replicatedState ? await import("../replication/s3-control.ts").then(({ replicaConfig }) => replicaConfig()) : undefined;
   const secret = process.env.PRONTO_WEBHOOK_SECRET;
@@ -62,9 +64,9 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
   const options: AuditOptions = { model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, reportSkips, exclude, approve, allowUncertain, approveMigrations, apply };
   if (replica) {
     const { createPrimaryRuntime } = await import("../replication/primary-runtime.ts");
-    const runtime = await createPrimaryRuntime(replica, { models, audit: options, concurrency, log });
+    const runtime = await createPrimaryRuntime(replica, { models, audit: options, concurrency, log, requiredReviewers });
     let stopping = false;
-    const server = createWebhookServer({ secret, login, enqueue: (url, id) => runtime.enqueue(url, id),
+    const server = createWebhookServer({ secret, login, auditOnReady, enqueue: (url, id, admission) => runtime.enqueue(url, id, admission),
       ready: () => !stopping && runtime.ready(), path, log });
     const stopped = Promise.withResolvers<NodeJS.Signals>();
     const stop = (signal: NodeJS.Signals) => { stopping = true; stopped.resolve(signal); void runtime.close().catch(() => {}); };
@@ -82,12 +84,12 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
     }
     return;
   }
-  const auditor = createAuditor(models, { log, webhooks: { concurrency, options } });
+  const auditor = createAuditor(models, { log, webhooks: { concurrency, options, requiredReviewers } });
   if (mcp) setAuditRunner(createMcpAuditRunner(auditor, models, process.cwd()));
   let stopping = false;
-  const server = createWebhookServer({ secret, login, enqueue: async (url, id) => {
+  const server = createWebhookServer({ secret, login, auditOnReady, enqueue: async (url, id, admission) => {
     if (stopping) return "closed";
-    const outcome = await auditor.enqueue(url, id);
+    const outcome = await auditor.enqueue(url, id, admission);
     return stopping ? "closed" : outcome;
   }, path, log, mcp });
   const stopped = Promise.withResolvers<NodeJS.Signals>();

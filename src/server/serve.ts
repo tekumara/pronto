@@ -1,9 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Accepted } from "./webhook-queue.ts";
+import type { Accepted, WebhookAdmission } from "./webhook-queue.ts";
 import type { AuditMcpEndpoint } from "../discussion/mcp.ts";
 import { auditLabel, createServeLogger, type Log } from "../logging.ts";
-import { classifyDelivery, formatDeliveryContext, verifySignature } from "./webhook.ts";
+import { classifyDelivery, formatDeliveryContext, formatWebhookObservation, verifySignature } from "./webhook.ts";
 
 export const DEFAULT_WEBHOOK_PATH = "/webhook";
 // GitHub caps payloads at 25 MB, but a pull_request event is a small fraction of that.
@@ -15,7 +15,9 @@ export type WebhookServerOptions = {
   /** GitHub user Pronto reviews as: review requests and PR comment mentions of them start audits. */
   login: string;
   /** Resolves only after durable admission (including delivery deduplication) commits. */
-  enqueue: (url: string, deliveryId?: string) => Promise<Accepted>;
+  enqueue: (url: string, deliveryId?: string, admission?: WebhookAdmission) => Promise<Accepted>;
+  /** Audit once when a PR is first ready, whether opened ready or converted from draft. */
+  auditOnReady?: boolean;
   /** Application admission gate. Health stays live while standby or bootstrapping. */
   ready?: () => boolean;
   /** Optional MCP endpoint. This listener also owns its shutdown. */
@@ -61,7 +63,7 @@ function send(res: ServerResponse, status: number, body?: object, headers: Recor
 }
 
 /** Receives GitHub deliveries. Waits for durable admission, not audit execution: GitHub gives up on a slow response. */
-export function createWebhookServer({ secret, login, enqueue, ready = () => true, mcp, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
+export function createWebhookServer({ secret, login, enqueue, auditOnReady = false, ready = () => true, mcp, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
   if (!secret) throw new Error("A webhook secret is required.");
   if (!login) throw new Error("The reviewer login is required.");
   if (mcp && [path, "/healthz", "/readyz"].includes(mcp.path)) throw new Error("The MCP path must differ from the webhook, health and readiness paths.");
@@ -98,7 +100,9 @@ export function createWebhookServer({ secret, login, enqueue, ready = () => true
       return send(res, 400, { error: "payload is not JSON; set the webhook content type to application/json" });
     }
     const event = header(req, "x-github-event");
-    const delivery = classifyDelivery(event, payload, login);
+    const observation = formatWebhookObservation(event, payload);
+    if (observation) log("debug", "webhook", `Observed GitHub event · ${observation}`, detail);
+    const delivery = classifyDelivery(event, payload, login, { auditOnReady });
     if (delivery.kind === "pong") return send(res, 200, { status: "pong" });
     if (delivery.kind === "ignore") {
       log("debug", "webhook", `Ignored: ${delivery.reason} (${formatDeliveryContext(event, payload)})`, detail);
@@ -107,7 +111,7 @@ export function createWebhookServer({ secret, login, enqueue, ready = () => true
     if (stopping || !ready()) return send(res, 503, { status: "closed" });
     let outcome: Accepted;
     try {
-      outcome = await enqueue(delivery.url, id);
+      outcome = await enqueue(delivery.url, id, delivery.firstReady ? { firstReady: true, reason: delivery.reason } : undefined);
     } catch (error) {
       log("error", auditLabel(delivery.url), `Admission failed: ${error instanceof Error ? error.message : String(error)}`, detail);
       return send(res, 503, { error: "durable admission failed" });

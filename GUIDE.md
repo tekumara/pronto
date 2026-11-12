@@ -167,7 +167,10 @@ The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub
 
 - A review requested from the token's user. Logins match ignoring case. Requests for a team or another user are ignored, even if the user belongs to that team.
 - A draft that becomes ready for review while the user is already a requested reviewer. Drafts are skipped by default, so a request made on a draft would otherwise be lost.
+- With `--audit-on-ready`, the first event that makes a PR ready starts one audit. This includes PRs opened as ready and drafts that become ready. Pronto saves the first-ready marker across restarts.
 - A new or edited PR comment, inline comment or reply that mentions the token's user as `@login`. Submitted or edited review summaries also count. Mentions match whole logins, ignoring case. Emails, longer logins and team mentions do not count.
+
+Use `--require-review-from <login>` to wait until GitHub shows a submitted review from that login before any audit proceeds. Repeat the flag to require a submitted review from each listed login. Pronto checks review history, so it does not need a `review_requested` event. Once a review exists, Pronto does not wait for another pass. Serve saves waiting webhook work and resumes it after a restart.
 
 Ordinary issue comments, pending reviews and Pronto's marked audit output do not start audits. Other deliveries are acknowledged without starting an audit. Use `--verbose` to log why they were ignored.
 
@@ -175,7 +178,7 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 
 ### Options
 
-`--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--report-skips`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are fixed at startup for webhook audits, as described in the [quick start](#quick-start). Without `--apply`, new webhook audits only log previews.
+`--port <n>` (default `8080`; `0` picks a free port), `--host <address>`, `--concurrency <n>` (default `4`) and `--webhook-path <path>` (default `/webhook`) configure the server. `--audit-on-ready` enables the first-ready trigger. Repeat `--require-review-from <login>` to gate audits on submitted reviews. These options are fixed at startup. `GET /healthz` reports health. The audit flags (`--skip`, `--skip-drafts`, `--skip-approved`, `--report-skips`, `--exclude`, `--approve`, `--allow-uncertain`, `--approve-migrations`, `--apply`) and an optional `provider/model-id` are also fixed at startup for webhook audits, as described in the [quick start](#quick-start). Without `--apply`, new webhook audits only log previews.
 
 `--replicated-state` enables experimental term-isolated S3 state. It defaults to off; ordinary serve, audits and chat do not need replica configuration or start replication. See [replicated state setup, RustFS tests and safety limits](REPLICATED_STATE.md) before enabling it. `GET /readyz` reports admission readiness separately from `/healthz` liveness. An unready replicated process returns 503 for application requests, without forwarding them.
 
@@ -197,7 +200,7 @@ Serve mode logs a compact activity feed. Each line has a UTC timestamp, level an
 
 `Queued` means the delivery was accepted, even if an audit slot is available immediately. `Preparing` means the audit is making GitHub checks and fetching evidence. `Started` means the evidence is saved and ready for assessment. Preparation can instead end with a skip, a resumed snapshot or a reused assessment. The final elapsed time includes the GitHub checks and evidence fetch, not just model work.
 
-MCP tool calls are logged at `INFO` with the tool name, outcome and duration. Each audit also records whether a GitHub webhook or the MCP `run_audit` tool triggered it. Add `--verbose` to include ignored deliveries, duplicates, coalesced requests, delivery IDs, model tool calls, cache changes and full reports. Every line of a multiline report keeps its timestamp and PR label so concurrent audits remain identifiable. The regular CLI still prints its full report by default.
+MCP tool calls are logged at `INFO` with the tool name, outcome and duration. Each audit also records whether a GitHub webhook or the MCP `run_audit` tool triggered it. Add `--verbose` to include observed GitHub event actions and review metadata, ignored deliveries, duplicates, coalesced requests, delivery IDs, model tool calls, cache changes and full reports. Event logs omit comment bodies and the full payload. Every line of a multiline report keeps its timestamp and PR label so concurrent audits remain identifiable. The regular CLI still prints its full report by default.
 
 Retries, failures, recovery and shutdown messages remain visible without `--verbose`. Warnings and errors go to stderr; activity and debug messages go to stdout. For example, capture both with `pronto serve --apply 2>&1 | tee -a pronto.log`.
 
@@ -205,7 +208,7 @@ Incomplete-assessment errors include the conversation, submission and model iden
 
 ### Webhook reliability
 
-In serve mode, Pronto saves accepted audit requests before returning `202`. Waiting work and one queued rerun per PR survive restarts. Delivery deduplication also survives restarts, within the last 1000 accepted delivery IDs per repository.
+In serve mode, Pronto saves accepted audit requests before returning `202`. When you set `--require-review-from`, waiting audits poll GitHub's submitted review history without using an audit slot. The wait survives restarts. Waiting work and one queued rerun per PR also survive restarts. Delivery deduplication survives restarts for the last 1000 accepted delivery IDs per repository.
 
 With `--apply`, Pronto saves verdict publication as a durable task. It does the same for skip reviews when `--report-skips` is enabled. Startup resumes pending publications without running the model again, including assessments first published from the cache. If an approval's head or base commit has changed, Pronto retires that publication and runs a fresh assessment with its saved publication choices. Preview-only assessments do not become pending writes when the server restarts with different flags.
 
@@ -224,7 +227,7 @@ GitHub submission and local storage are not one transaction. After an ambiguous 
 
 On startup, the server recovers accepted webhook work, unfinished audits, pending verdict publications and each PR's latest failed assessment from saved repository databases. This includes failures saved by earlier versions. Ctrl+C, SIGTERM and crashes preserve waiting work and a queued rerun. Recovery and normal admission share one repository database owner. Recovery keeps databases with pending webhook work open, even if no assessment has started.
 
-Interrupted audits resume their saved snapshot and model. Their saved publication choices do not change when startup flags change. A preview-only assessment stays preview-only, even if the server restarts with `--apply`. Conversely, an earlier explicit `--apply` remains authorised even if the server now defaults to previews. An interrupted fetch before evidence admission starts again with current server options. Waiting requests without an admitted assessment also use the options configured at restart. Recovery discovers repositories and saves all recovery intents before the server listens. It then dispatches recovered work through the same global concurrency limit. Cross-repository order after restart follows discovery and dispatch, not a persisted global FIFO.
+Interrupted audits resume their saved snapshot and model. Their saved publication choices do not change when startup flags change. A preview-only assessment stays preview-only, even if the server restarts with `--apply`. Conversely, an earlier explicit `--apply` remains authorised even if the server now defaults to previews. An interrupted fetch before evidence admission starts again with current server options. Waiting requests without an admitted assessment also use the audit options configured at restart. If a request was admitted with `--require-review-from`, its reviewer gate remains saved with that request. Recovery discovers repositories and saves all recovery intents before the server listens. It then dispatches recovered work through the same global concurrency limit. Cross-repository order after restart follows discovery and dispatch, not a persisted global FIFO.
 
 An assessment that exhausted model retries (`model_error`), or finished without a complete report, gets a fresh attempt with current evidence and server options, retaining its saved publication choices. Older attempts without saved choices recover as previews. This attempt bypasses any older cached success. Startup queues each failed assessment once; another failure waits for the next restart or review request. Successful, cancelled and superseded attempts are not retried.
 

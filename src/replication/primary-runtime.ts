@@ -4,6 +4,7 @@ import { access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createAuditor, type AuditOptions } from "../audit/auditor.ts";
+import type { WebhookAdmission } from "../server/webhook-queue.ts";
 import type { createModelRuntime } from "../model.ts";
 import type { Log } from "../logging.ts";
 import { Litestream } from "./litestream.ts";
@@ -44,7 +45,7 @@ function controlErrorDetails(error: unknown): string {
  */
 export async function createPrimaryRuntime(config: ReplicaConfig, options: {
   models: Awaited<ReturnType<typeof createModelRuntime>>["models"];
-  audit: AuditOptions; concurrency: number; log: Log;
+  audit: AuditOptions; concurrency: number; log: Log; requiredReviewers?: string[];
 }) {
   // Standbys may inspect executable configuration, but must not execute even a version child.
   await access(config.binary, constants.X_OK);
@@ -160,7 +161,9 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
       await term.child.start();
       for (const point of plan) await term.child.enroll(point.relative);
       live(term);
-      term.auditor = createAuditor(options.models, { log: options.log, webhooks: { concurrency: options.concurrency, options: options.audit },
+      term.auditor = createAuditor(options.models, { log: options.log, webhooks: {
+        concurrency: options.concurrency, options: options.audit, requiredReviewers: options.requiredReviewers,
+      },
         state: { root, enroll: async (relative) => {
           try { live(term); await term.child.enroll(relative); live(term); } catch (error) { lose(term, error); throw error; }
         }, confirm: (relative) => confirm(term, relative), strictRecovery: true } });
@@ -198,10 +201,10 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
   };
   return {
     ready,
-    async enqueue(url: string, deliveryId?: string) {
+    async enqueue(url: string, deliveryId?: string, admission?: WebhookAdmission) {
       const term = active;
       if (!ready() || !term?.auditor) return "closed" as const;
-      return term.auditor.enqueue(url, deliveryId);
+      return term.auditor.enqueue(url, deliveryId, admission);
     },
     async close(): Promise<void> {
       stopping = true;

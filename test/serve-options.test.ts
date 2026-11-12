@@ -7,6 +7,7 @@ test("serve defaults to a local server that only previews", () => {
     selectors: [], requested: undefined, skipLabels: [], skipDrafts: true, skipApproved: true, reportSkips: false, exclude: [], force: false,
     approve: false, allowUncertain: false, approveMigrations: false, apply: false,
     port: 8080, host: "127.0.0.1", concurrency: 4, path: "/webhook", verbose: false, replicatedState: false, mcp: undefined,
+    auditOnReady: false, requiredReviewers: [],
   });
 });
 
@@ -24,6 +25,13 @@ test("serve takes its own flags as separate or joined values", () => {
     );
   }
   assert.equal(parseServeOptions(["--port", "0"]).port, 0, "0 picks a free port");
+});
+
+test("serve can trigger on first ready and require one submitted review from each configured login", () => {
+  const options = parseServeOptions(["--audit-on-ready", "--require-review-from", "Copilot-Pull-Request-Reviewer[bot]",
+    "--require-review-from=alice", "--require-review-from=ALICE"]);
+  assert.equal(options.auditOnReady, true);
+  assert.deepEqual(options.requiredReviewers, ["Copilot-Pull-Request-Reviewer[bot]", "alice"], "duplicate logins are de-duplicated case-insensitively");
 });
 
 test("serve passes the audit flags and model through for every audit", () => {
@@ -51,6 +59,9 @@ for (const [args, message] of [
   [["--apply", "--apply"], /--apply can be supplied only once/],
   [["--report-skips", "--report-skips"], /--report-skips can be supplied only once/],
   [["--verbose", "--verbose"], /--verbose can be supplied only once/],
+  [["--audit-on-ready", "--audit-on-ready"], /--audit-on-ready can be supplied only once/],
+  [["--require-review-from"], /--require-review-from requires a value/],
+  [["--require-review-from", "@copilot"], /--require-review-from must be a GitHub login/],
   [["--replicated-state", "--replicated-state"], /--replicated-state can be supplied only once/],
   [["--replicated-state=false"], /Unknown audit option/],
   [["--webhook-path", "/readyz"], /\/readyz is also reserved/],

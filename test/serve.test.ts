@@ -11,13 +11,14 @@ import { deliver, pullUrl as url, reviewRequested, sign, webhookSecret as secret
 async function start(t: TestContext, overrides: Partial<WebhookServerOptions> = {}, outcome: Accepted = "queued") {
   const logs: { level: LogLevel; scope: string; message: string; detail?: string }[] = [];
   const enqueued: string[] = [];
+  const admissions: unknown[] = [];
   const server = createWebhookServer({
     secret, login: "me", log: (level, scope, message, detail) => logs.push({ level, scope, message, detail }), ...overrides,
-    enqueue: overrides.enqueue ?? (async (target) => { enqueued.push(target); return outcome; }),
+    enqueue: overrides.enqueue ?? (async (target, _id, admission) => { enqueued.push(target); admissions.push(admission); return outcome; }),
   });
   const { port } = await server.listen(0, "127.0.0.1");
   t.after(() => server.close());
-  return { logs, enqueued, base: `http://127.0.0.1:${port}`, server };
+  return { logs, enqueued, admissions, base: `http://127.0.0.1:${port}`, server };
 }
 
 test("reports health", async (t) => {
@@ -125,6 +126,46 @@ test("omits event and action from ignored-delivery context", async (t) => {
   assert.deepEqual(enqueued, []);
 });
 
+test("logs reviewer lifecycle webhook metadata at debug without logging review text", async (t) => {
+  const { base, logs, enqueued } = await start(t);
+  const sha = "a".repeat(40);
+  const events: { event: string; payload: object }[] = [
+    { event: "pull_request", payload: { action: "review_requested", sender: { login: "maintainer" },
+      requested_reviewer: { login: "copilot-pull-request-reviewer" }, pull_request: { html_url: url, head: { sha } } } },
+    { event: "pull_request", payload: { action: "review_request_removed", sender: { login: "maintainer" },
+      requested_reviewer: { login: "copilot-pull-request-reviewer" }, pull_request: { html_url: url, head: { sha } } } },
+    { event: "pull_request", payload: { action: "synchronize", sender: { login: "author" },
+      pull_request: { html_url: url, head: { sha } } } },
+    { event: "pull_request", payload: { action: "closed", sender: { login: "author" },
+      pull_request: { html_url: url, head: { sha }, merged: true } } },
+    { event: "pull_request_review", payload: { action: "submitted", sender: { login: "copilot-pull-request-reviewer" },
+      pull_request: { html_url: url, head: { sha } }, review: { id: 123, user: { login: "copilot-pull-request-reviewer" },
+        state: "commented", commit_id: sha, body: "private review body" } } },
+    { event: "pull_request_review_comment", payload: { action: "created", sender: { login: "copilot-pull-request-reviewer" },
+      pull_request: { html_url: url }, comment: { id: 456, user: { login: "copilot-pull-request-reviewer" },
+        pull_request_review_id: 123, in_reply_to_id: 321, body: "private inline comment" } } },
+    { event: "pull_request_review_thread", payload: { action: "resolved", sender: { login: "maintainer" },
+      pull_request: { html_url: url }, thread: { id: 789, is_resolved: true } } },
+  ];
+
+  for (const [index, item] of events.entries()) {
+    assert.equal((await deliver(base, JSON.stringify(item.payload), { event: item.event, id: `observe-${index}` })).status, 204);
+  }
+
+  const observed = logs.filter(({ message }) => message.startsWith("Observed GitHub event · "));
+  assert.equal(observed.length, events.length);
+  assert.ok(observed.every(({ level, scope }) => level === "debug" && scope === "webhook"));
+  assert.match(observed[0]!.message, /event=pull_request action=review_requested .*requested_reviewer=copilot-pull-request-reviewer/);
+  assert.match(observed[1]!.message, /action=review_request_removed/);
+  assert.match(observed[2]!.message, /action=synchronize .*head_sha=a{40}/);
+  assert.match(observed[3]!.message, /action=closed .*merged=true/);
+  assert.match(observed[4]!.message, /event=pull_request_review action=submitted .*reviewer=copilot-pull-request-reviewer .*review_state=commented .*review_commit=a{40}/);
+  assert.match(observed[5]!.message, /event=pull_request_review_comment action=created .*comment_id=456 .*review_id=123 .*in_reply_to=321/);
+  assert.match(observed[6]!.message, /event=pull_request_review_thread action=resolved .*thread_id=789 .*resolved=true/);
+  assert.doesNotMatch(JSON.stringify(observed), /private review body|private inline comment/);
+  assert.deepEqual(enqueued, []);
+});
+
 test("keeps ignored-delivery metadata bounded and safe, even for malformed payloads", async (t) => {
   const { base, logs, enqueued } = await start(t);
   const injected = "synchronize\n[webhook forged] injected=true\u001b[2J\u202e";
@@ -154,7 +195,11 @@ test("accepts a review request for the reviewer and hands the PR to the queue", 
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), { status: "queued" });
   assert.deepEqual(enqueued, [url]);
-  assert.deepEqual(logs, [{ level: "info", scope: "owner/repo#42", message: "Queued · review requested · requester=Alice", detail: `delivery=${id}` }]);
+  assert.equal(logs.length, 2);
+  assert.deepEqual(logs[0], { level: "debug", scope: "webhook",
+    message: "Observed GitHub event · event=pull_request action=review_requested pr=https://github.com/owner/repo/pull/42 sender=Alice requested_reviewer=me",
+    detail: `delivery=${id}` });
+  assert.deepEqual(logs[1], { level: "info", scope: "owner/repo#42", message: "Queued · review requested · requester=Alice", detail: `delivery=${id}` });
 });
 
 test("keeps missing or unsafe requesters out of queued logs without rejecting the audit", async (t) => {
@@ -180,6 +225,14 @@ test("hands over a draft that became ready while the reviewer was requested", as
   const ready = JSON.stringify({ action: "ready_for_review", pull_request: { html_url: url, requested_reviewers: [{ login: "me" }] } });
   assert.equal((await deliver(base, ready)).status, 202);
   assert.deepEqual(enqueued, [url]);
+});
+
+test("passes first-ready audit intent to the durable queue", async (t) => {
+  const { base, enqueued, admissions } = await start(t, { auditOnReady: true });
+  const opened = JSON.stringify({ action: "opened", sender: { login: "author" }, pull_request: { html_url: url, draft: false } });
+  assert.equal((await deliver(base, opened)).status, 202);
+  assert.deepEqual(enqueued, [url]);
+  assert.deepEqual(admissions, [{ firstReady: true, reason: "first ready for review" }]);
 });
 
 test("waits for admission and passes the delivery ID to its durable owner", async (t) => {

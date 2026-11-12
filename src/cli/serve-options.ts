@@ -5,13 +5,15 @@ export const DEFAULT_PORT = 8080;
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_CONCURRENCY = 4;
 
-const valueFlags = ["--port", "--host", "--concurrency", "--webhook-path", "--mcp-public-url", "--mcp-allow-origin"];
+const valueFlags = ["--port", "--host", "--concurrency", "--webhook-path", "--mcp-public-url", "--mcp-allow-origin", "--require-review-from"];
 
 /** Serve-only flags, then the audit flags that apply to every audit the server runs. */
 export function parseServeOptions(args: string[]) {
   let verbose = false;
   let replicatedState = false;
   let mcpEnabled = false;
+  let auditOnReady = false;
+  const requiredReviewers: string[] = [];
   const allowedOrigins: string[] = [];
   const values = new Map<string, string>();
   const rest: string[] = [];
@@ -32,12 +34,22 @@ export function parseServeOptions(args: string[]) {
       verbose = true;
       continue;
     }
+    if (arg === "--audit-on-ready") {
+      if (auditOnReady) throw new Error(`--audit-on-ready can be supplied only once\n${SERVE_USAGE}`);
+      auditOnReady = true;
+      continue;
+    }
     const flag = valueFlags.find((name) => arg === name || arg.startsWith(`${name}=`));
     if (!flag) { rest.push(arg); continue; }
     const value = arg === flag ? args[++i] : arg.slice(flag.length + 1);
     if (!value?.trim() || (arg === flag && value.startsWith("-"))) throw new Error(`${flag} requires a value\n${SERVE_USAGE}`);
     if (flag === "--mcp-allow-origin") allowedOrigins.push(value);
-    else {
+    else if (flag === "--require-review-from") {
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/.test(value)) {
+        throw new Error(`--require-review-from must be a GitHub login\n${SERVE_USAGE}`);
+      }
+      if (!requiredReviewers.some((login) => login.toLowerCase() === value.toLowerCase())) requiredReviewers.push(value);
+    } else {
       if (values.has(flag)) throw new Error(`${flag} can be supplied only once\n${SERVE_USAGE}`);
       values.set(flag, value);
     }
@@ -65,5 +77,6 @@ export function parseServeOptions(args: string[]) {
     catch { throw new Error(`--mcp-public-url must be an absolute URL\n${SERVE_USAGE}`); }
     if ([path, "/healthz", "/readyz"].includes(endpoint.pathname)) throw new Error(`The MCP path must differ from the webhook, health and readiness paths\n${SERVE_USAGE}`);
   }
-  return { ...parseAuditOptions(rest, "serve"), port, host: values.get("--host") ?? DEFAULT_HOST, concurrency, path, verbose, replicatedState, mcp };
+  return { ...parseAuditOptions(rest, "serve"), port, host: values.get("--host") ?? DEFAULT_HOST, concurrency, path, verbose, replicatedState, mcp,
+    auditOnReady, requiredReviewers };
 }

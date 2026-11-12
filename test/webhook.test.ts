@@ -72,6 +72,15 @@ test("audits a draft that becomes ready while the reviewer is requested", () => 
     { kind: "audit", url, reason: "ready for review while requested", requester: "-" });
 });
 
+test("audit-on-ready triggers for a PR created ready or a draft's first ready transition", () => {
+  const options = { auditOnReady: true };
+  assert.deepEqual(classifyDelivery("pull_request", { action: "opened", sender: { login: "author" }, pull_request: pull({ draft: false }) }, "me", options),
+    { kind: "audit", url, reason: "first ready for review", requester: "author", firstReady: true });
+  assert.deepEqual(classifyDelivery("pull_request", { action: "ready_for_review", sender: { login: "author" }, pull_request: pull({ draft: false }) }, "me", options),
+    { kind: "audit", url, reason: "first ready for review", requester: "author", firstReady: true });
+  assert.equal(classifyDelivery("pull_request", { action: "opened", pull_request: pull({ draft: true }) }, "me", options).kind, "ignore");
+});
+
 test("ignores a ready draft that is not waiting on the reviewer", () => {
   for (const requested_reviewers of [[], [{ login: "other" }], undefined]) {
     const ready = { action: "ready_for_review", pull_request: pull({ requested_reviewers }) };

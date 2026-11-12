@@ -20,7 +20,8 @@ function github(user: (response: ServerResponse) => void = (response) => respons
   const repository = `/github/repos/${owner}/${repo}`;
   const pull = `${repository}/pulls/${number}`;
   const reviews: { event: string; body: string; commit_id: string }[] = [];
-  const state = { merged: false, draft: false, labels: [] as string[], files: [] as object[] };
+  const state = { merged: false, draft: false, labels: [] as string[], files: [] as object[],
+    submittedReviews: [] as object[], reviewComments: [] as object[] };
   const requests: string[] = [];
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     const path = request.url!.split("?")[0]!;
@@ -43,9 +44,11 @@ function github(user: (response: ServerResponse) => void = (response) => respons
     }
     assert.ok([`${pull}/comments`, `${pull}/reviews`, `${pull}/files`, `${repository}/issues/${number}/comments`].includes(path), path);
     if (path === `${pull}/files`) return json(state.files);
-    json(path === `${pull}/reviews` ? reviews.map((review, index) => ({
+    if (path === `${pull}/comments`) return json(state.reviewComments);
+    json(path === `${pull}/reviews` ? [...state.submittedReviews, ...reviews.map((review, index) => ({
       ...review, id: index + 1, user: { login: "Me" }, state: review.event === "APPROVE" ? "APPROVED" : "COMMENTED",
-    })) : path === `${repository}/issues/${number}/comments` ? comments : []);
+      submitted_at: "2026-11-12T00:00:00Z",
+    }))] : path === `${repository}/issues/${number}/comments` ? comments : []);
   };
   return { handler, reviews, requests, state };
 }
@@ -174,6 +177,7 @@ for (const verbose of [false, true]) {
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Started · 0 comments/);
     assert.match(out.output, /INFO\s+acme\/demo#7\s+Completed · 0 addressed · 0 outstanding · 0 uncertain · 0 not actionable · \d+\.\ds · US\$0\.02/);
     if (verbose) {
+      assert.match(out.output, /DEBUG\s+webhook\s+Observed GitHub event · event=pull_request action=review_requested/);
       assert.match(out.output, /DEBUG\s+webhook\s+Ignored: review not requested from this user.*delivery=ignored-delivery-id/);
       assert.match(out.output, /DEBUG\s+acme\/demo#7\s+report_review_assessment/);
       assert.match(out.output, /PR review audit/);
@@ -192,6 +196,84 @@ for (const verbose of [false, true]) {
     }
   });
 }
+
+test("serve audits only once on a PR's first ready-for-review event", { timeout: 40_000 }, async (t) => {
+  const gh = github();
+  let modelCalls = 0;
+  const f = await fixture(t, (_body, response) => { modelCalls++; assess(response); }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+  const first = f.start(["serve", "--port", "0", "--audit-on-ready"], { env });
+  const out = watchOutput(first.child);
+  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const base = `http://127.0.0.1:${port}`;
+  const openedReady = JSON.stringify({ action: "opened", sender: { login: "author" },
+    pull_request: { html_url: prUrl, draft: false, head: { sha: headSha } } });
+  assert.deepEqual(await (await deliver(base, openedReady, { id: "opened-ready" })).json(), { status: "queued" });
+  await out.until(/INFO\s+acme\/demo#7\s+Preview only · would comment/);
+  assert.equal(modelCalls, 1, "a ready PR is audited even though Pronto was not requested");
+
+  const readyAgain = JSON.stringify({ action: "ready_for_review", sender: { login: "author" },
+    pull_request: { html_url: prUrl, draft: false, head: { sha: headSha } } });
+  assert.deepEqual(await (await deliver(base, readyAgain, { id: "ready-again" })).json(), { status: "duplicate" });
+  first.child.kill("SIGTERM");
+  assert.equal((await first.done).code, 0);
+
+  const second = f.start(["serve", "--port", "0", "--audit-on-ready"], { env });
+  const [, resumedPort] = await watchOutput(second.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  assert.deepEqual(await (await deliver(`http://127.0.0.1:${resumedPort}`, readyAgain, { id: "ready-after-restart" })).json(), { status: "duplicate" });
+  assert.equal(modelCalls, 1, "the first-ready marker survives a server restart and draft/ready cycles");
+  second.child.kill("SIGTERM");
+  assert.equal((await second.done).code, 0);
+});
+
+test("serve durably waits for the first required review and includes its inline comments", { timeout: 50_000 }, async (t) => {
+  const gh = github();
+  let modelCalls = 0;
+  const prompts: string[] = [];
+  const f = await fixture(t, (body, response) => {
+    modelCalls++;
+    prompts.push(JSON.stringify(body.messages));
+    tool(response, "report_review_assessment", { databaseMigration: noDatabaseMigration, assessments: [
+      { commentKey: "review:5870895694", findings: [{ summary: "Summary only", status: "not-actionable",
+        reason: "The fixture review contains no actionable request.", evidence: [`${prUrl}#pullrequestreview-5870895694`] }] },
+      { commentKey: "inline:4547677154", findings: [{ summary: "Test observation", status: "not-actionable",
+        reason: "The fixture comment is included to verify review context.", evidence: [`${prUrl}#discussion_r4547677154`] }] },
+    ] });
+  }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+  const copilotReview = { id: 5870895694, user: { login: "Copilot-Pull-Request-Reviewer[bot]" }, state: "PENDING",
+    submitted_at: null, commit_id: headSha, html_url: `${prUrl}#pullrequestreview-5870895694`, body: "Copilot review in progress." };
+  gh.state.submittedReviews.push(copilotReview);
+  const args = ["serve", "--port", "0", "--require-review-from", "copilot-pull-request-reviewer[bot]"];
+  const first = f.start(args, { env });
+  const firstOut = watchOutput(first.child);
+  const [, port] = await firstOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  assert.deepEqual(await (await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).json(), { status: "queued" });
+  await firstOut.until(/INFO\s+acme\/demo#7\s+Waiting for required review from copilot-pull-request-reviewer\[bot\]/);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(modelCalls, 0, "a review request for Pronto does not bypass the required Copilot review");
+  first.child.kill("SIGKILL");
+  await first.done;
+
+  const second = f.start(args, { env });
+  const secondOut = watchOutput(second.child);
+  await secondOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  await secondOut.until(/INFO\s+acme\/demo#7\s+Recovering audit/);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(modelCalls, 0, "the durable wait survives a server restart while the review is still absent");
+
+  Object.assign(copilotReview, { state: "COMMENTED", submitted_at: "2026-11-12T07:48:04Z", body: "Copilot overall review." });
+  gh.state.reviewComments.push({ id: 4547677154, pull_request_review_id: 5870895694,
+    user: { login: "copilot-pull-request-reviewer[bot]" }, body: "Copilot inline observation.",
+    html_url: `${prUrl}#discussion_r4547677154`, created_at: "2026-11-12T07:48:03Z", updated_at: "2026-11-12T07:48:03Z",
+    path: "server/example.ts", line: 12, diff_hunk: "@@ -10,1 +10,1 @@" });
+
+  await secondOut.until(/INFO\s+acme\/demo#7\s+Preview only · would comment/);
+  assert.equal(modelCalls, 1, "the sleeping durable audit resumes after restart once a submitted review exists");
+  assert.match(prompts.join("\n"), /Copilot inline observation/);
+  assert.match(prompts.join("\n"), /Copilot overall review/);
+  second.child.kill("SIGTERM");
+  const result = await second.done;
+  assert.equal(result.code, 0, result.stderr);
+});
 
 for (const { migration, apply, verbose, outcome } of [
   { migration: false, apply: true, verbose: false, outcome: "Approved" },
@@ -568,7 +650,9 @@ test("serve prints its usage without a secret or token", { timeout: 20_000 }, as
   assert.match(output, /^Usage: pronto serve /m);
   assert.match(output, /PRONTO_WEBHOOK_SECRET must be set/);
   assert.match(output, /--concurrency <n>.*default: 4/);
-  assert.match(output, /--verbose includes ignored deliveries/);
+  assert.match(output, /--verbose includes observed GitHub events and review metadata.*ignored deliveries/);
+  assert.match(output, /--audit-on-ready triggers one audit/);
+  assert.match(output, /--require-review-from <login> waits for at least one submitted review/);
   assert.match(output, /--force and --pr are not supported/);
   assert.match(output, /--mcp exposes audit tools.*same HTTP listener/);
   assert.match(output, /PRONTO_MCP_TOKEN and --mcp-public-url/);

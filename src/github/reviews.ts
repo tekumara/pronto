@@ -216,6 +216,14 @@ export async function findApprovals(target: ReviewTarget, headSha: string, signa
     .map((review) => review.user!.login);
 }
 
+/** GitHub logins that have submitted at least one review on this PR. */
+export async function findSubmittedReviewers(target: ReviewTarget, signal?: AbortSignal): Promise<Set<string>> {
+  const client = github(signal);
+  const reviews = await client.pages<RawComment>(`/repos/${target.owner}/${target.repo}/pulls/${target.pr}/reviews?per_page=100`);
+  return new Set(reviews.filter((review) => review.user?.login && review.submitted_at && review.state?.toUpperCase() !== "PENDING")
+    .map((review) => review.user!.login.toLowerCase()));
+}
+
 /** Login of the account the token belongs to: the one that receives review requests and submits audit reviews. */
 export async function fetchViewerLogin(signal?: AbortSignal): Promise<string> {
   const client = github(signal);
