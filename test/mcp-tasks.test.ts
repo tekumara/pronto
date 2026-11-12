@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import { withTasks } from "@modelcontextprotocol/ext-tasks/client";
+import type { JsonValue } from "@modelcontextprotocol/ext-tasks/core";
 import type { Log } from "../src/logging.ts";
 import { createAuditMcpEndpoint, MCP_PROTOCOL_VERSION } from "../src/discussion/mcp.ts";
 import { createMcpAuditRunner } from "../src/discussion/run-audit.ts";
@@ -19,11 +21,9 @@ const result: AuditResult = {
   results: [{ prUrl: target, status: "completed", auditId: 31 as unknown as ConversationId, cached: false }],
   apply: false,
 };
-type TaskView = { taskId?: string; status?: string; ttlMs?: number; pollIntervalMs?: number; result?: { resultType?: string; structuredContent?: unknown } };
 type RpcResult = {
   resultType?: string;
   structuredContent?: unknown;
-  task?: TaskView;
   taskId?: string;
   status?: string;
   ttlMs?: number;
@@ -90,18 +90,23 @@ async function host(root: string, runAudit: AuditRunner, log: Log = () => {}) {
   };
 }
 
-async function untilCompleted(request: (method: string, params?: Record<string, unknown>, supportsTasks?: boolean) => Promise<{ status: number; body: RpcBody }>, taskId: string) {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    const response = await request("tasks/get", { taskId });
-    assert.equal(response.status, 200);
-    const task = response.body.result;
-    assert.ok(task, JSON.stringify(response.body));
-    if (task.status === "completed") return task;
-    assert.equal(task.status, "working", JSON.stringify(response.body));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  assert.fail("MCP task did not complete before the test deadline");
+function taskClient(server: Awaited<ReturnType<typeof host>>) {
+  return withTasks({
+    endpointId: "pronto-test",
+    taskCapabilities: { generation: "v2", capabilities: {} },
+    invalidated: false,
+    async dispatch(request, options) {
+      const { method, params } = request as { method: string; params?: Record<string, unknown> };
+      const response = await server.request(method, params, true, options?.signal);
+      assert.equal(response.status, 200, JSON.stringify(response.body));
+      if (response.body.error) return { kind: "error", error: response.body.error };
+      assert.ok(response.body.result, JSON.stringify(response.body));
+      return { kind: "result", result: response.body.result as JsonValue };
+    },
+    onServerRequest: () => () => {},
+    onNotification: () => () => {},
+    onInvalidated: () => () => {},
+  });
 }
 
 test("MCP task-capable clients get fast results synchronously and can resume long tasks after restart", { timeout: 20_000 }, async (t) => {
@@ -127,22 +132,24 @@ test("MCP task-capable clients get fast results synchronously and can resume lon
   assert.equal(quick.body.result?.resultType, "complete");
   assert.deepEqual(quick.body.result?.structuredContent, result);
 
-  const pendingCall = first.request("tools/call", { name: "run_audit", arguments: { targets: [target] } });
+  const client = taskClient(first);
+  t.after(() => client.close());
+  const pendingCall = client.callTool("run_audit", { targets: [target] });
   await started.promise;
-  const created = await pendingCall;
-  assert.equal(created.status, 200, JSON.stringify(created.body));
-  assert.equal(created.body.result?.resultType, "task");
-  const task = created.body.result?.task;
-  assert.ok(task?.taskId);
-  const taskId = task.taskId;
-  assert.equal(task.status, "working");
-  assert.equal(task.pollIntervalMs, MCP_TASK_POLL_INTERVAL_MS);
-  assert.ok(task.ttlMs && task.ttlMs > 0);
+  const execution = await pendingCall;
+  assert.equal(execution.kind, "task");
+  if (execution.kind !== "task") throw new Error("Expected a task-backed audit");
+  const taskId = execution.handle.taskId;
+  const reference = execution.serializeReference();
   const databaseHeader = await readFile(join(root, "mcp-tasks.sqlite"));
   assert.equal(databaseHeader.subarray(0, 16).toString("utf8"), "SQLite format 3\0");
   const working = await first.request("tasks/get", { taskId });
   assert.equal(working.body.result?.status, "working");
+  assert.equal(working.body.result?.pollIntervalMs, MCP_TASK_POLL_INTERVAL_MS);
+  assert.ok(working.body.result?.ttlMs && working.body.result.ttlMs > 0);
 
+  await execution.detach();
+  await client.close();
   await first.close();
   const resumed = deferred<void>();
   const finish = deferred<AuditResult>();
@@ -156,10 +163,14 @@ test("MCP task-capable clients get fast results synchronously and can resume lon
   await resumed.promise;
   const afterRestart = await second.request("tasks/get", { taskId });
   assert.equal(afterRestart.body.result?.status, "working");
+  const resumedClient = taskClient(second);
+  t.after(() => resumedClient.close());
+  const resumedExecution = await resumedClient.resumeTask(reference);
   finish.resolve(result);
-  const completed = await untilCompleted(second.request, taskId);
-  assert.deepEqual(completed.result?.structuredContent, result);
-  assert.equal(completed.result?.resultType, "complete");
+  const { outcome } = await resumedExecution.settle();
+  assert.equal(outcome.status, "completed");
+  if (outcome.status !== "completed") throw new Error("Expected a completed audit");
+  assert.deepEqual(outcome.result.structuredContent, result);
 });
 
 test("MCP logs when a synchronous run_audit request is aborted", { timeout: 10_000 }, async (t) => {
@@ -215,7 +226,7 @@ test("MCP tasks/cancel asks cooperative audit work to stop", { timeout: 10_000 }
   await started.promise;
   const created = await pendingCall;
   assert.equal(created.body.result?.resultType, "task");
-  const taskId = created.body.result?.task?.taskId;
+  const taskId = created.body.result?.taskId;
   assert.ok(taskId);
 
   const cancelled = await server.request("tasks/cancel", { taskId });

@@ -394,11 +394,11 @@ export function createMcpTaskManager({ root, execute, onError = () => {} }: {
       }
       detachRequest();
       startExecution(record, operation, controller);
-      // The SDK's TypeScript CallToolResult omits this Tasks extension, while its 2026 tools/call wire schema passes through the open resultType.
+      // The SDK's CallToolResult type omits Tasks; the 2026 wire result inlines the task fields.
       return {
         content: [],
         resultType: "task",
-        task: taskView(record),
+        ...taskView(record),
       } as unknown as CallToolResult;
     },
 
