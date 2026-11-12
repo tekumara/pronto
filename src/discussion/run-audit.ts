@@ -1,7 +1,7 @@
 import { arr, bool, obj, opt, str, type Static } from "@earendil-works/pi-schema";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { validateAuditTargets, type createAuditor } from "../audit/auditor.ts";
+import { validateAuditTargets, type AuditTrigger, type createAuditor } from "../audit/auditor.ts";
 import { parseAuditOptions } from "../cli/audit-options.ts";
 import { resolveAuditUrl } from "../cli/pr-discovery.ts";
 import { stripControlCharacters } from "../logging.ts";
@@ -28,7 +28,7 @@ export type RunAuditArguments = Static<typeof runAuditTool.parameters>;
 
 /** Resolve and validate the entire batch before starting it, as the CLI does. */
 export function createMcpAuditRunner(auditor: ReturnType<typeof createAuditor>, models: ModelRuntime, cwd: string) {
-  return async (args: RunAuditArguments, signal: AbortSignal) => {
+  return async (args: RunAuditArguments, signal: AbortSignal, requestId?: string) => {
     const argv = [
       ...(args.skipLabels ?? []).map((value) => `--skip=${value}`),
       ...(args.exclude ?? []).map((value) => `--exclude=${value}`),
@@ -46,9 +46,10 @@ export function createMcpAuditRunner(auditor: ReturnType<typeof createAuditor>, 
     const { model } = selectModel(models, cwd, requested);
     validateAuditTargets(urls);
     const context = withAbortSignal(signal, BACKGROUND_CONTEXT);
+    const trigger: AuditTrigger = { source: "mcp", tool: runAuditTool.name, ...(requestId ? { requestId } : {}) };
     const settled = await Promise.allSettled(urls.map((url) => auditor.scheduleAudit(url, {
       ...options, model: { provider: model.provider, modelId: model.id },
-    }, context)));
+    }, trigger, context)));
     signal.throwIfAborted();
     const results = settled.map((result, index) => result.status === "fulfilled"
       ? { prUrl: urls[index]!, ...result.value }

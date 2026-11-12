@@ -55,14 +55,14 @@ async function logMcpToolCall<T>(log: Log, name: string, call: () => Promise<T>,
   const label = `${MCP_SERVER_NAME}/${name}`;
   const request = requestId ? ` requestId=${requestId}` : "";
   const started = performance.now();
-  log("debug", "mcp", `${label} started${request}`);
+  log("info", "mcp", `${label} started${request}`);
   try {
     const result = await call();
     const failed = typeof result === "object" && result !== null && "isError" in result && result.isError === true;
-    log("debug", "mcp", `${label} ${failed ? "failed" : "completed"}${request}`, `duration=${(performance.now() - started).toFixed(1)}ms`);
+    log("info", "mcp", `${label} ${failed ? "failed" : "completed"}${request} · duration=${(performance.now() - started).toFixed(1)}ms`);
     return result;
   } catch (error) {
-    log("debug", "mcp", `${label} failed${request}`, `duration=${(performance.now() - started).toFixed(1)}ms`);
+    log("info", "mcp", `${label} failed${request} · duration=${(performance.now() - started).toFixed(1)}ms`);
     throw error;
   }
 }
@@ -73,7 +73,7 @@ function logAbortedMcpTool(log: Log, name: string, signal: AbortSignal, requestI
     ? reason.name.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "unknown"
     : "unknown";
   const outcome = reasonName === "TimeoutError" ? "timed out" : "aborted";
-  log("info", "mcp", `${MCP_SERVER_NAME}/${name} request ${outcome} requestId=${requestId}`, `reason=${reasonName}`);
+  log("info", "mcp", `${MCP_SERVER_NAME}/${name} request ${outcome} requestId=${requestId} · reason=${reasonName}`);
 }
 
 /** Mounted on serve's HTTP listener; each request is authenticated independently. */
@@ -96,7 +96,7 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
   const expectedTokenHash = createHash("sha256").update(token).digest();
   const skills = await SkillsExtension.load(memorySkillFiles({ "pronto-audit-discussion/SKILL.md": auditSkillMarkdown }), { strict: true });
   const taskManager = createMcpTaskManager({ root, execute: async (args, signal, requestId) => logMcpToolCall(log, runAuditTool.name, async () => {
-    const result = await runAudit(args, signal);
+    const result = await runAudit(args, signal, requestId);
     return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result,
       isError: result.results.some((item) => item.status === "failed") };
   }, requestId), onError: (message) => log("error", "mcp", message) });

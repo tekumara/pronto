@@ -198,7 +198,7 @@ test("MCP logs when a synchronous run_audit request is aborted", { timeout: 10_0
   const deadline = Date.now() + 1_000;
   const abortedLog = () => entries.find((entry) => /info pronto-audits\/run_audit request (?:aborted|timed out) requestId=/.test(entry));
   while (Date.now() < deadline && !abortedLog()) await new Promise((resolve) => setTimeout(resolve, 10));
-  const startedLog = entries.find((entry) => /debug pronto-audits\/run_audit started requestId=/.test(entry));
+  const startedLog = entries.find((entry) => /info pronto-audits\/run_audit started requestId=/.test(entry));
   const abortEntry = abortedLog();
   assert.ok(startedLog, entries.join("\n"));
   assert.ok(abortEntry, entries.join("\n"));

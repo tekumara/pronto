@@ -15,6 +15,12 @@ import { createPublisher, pendingReassessments, recoverPublications, waitForPubl
 import { auditRequest, type AuditLog, type AuditOptions, type AuditOutcome, type RepositoryAudit } from "./request.ts";
 
 export type { AuditOptions } from "./request.ts";
+export type AuditTrigger = { source: "webhook" } | { source: "mcp"; tool: string; requestId?: string };
+
+function describeTrigger(trigger: AuditTrigger): string {
+  return trigger.source === "webhook" ? "GitHub webhook"
+    : `MCP tool ${trigger.tool}${trigger.requestId ? ` requestId=${trigger.requestId}` : ""}`;
+}
 
 /** One in-process owner. Concurrent calls share a harness per repository; close only at host shutdown. */
 export function createAuditor(models: ModelRuntime, { labelOutput = true, log: output, webhooks, state }: {
@@ -32,7 +38,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   const scheduler = webhooks ? createAuditScheduler(webhooks.concurrency) : undefined;
   const webhookQueue = webhooks ? createWebhookQueue({
     concurrency: webhooks.concurrency,
-    audit: async (url) => { await auditor.scheduleAudit(url, webhooks.options); },
+    audit: async (url) => { await auditor.scheduleAudit(url, webhooks.options, { source: "webhook" }); },
     beforeDispatch: state ? async (url) => {
       const repository = await repositoryFor(parseReviewTarget(url));
       await state.confirm(repository.database);
@@ -133,15 +139,15 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       }
     },
     /** Share serve's concurrency limit and per-PR exclusion with webhook work. */
-    async scheduleAudit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<AuditOutcome> {
+    async scheduleAudit(url: string, options: AuditOptions, trigger: AuditTrigger, callerContext: Context = BACKGROUND_CONTEXT): Promise<AuditOutcome> {
       if (!scheduler) throw new Error("Audit scheduling is not enabled");
       const context = withAbortSignal(shutdown.signal, callerContext);
       return scheduler.run(url, () => {
         context.abortSignal?.throwIfAborted();
-        return auditor.audit(url, options, context);
+        return auditor.audit(url, options, context, trigger);
       }, context.abortSignal);
     },
-    async audit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT): Promise<AuditOutcome> {
+    async audit(url: string, options: AuditOptions, callerContext: Context = BACKGROUND_CONTEXT, trigger?: AuditTrigger): Promise<AuditOutcome> {
       if (recovering) await recovering;
       if (closing) throw new Error("Auditor is closed");
       const target = parseReviewTarget(url);
@@ -154,6 +160,10 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
         if (output) output(level, scope, message);
         else if (cliText !== null) console.log(`${label}${cliText ?? `[audit] ${message}`}`);
       };
+      if (trigger) {
+        const description = describeTrigger(trigger);
+        log("info", `Triggered by ${description}`, `[audit] Triggered by ${description}`);
+      }
       const diagnostics = createAuditDiagnostics((message) => output ? output("warn", scope, message) : console.error(`${label}${message}`));
       const context = withAbortSignal(shutdown.signal, callerContext);
       try {

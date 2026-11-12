@@ -114,7 +114,8 @@ for (const verbose of [false, true]) {
     assert.equal(accepted.status, 202);
     assert.equal(((await accepted.json()) as { status: string }).status, "queued");
     await out.until(/INFO\s+acme\/demo#7\s+Preparing · fetching GitHub evidence/);
-    assert.match(out.output, /Queued · mentioned in a pull request comment[^\n]*\n[^\n]*Preparing · fetching GitHub evidence/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Queued · mentioned in a pull request comment/);
+    assert.match(out.output, /INFO\s+acme\/demo#7\s+Triggered by GitHub webhook/);
     assert.doesNotMatch(out.output, /Started ·/);
     assert.equal(modelCalls, 0);
     preparationLogged.resolve();
@@ -152,11 +153,11 @@ for (const verbose of [false, true]) {
       assert.equal(page.audit.headSha, headSha);
       assert.equal(page.audit.status, "completed");
       assert.deepEqual(JSON.parse(page.content).findings, []);
-      await out.until(/DEBUG\s+mcp\s+pronto-audits\/read_audit completed · duration=\d+\.\d+ms/);
-      assert.match(out.output, /DEBUG\s+mcp\s+pronto-audits\/read_audit started/);
+      await out.until(/INFO\s+mcp\s+pronto-audits\/read_audit completed · duration=\d+\.\d+ms/);
+      assert.match(out.output, /INFO\s+mcp\s+pronto-audits\/read_audit started/);
       const missing = await client.callTool({ name: "read_audit", arguments: { prUrl: "https:\/\/github.com\/acme\/demo\/pull\/999" } });
       assert.equal(missing.isError, true);
-      await out.until(/DEBUG\s+mcp\s+pronto-audits\/read_audit failed · duration=\d+\.\d+ms/);
+      await out.until(/INFO\s+mcp\s+pronto-audits\/read_audit failed · duration=\d+\.\d+ms/);
       assert.equal(gh.requests.length, reads, "MCP discovery and saved reads must not fetch GitHub or enter the audit lifecycle");
       assert.equal(modelCalls, 1, "sharing the listener must not start another assessment");
       assert.equal((await deliver(base, "{}", { event: "ping", path: "/mcp" })).status, 401, "a valid webhook signature is not an MCP credential");
@@ -648,7 +649,8 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   const run = f.start(["serve", "--port", "0", "--apply", "--approve", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"], {
     env: { ...gitEnv, ...env, GH_REPO: "acme/demo", PRONTO_MCP_TOKEN: token },
   });
-  const [, port] = await watchOutput(run.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const out = watchOutput(run.child);
+  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
   const url = `http://127.0.0.1:${port}/mcp`;
   const client = await auditMcpClient(url, token);
   t.after(() => client.close());
@@ -658,6 +660,10 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
 
   const skipped = await runMcpAudit(client, { targets: [prUrl] });
   assert.match(skipped.results[0]!.reason!, /draft/);
+  const runAuditStart = await out.until(/INFO\s+mcp\s+pronto-audits\/run_audit started requestId=([0-9a-f-]+)/);
+  const requestId = runAuditStart[1]!;
+  await out.until(new RegExp(`INFO\\s+mcp\\s+pronto-audits/run_audit completed requestId=${requestId} · duration=\\d+\\.\\d+ms`));
+  await out.until(new RegExp(`INFO\\s+acme/demo#7\\s+Triggered by MCP tool run_audit requestId=${requestId}`));
   assert.equal(skipped.apply, false, "webhook --apply must not leak into remote CLI defaults");
   const labelled = await runMcpAudit(client, { targets: [prUrl], skipDrafts: false, skipLabels: ["unused", "BLOCKED"] });
   assert.match(labelled.results[0]!.reason!, /matching skip label/);
@@ -672,7 +678,12 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   assert.deepEqual(modelNames, ["variant"]);
   assert.equal(gh.reviews.length, 0);
   const saved = await client.callTool({ name: "read_audit", arguments: { prUrl, auditId: first.results[0]!.auditId } });
-  assert.equal((saved.structuredContent as { audit: { status: string } }).audit.status, "completed");
+  const savedPage = saved.structuredContent as { auditRef: string; audit: { status: string } };
+  assert.equal(savedPage.audit.status, "completed");
+  await out.until(/INFO\s+mcp\s+pronto-audits\/read_audit completed · duration=\d+\.\d+ms/);
+  const rejectedFile = await client.callTool({ name: "read_github_file", arguments: { auditRef: savedPage.auditRef, path: "../seed.txt", revision: "head" } });
+  assert.equal(rejectedFile.isError, true);
+  await out.until(/INFO\s+mcp\s+pronto-audits\/read_github_file failed · duration=\d+\.\d+ms/);
   const files = await client.callTool({ name: "read_audit", arguments: { prUrl, auditId: first.results[0]!.auditId, section: "files" } });
   const file = JSON.parse((files.structuredContent as { content: string }).content)[0];
   assert.equal(file.excluded, true);
