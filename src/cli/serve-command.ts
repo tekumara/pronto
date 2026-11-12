@@ -22,7 +22,7 @@ function printServeHelp(): void {
   console.log("--mcp exposes audit tools and the discussion skill on the same HTTP listener (default: off), including task-based delivery of long audits to clients that declare MCP Tasks support. Requires PRONTO_MCP_TOKEN and --mcp-public-url <https-url> (or an HTTP loopback URL for local use); the token can run audits and publish reviews with apply=true. Terminate public HTTPS at a reverse proxy. See MCP.md.");
   console.log("--mcp-allow-origin <https-origin> adds an exact allowed browser origin; repeat for multiple origins. MCP bearer auth is separate from webhook signatures. --mcp cannot yet be combined with --replicated-state.");
   console.log("--replicated-state enables experimental term-isolated S3 state (default: off). Requires PRONTO_REPLICA_URL, PRONTO_LITESTREAM_BIN, AWS_REGION and AWS credentials. See REPLICATED_STATE.md. GET /readyz reports admission readiness; /healthz is liveness.");
-  console.log("The audit flags apply to every webhook audit and work as they do for pronto. --force and --pr are not supported. Without --apply, new audits only log previews. Previously authorised publications can still recover.");
+  console.log("The audit flags apply to every webhook audit and work as they do for pronto. --report-skips enables skip reviews (default: off); posting also requires --apply. --force and --pr are not supported. Previously authorised publications can still recover.");
 }
 
 export async function runServe(args: string[]): Promise<void> {
@@ -50,7 +50,7 @@ export async function runServe(args: string[]): Promise<void> {
 
 async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, mcp: AuditMcpEndpoint | undefined,
   setAuditRunner: (runner: ReturnType<typeof createMcpAuditRunner>) => void, log: Log): Promise<void> {
-  const { requested, port, host, concurrency, path, replicatedState, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply } = config;
+  const { requested, port, host, concurrency, path, replicatedState, skipLabels, skipDrafts, skipApproved, reportSkips, exclude, approve, allowUncertain, approveMigrations, apply } = config;
   // Do not even load the S3 SDK or inspect replica configuration in ordinary serve.
   const replica = replicatedState ? await import("../replication/s3-control.ts").then(({ replicaConfig }) => replicaConfig()) : undefined;
   const secret = process.env.PRONTO_WEBHOOK_SECRET;
@@ -59,7 +59,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
   // Resolve credentials before listening, so a missing token or model fails at startup rather than on the first delivery.
   const login = await fetchViewerLogin();
   const { models, model } = await createModelRuntime(process.cwd(), requested);
-  const options: AuditOptions = { model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, approve, allowUncertain, approveMigrations, apply };
+  const options: AuditOptions = { model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, reportSkips, exclude, approve, allowUncertain, approveMigrations, apply };
   if (replica) {
     const { createPrimaryRuntime } = await import("../replication/primary-runtime.ts");
     const runtime = await createPrimaryRuntime(replica, { models, audit: options, concurrency, log });

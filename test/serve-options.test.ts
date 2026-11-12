@@ -4,7 +4,7 @@ import { parseServeOptions } from "../src/cli/serve-options.ts";
 
 test("serve defaults to a local server that only previews", () => {
   assert.deepEqual(parseServeOptions([]), {
-    selectors: [], requested: undefined, skipLabels: [], skipDrafts: true, skipApproved: true, exclude: [], force: false,
+    selectors: [], requested: undefined, skipLabels: [], skipDrafts: true, skipApproved: true, reportSkips: false, exclude: [], force: false,
     approve: false, allowUncertain: false, approveMigrations: false, apply: false,
     port: 8080, host: "127.0.0.1", concurrency: 4, path: "/webhook", verbose: false, replicatedState: false, mcp: undefined,
   });
@@ -28,10 +28,11 @@ test("serve takes its own flags as separate or joined values", () => {
 
 test("serve passes the audit flags and model through for every audit", () => {
   const options = parseServeOptions(["--port", "9000", "--skip", "wip", "--skip=do not review", "--skip-drafts=false", "--skip-approved", "false",
-    "--exclude", "dist/**", "--approve", "--allow-uncertain", "--approve-migrations", "--apply", "provider/model-id", "--concurrency", "3"]);
+    "--report-skips", "--exclude", "dist/**", "--approve", "--allow-uncertain", "--approve-migrations", "--apply", "provider/model-id", "--concurrency", "3"]);
   assert.deepEqual(options.skipLabels, ["wip", "do not review"]);
   assert.equal(options.skipDrafts, false);
   assert.equal(options.skipApproved, false);
+  assert.equal(options.reportSkips, true);
   assert.deepEqual(options.exclude, ["dist/**"]);
   assert.deepEqual([options.approve, options.allowUncertain, options.approveMigrations, options.apply], [true, true, true, true]);
   assert.equal(options.requested, "provider/model-id");
@@ -48,6 +49,7 @@ for (const [args, message] of [
   [["provider/model", "extra"], /^Error: Usage: pronto serve/],
   [["--unknown"], /Unknown audit option: --unknown/],
   [["--apply", "--apply"], /--apply can be supplied only once/],
+  [["--report-skips", "--report-skips"], /--report-skips can be supplied only once/],
   [["--verbose", "--verbose"], /--verbose can be supplied only once/],
   [["--replicated-state", "--replicated-state"], /--replicated-state can be supplied only once/],
   [["--replicated-state=false"], /Unknown audit option/],

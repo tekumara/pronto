@@ -49,7 +49,7 @@ Pronto skips the audit when:
 - the PR changes more than 10,000 lines, counting additions and deletions after configured file exclusions
 - the PR’s latest commit already has a reviewer’s approval, unless auditing approved PRs is enabled
 
-If your authenticated GitHub account has already approved the current commit, Pronto only logs the skip, without posting or previewing another review. An approval from another reviewer still produces a skip explanation. For that and other skip reasons, Pronto posts a comment review on the PR’s current commit with `--apply`, or previews it otherwise. A skip never approves the PR or calls the model. Repeating the same reason at the same commit does not post another review when a local receipt exists.
+Pronto logs skips without posting or previewing a review by default. Add `--report-skips` to preview a skip review, or combine it with `--apply` to post the review. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. A skip never approves the PR or calls the model. Repeating the same reason at the same commit does not post another review when a local receipt exists.
 
 ## Approval conditions and safeguards
 

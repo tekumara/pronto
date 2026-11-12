@@ -2,9 +2,10 @@ import type { Context } from "@earendil-works/chord";
 import { defineDoc, defineDocFamily, defineExtension, defineTask, type ConversationId, type Cursor, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { fetchViewerLogin, reconcileAuditReview, StaleReviewSnapshotError, submitAuditReview, type ReviewSnapshot } from "../github/reviews.ts";
 
-export type PublicationChoices = { apply: boolean; approve: boolean; allowUncertain: boolean; approveMigrations: boolean };
+export type PublicationChoices = { apply: boolean; approve: boolean; allowUncertain: boolean; approveMigrations: boolean; reportSkips: boolean };
 export function publicationChoices(options: Partial<PublicationChoices>): PublicationChoices {
-  return { apply: !!options.apply, approve: !!options.approve, allowUncertain: !!options.allowUncertain, approveMigrations: !!options.approveMigrations };
+  return { apply: !!options.apply, approve: !!options.approve, allowUncertain: !!options.allowUncertain,
+    approveMigrations: !!options.approveMigrations, reportSkips: !!options.reportSkips };
 }
 export type PublicationIntent = {
   choices: PublicationChoices; target: ReviewSnapshot["target"]; headSha: string; baseSha: string;

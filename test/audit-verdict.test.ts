@@ -254,6 +254,27 @@ process.stdout.write = function(chunk, ...args) {
   });
 }
 
+test("a stale approval retains skip reporting when reassessment finds a merged PR", { timeout: 20000 }, async (t) => {
+  const publication = { approvalStatus: 403 as number | undefined };
+  const github = githubEvidence(publication);
+  let calls = 0;
+  const f = await fixture(t, (body, response) => { calls++; assess(body, response); },
+    { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
+  const failed = f.start([url, "--apply", "--approve", "--report-skips"]);
+  failed.child.stdin.end();
+  assert.equal((await failed.done).code, 1);
+  assert.equal(github.attempts.length, 1);
+  github.state.headSha = "b".repeat(40);
+  github.state.merged = true;
+  publication.approvalStatus = undefined;
+
+  const output = await recoverPublisher(f, /INFO\s+acme\/demo#8\s+Review: /);
+  assert.match(output, /Skipped · PR has already been merged/);
+  assert.equal(calls, 1, "a merged reassessment must not run the model again");
+  assert.deepEqual(github.posted.map(({ event, commit_id }) => [event, commit_id]), [["COMMENT", github.state.headSha]]);
+  assert.match(github.posted[0]!.body, /PR has already been merged/);
+});
+
 test("skip reviews deduplicate by head and reason and stay out of later audit evidence", { timeout: 20000 }, async (t) => {
   const github = githubEvidence();
   github.state.draft = true;
@@ -265,20 +286,20 @@ test("skip reviews deduplicate by head and reason and stay out of later audit ev
     assess(body, response);
   }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
 
-  await f.run("", [url, "--apply", "--approve"]);
+  await f.run("", [url, "--report-skips", "--apply", "--approve"]);
   assert.equal(github.posted.length, 1);
-  const repeated = await f.run("", [url, "--force", "--apply"]);
+  const repeated = await f.run("", [url, "--report-skips", "--force", "--apply"]);
   assert.match(repeated, /Skip comment skipped: matching skip review recorded locally/);
-  const preview = await f.run("", [url]);
+  const preview = await f.run("", [url, "--report-skips"]);
   assert.match(preview, /Skip comment would be skipped: matching skip review recorded locally/);
   assert.equal(github.posted.length, 1, "changing action flags must not duplicate a skip review");
 
   github.state.headSha = "c".repeat(40);
-  await f.run("", [url, "--apply"]);
+  await f.run("", [url, "--report-skips", "--apply"]);
   assert.equal(github.posted.length, 2, "a new head needs its own skip explanation");
   assert.equal(github.posted[1]!.commit_id, github.state.headSha);
   github.state.merged = true;
-  await f.run("", [url, "--apply"]);
+  await f.run("", [url, "--report-skips", "--apply"]);
   assert.equal(github.posted.length, 3, "a different reason at the same head needs its own explanation");
   assert.match(github.posted[2]!.body, /PR has already been merged/);
   assert.ok(github.posted.every(({ event }) => event === "COMMENT"));
@@ -301,7 +322,7 @@ test("a skip publication survives a crash without an assessment and recovers wit
       await github.handler(request, response);
     },
   });
-  const killed = f.start([url, "--apply", "--approve"]);
+  const killed = f.start([url, "--report-skips", "--apply", "--approve"]);
   killed.child.stdin.end();
   await publishing.promise;
   killed.child.kill("SIGKILL");
@@ -313,7 +334,7 @@ test("a skip publication survives a crash without an assessment and recovers wit
   assert.equal(github.posted[0]!.event, "COMMENT");
   assert.equal(github.posted[0]!.commit_id, sha);
   assert.match(github.posted[0]!.body, /PR is a draft/);
-  await f.run("", [url, "--apply"]);
+  await f.run("", [url, "--report-skips", "--apply"]);
   assert.equal(github.attempts.length, 1, "recovery must save the same duplicate-prevention receipt");
 });
 

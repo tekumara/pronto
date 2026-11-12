@@ -16,6 +16,7 @@ async function main() {
     console.log("--skip <label> skips the audit if the PR has that label (case-insensitive). Repeat for multiple labels; any match skips, even with --force or --apply.");
     console.log("--skip-drafts skips the audit if the PR is a draft (default: true; --skip-drafts=false audits anyway). Applies even with --force, --apply or --approve.");
     console.log("--skip-approved skips the audit if any reviewer has already approved the PR's current head commit (default: true; --skip-approved=false audits anyway). Applies even with --force.");
+    console.log("--report-skips previews skip reviews, or posts them with --apply (default: off). Your own current approval remains a quiet skip.");
     console.log("--exclude <path> leaves matching changed files out of the size limit and the audit; their patches are withheld and they are listed in the output. Repeat for multiple paths. Paths are repository-relative: * and ? stay within a directory, ** crosses directories, and a directory excludes everything under it.");
     console.log("--force bypasses the assessment cache and restarts any unfinished audit.");
     console.log("--approve selects approval when no outstanding or uncertain findings remain; requires --apply to submit (default: false).");
@@ -24,13 +25,13 @@ async function main() {
     console.log("--apply submits a verdict review to GitHub unless a matching review is recorded in local history (default: false; otherwise previews only).");
     return;
   }
-  const { selectors, requested, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");
+  const { selectors, requested, skipLabels, skipDrafts, skipApproved, reportSkips, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");
   const cwd = process.cwd();
   const urls = await Promise.all(selectors.map((selector) => resolveAuditUrl(selector, cwd)));
   const { createModelRuntime } = await import("../model.ts");
   const { runAudits } = await import("../audit/auditor.ts");
   const { models, model } = await createModelRuntime(cwd, requested);
-  await runAudits(urls, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, exclude, force, approve, allowUncertain, approveMigrations, apply });
+  await runAudits(urls, { models, model: { provider: model.provider, modelId: model.id }, skipLabels, skipDrafts, skipApproved, reportSkips, exclude, force, approve, allowUncertain, approveMigrations, apply });
 }
 
 main().catch((error) => {

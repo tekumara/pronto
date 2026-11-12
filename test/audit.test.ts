@@ -19,7 +19,7 @@ for (const { name, metadata, flags = [] as string[], reason, approved = false, o
   { name: "approved by you and another reviewer", metadata: {}, approved: true, ownApproval: true,
     reason: `PR is already approved by AuDiToR at ${headSha}. Use --skip-approved=false to audit anyway.` },
 ]) {
-  test(`CLI ${ownApproval ? "logs your approval without posting, even when another reviewer also approved" : `previews the skip reason for a PR that is ${name} and posts it only with --apply`}`, { timeout: 20000 }, async (t) => {
+  test(`CLI reports the ${name} skip only when requested and applied`, { timeout: 20000 }, async (t) => {
     const requests: string[] = [];
     const posted: { event: string; commit_id: string; body: string }[] = [];
     const f = await fixture(t, () => assert.fail("Skipped PRs must not reach the model"), {
@@ -44,11 +44,18 @@ for (const { name, metadata, flags = [] as string[], reason, approved = false, o
         }
       },
     });
-    const run = (apply: boolean) => {
-      const args = [prUrl, "--force", "--approve", ...flags, ...(apply ? ["--apply"] : [])];
+    const run = (apply: boolean, reportSkips = false) => {
+      const args = [prUrl, "--force", "--approve", ...flags, ...(apply ? ["--apply"] : []), ...(reportSkips ? ["--report-skips"] : [])];
       return f.run("", args);
     };
-    const preview = await run(false);
+    for (const apply of [false, true]) {
+      const silent = await run(apply);
+      assert.ok(silent.includes(`[audit] Skipping ${prUrl}: ${reason}`));
+      assert.doesNotMatch(silent, /Review audit · Skipped|Skip comment/);
+      assert.equal(posted.length, 0, "default skip reporting must not post, even with --apply");
+    }
+    requests.length = 0;
+    const preview = await run(false, true);
     assert.ok(preview.includes(`[audit] Skipping ${prUrl}: ${reason}`));
     if (ownApproval) assert.doesNotMatch(preview, /Review audit · Skipped|Skip comment/);
     else {
@@ -58,7 +65,7 @@ for (const { name, metadata, flags = [] as string[], reason, approved = false, o
     assert.deepEqual(requests, ["GET /github/repos/acme/demo/pulls/7", ...(approved ? ["GET /github/repos/acme/demo/pulls/7/reviews", "GET /github/user"] : [])]);
     assert.equal(posted.length, 0);
 
-    const applied = await run(true);
+    const applied = await run(true, true);
     assert.doesNotMatch(applied, /Verdict:|Resuming saved snapshot|Reusing saved assessment|PR approved/);
     assert.ok(applied.includes(`[audit] Skipping ${prUrl}: ${reason}`));
     if (ownApproval) {
@@ -541,19 +548,19 @@ test("restart checks live merge status, draft status and skip labels but preserv
   first.child.kill("SIGKILL");
   await first.done;
   prState.labels = ["skip-audit"];
-  const skippedLabel = await f.run("", [prUrl, "--skip", "skip-audit", "--force", "--apply", "--approve"]);
+  const skippedLabel = await f.run("", [prUrl, "--skip", "skip-audit", "--force", "--apply", "--approve", "--report-skips"]);
   assert.match(skippedLabel, /Skipping .*matching skip label: "skip-audit"/);
   assert.doesNotMatch(skippedLabel, /Resuming saved snapshot|Restarting unfinished audit|Verdict:/);
   assert.equal(turn, 1, "a matching label must not resume or restart unfinished model work");
   prState.labels = [];
   prState.merged = true;
-  const skipped = await f.run("", [prUrl, "--force", "--apply", "--approve"]);
+  const skipped = await f.run("", [prUrl, "--force", "--apply", "--approve", "--report-skips"]);
   assert.match(skipped, /Skipping .*already been merged/);
   assert.doesNotMatch(skipped, /Resuming saved snapshot|Restarting unfinished audit|Verdict:/);
   assert.equal(turn, 1, "a merged PR must not resume or restart unfinished model work");
   prState.merged = false;
   prState.draft = true;
-  const skippedDraft = await f.run("", [prUrl, "--force", "--apply", "--approve"]);
+  const skippedDraft = await f.run("", [prUrl, "--force", "--apply", "--approve", "--report-skips"]);
   assert.match(skippedDraft, /Skipping .*PR is a draft.*--skip-drafts=false/);
   assert.doesNotMatch(skippedDraft, /Resuming saved snapshot|Restarting unfinished audit|Verdict:/);
   assert.equal(turn, 1, "a draft PR must not resume or restart unfinished model work");
@@ -562,7 +569,7 @@ test("restart checks live merge status, draft status and skip labels but preserv
   assert.match(output, /Verdict: Not all actionable findings are addressed/);
   assert.equal(turn, 3);
   const draftReads = github.requests.length;
-  const skippedDraftCached = await f.run("", [prUrl, "--apply", "--approve"]);
+  const skippedDraftCached = await f.run("", [prUrl, "--apply", "--approve", "--report-skips"]);
   assert.match(skippedDraftCached, /Skipping .*PR is a draft/);
   assert.doesNotMatch(skippedDraftCached, /Reusing saved assessment|Verdict:/);
   assert.deepEqual(github.requests.slice(draftReads), ["/github/repos/acme/demo/pulls/7"]);
@@ -573,7 +580,7 @@ test("restart checks live merge status, draft status and skip labels but preserv
   prState.draft = false;
   prState.labels = ["skip-audit"];
   const labelReads = github.requests.length;
-  const skippedLabelCached = await f.run("", [prUrl, "--skip=skip-audit", "--apply", "--approve"]);
+  const skippedLabelCached = await f.run("", [prUrl, "--skip=skip-audit", "--apply", "--approve", "--report-skips"]);
   assert.match(skippedLabelCached, /Skipping .*matching skip label/);
   assert.doesNotMatch(skippedLabelCached, /Reusing saved assessment|Verdict:/);
   assert.deepEqual(github.requests.slice(labelReads), ["/github/repos/acme/demo/pulls/7"]);
@@ -582,7 +589,7 @@ test("restart checks live merge status, draft status and skip labels but preserv
   assert.equal(turn, 3, "skipping must preserve the cache, and skip flags must not persist");
   prState.merged = true;
   const reads = github.requests.length;
-  const skippedCached = await f.run("", [prUrl, "--apply", "--approve"]);
+  const skippedCached = await f.run("", [prUrl, "--apply", "--approve", "--report-skips"]);
   assert.match(skippedCached, /Skipping .*already been merged/);
   assert.doesNotMatch(skippedCached, /Reusing saved assessment|Verdict:/);
   assert.equal(turn, 3, "a merged PR must not reassess a cached audit");

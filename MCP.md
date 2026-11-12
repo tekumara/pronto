@@ -49,6 +49,7 @@ Authenticated clients can call `run_audit` with these arguments:
 | `skipLabels` | Repeated `--skip` labels; default empty |
 | `skipDrafts` | `--skip-drafts`; default `true` |
 | `skipApproved` | `--skip-approved`; default `true` |
+| `reportSkips` | `--report-skips`; default `false` |
 | `exclude` | Repeated `--exclude` path patterns; default empty |
 | `force` | `--force`; default `false` |
 | `approve` | `--approve`; default `false` |
@@ -57,6 +58,8 @@ Authenticated clients can call `run_audit` with these arguments:
 | `apply` | `--apply`; default `false` |
 
 For example, `run_audit({targets: ["https://github.com/owner/repo/pull/42"], force: true})` reassesses a PR without publishing. To publish an eligible approval, add `apply: true` and `approve: true`. The defaults match the CLI, not the webhook flags passed to `pronto serve`. As with the CLI, previously authorised publications can still recover.
+
+Skips are logged and returned without a review by default. Set `reportSkips: true` to preview a skip review, or combine it with `apply: true` to post the review. A skip caused by the server's own current approval remains quiet, even with both options. Repeated skip reviews are suppressed when a matching receipt is saved locally. This option does not affect verdict reviews for completed audits.
 
 Numbers and branches use the server's `GH_REPO` or Git checkout, not the client's. An omitted target uses the server's current branch. Use explicit PR URLs when that context is not intended. The tool resolves and validates the whole batch before starting audits. The request body is limited to 64 KiB.
 

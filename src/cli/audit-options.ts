@@ -1,15 +1,15 @@
 import { compileExclusions } from "../audit/exclusions.ts";
 import { parseReviewTarget } from "../github/reviews.ts";
 
-export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <owner/repo#number> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
+export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--report-skips] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <owner/repo#number> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
 
-export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--replicated-state] [--mcp --mcp-public-url <https-url-or-http-loopback-url> [--mcp-allow-origin <https-origin>]...] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
+export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--replicated-state] [--mcp --mcp-public-url <https-url-or-http-loopback-url> [--mcp-allow-origin <https-origin>]...] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--report-skips] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "serve") {
   const usage = source === "cli" ? AUDIT_CLI_USAGE : SERVE_USAGE;
   // Boolean flags default to true and take an optional true|false value.
   const booleanFlags = ["--skip-drafts", "--skip-approved"];
-  const flags = ["--force", ...booleanFlags, "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];
+  const flags = ["--force", ...booleanFlags, "--report-skips", "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];
   const supplied = new Set<string>();
   const positional: string[] = [];
   const targets: string[] = [];
@@ -71,7 +71,7 @@ export function parseAuditOptions(args: string[], source: "cli" | "serve") {
   }
   // Validate every explicit URL before credentials, storage or network access.
   for (const selector of selectors) if (selector.includes("://")) parseReviewTarget(selector);
-  return { selectors, requested, skipLabels, skipDrafts: booleans["--skip-drafts"], skipApproved: booleans["--skip-approved"], exclude, force: supplied.has("--force"),
+  return { selectors, requested, skipLabels, skipDrafts: booleans["--skip-drafts"], skipApproved: booleans["--skip-approved"], reportSkips: supplied.has("--report-skips"), exclude, force: supplied.has("--force"),
     approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"),
     approveMigrations: supplied.has("--approve-migrations"), apply: supplied.has("--apply") };
 }

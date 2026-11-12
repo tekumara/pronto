@@ -441,21 +441,29 @@ test("serve retains a bounded delivery window across restart", { timeout: 30_000
   assert.equal((await second.done).code, 0);
 });
 
-test("serve checks a resumed PR again, so one merged in the meantime is skipped", { timeout: 40_000 }, async (t) => {
-  const gh = github();
-  const model = hangingModel();
-  const f = await fixture(t, model.respond, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
-  await interruptedServe(f, model, "SIGKILL", ["--apply"]);
-  gh.state.merged = true;
-  const second = f.start(["serve", "--port", "0", "--apply"], { env });
-  const out = watchOutput(second.child);
-  await out.until(/INFO\s+acme\/demo#7\s+Recovering audit/);
-  await out.until(/INFO\s+acme\/demo#7\s+Skipped · PR has already been merged\./);
-  second.child.kill("SIGTERM");
-  assert.equal((await second.done).code, 0);
-  assert.equal(model.calls.count, 1, "a merged PR must not resume model work");
-  assert.equal(gh.reviews.length, 0);
-});
+for (const { initial, restart, posts } of [
+  { initial: ["--apply", "--report-skips"], restart: [], posts: true },
+  { initial: ["--apply"], restart: ["--apply", "--report-skips"], posts: false },
+  { initial: ["--report-skips"], restart: ["--apply", "--report-skips"], posts: false },
+]) {
+  test(`serve retains skip reporting choices when a resumed PR was merged (${initial.join(" ") || "defaults"})`, { timeout: 40_000 }, async (t) => {
+    const gh = github();
+    const model = hangingModel();
+    const f = await fixture(t, model.respond, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+    await interruptedServe(f, model, "SIGKILL", initial);
+    gh.state.merged = true;
+    const second = f.start(["serve", "--port", "0", ...restart], { env });
+    const out = watchOutput(second.child);
+    await out.until(/INFO\s+acme\/demo#7\s+Recovering audit/);
+    await out.until(/INFO\s+acme\/demo#7\s+Skipped · PR has already been merged\./);
+    if (posts) await out.until(/INFO\s+acme\/demo#7\s+Review: /);
+    second.child.kill("SIGTERM");
+    assert.equal((await second.done).code, 0);
+    assert.equal(model.calls.count, 1, "a merged PR must not resume model work");
+    assert.equal(gh.reviews.length, posts ? 1 : 0, "recovery must retain the original skip-reporting and apply choices");
+    if (posts) assert.match(gh.reviews[0]!.body, /PR has already been merged/);
+  });
+}
 
 test("serve does not hold repository databases that have nothing to resume", { timeout: 40_000 }, async (t) => {
   const gh = github();
@@ -715,6 +723,45 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   const manyTargets = await client.callTool({ name: "run_audit", arguments: { targets: Array(101).fill(prUrl) } });
   assert.equal(manyTargets.isError, true);
   assert.match(JSON.stringify(manyTargets), /Duplicate PR target/);
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 0);
+});
+
+test("MCP skip reporting is opt-in and independent of webhook startup flags", { timeout: 30_000 }, async (t) => {
+  const gh = github();
+  gh.state.merged = true;
+  const f = await fixture(t, () => assert.fail("A skipped PR must not reach the model"),
+    { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+  const token = randomBytes(32).toString("hex");
+  const run = f.start(["serve", "--port", "0", "--apply", "--report-skips", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"],
+    { env: { ...env, PRONTO_MCP_TOKEN: token } });
+  const out = watchOutput(run.child);
+  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const base = `http://127.0.0.1:${port}`;
+  const client = await auditMcpClient(`${base}/mcp`, token);
+  t.after(() => client.close());
+  const args = { targets: [prUrl] };
+
+  for (const options of [{ apply: true }, { apply: true, reportSkips: false }, { reportSkips: true }]) {
+    const skipped = await runMcpAudit(client, { ...args, ...options });
+    assert.equal(skipped.results[0]!.status, "skipped");
+    assert.match(skipped.results[0]!.reason!, /already been merged/);
+    assert.equal(gh.reviews.length, 0, "MCP requires both apply and reportSkips despite serve flags");
+  }
+  await runMcpAudit(client, { ...args, apply: true, reportSkips: true, approve: true });
+  assert.equal(gh.reviews.length, 1);
+  assert.equal(gh.reviews[0]!.event, "COMMENT");
+  assert.match(gh.reviews[0]!.body, /PR has already been merged/);
+  await runMcpAudit(client, { ...args, apply: true, reportSkips: true });
+  assert.equal(gh.reviews.length, 1, "a matching skip review is not repeated");
+
+  gh.state.merged = false;
+  gh.state.draft = true;
+  assert.equal((await deliver(base, reviewRequested("me", prUrl))).status, 202);
+  await out.until(/Skipped · PR is a draft[\s\S]*Review: /);
+  assert.equal(gh.reviews.length, 2, "webhook startup flags enable skip reporting independently");
+  assert.equal(gh.reviews[1]!.event, "COMMENT");
+  assert.match(gh.reviews[1]!.body, /PR is a draft/);
   run.child.kill("SIGTERM");
   assert.equal((await run.done).code, 0);
 });

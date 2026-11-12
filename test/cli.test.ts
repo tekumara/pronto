@@ -211,8 +211,7 @@ for (const { name, reviews, args, approver } of [
     if (approver) {
       assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR is already approved by ${approver} at ${headSha}.`));
       assert.doesNotMatch(output, /PR title:|Verdict:/, "an approved PR must not fetch evidence or reach the model");
-      if (approver === "auditor") assert.doesNotMatch(output, /Skip comment|Review audit · Skipped/);
-      else assert.match(output, /Skip comment would be posted/, "only your current, active approval silences the skip comment");
+      assert.doesNotMatch(output, /Skip comment|Review audit · Skipped/, "skip reporting is off by default");
     } else {
       assert.match(output, /Verdict:/);
       assert.doesNotMatch(output, /Skipping/);

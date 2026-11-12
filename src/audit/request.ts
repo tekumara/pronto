@@ -118,7 +118,7 @@ async function outputReport({ harness, plan, log, context, started, conversation
 }
 
 export type AuditOptions = {
-  model: ModelRef; skipLabels?: string[]; skipDrafts?: boolean; skipApproved?: boolean; force?: boolean;
+  model: ModelRef; skipLabels?: string[]; skipDrafts?: boolean; skipApproved?: boolean; reportSkips?: boolean; force?: boolean;
   approve?: boolean; allowUncertain?: boolean; approveMigrations?: boolean; apply?: boolean;
   /** Path patterns left out of the size limit and the audit; see compileExclusions. */
   exclude?: string[];
@@ -150,7 +150,7 @@ export async function auditRequest({ target, options, repository, context, log, 
     if (runs?.active != null) {
       const requests = await harness.snapshot(PublicationRequests, runs.active, context);
       // Startup flags govern new deliveries, never an already admitted assessment.
-      options = { ...options, ...(requests?.choices.at(-1) ?? publicationChoices({})) };
+      options = { ...options, ...publicationChoices(requests?.choices.at(-1) ?? {}) };
     }
   }
   const reassessment = (await pendingReassessments(harness, context))[prKey];
@@ -158,7 +158,7 @@ export async function auditRequest({ target, options, repository, context, log, 
     if (reassessment.author && (await fetchViewerLogin(context.abortSignal)).toLowerCase() !== reassessment.author.toLowerCase()) {
       throw new Error(`Pending verdict belongs to ${reassessment.author}; restore that GitHub account before retrying.`);
     }
-    options = { ...options, ...reassessment.choices };
+    options = { ...options, ...publicationChoices(reassessment.choices) };
   }
   let stream: Awaited<ReturnType<Conversation["watch"]>> | undefined;
   try {
@@ -166,7 +166,7 @@ export async function auditRequest({ target, options, repository, context, log, 
     log("info", "Preparing · fetching GitHub evidence", null);
     const pr = await fetchPullRequest(target, context.abortSignal);
     const skip = async (reason: string, { publish = true } = {}) => {
-      if (publish) await outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
+      if (publish && options.reportSkips) await outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
       else {
         reason = stripControlCharacters(reason);
         log("info", `Skipped · ${reason}`, `[audit] Skipping ${target.url}: ${reason}`);
@@ -262,7 +262,7 @@ export async function auditRequest({ target, options, repository, context, log, 
       await harness.commit(async (tx) => {
         const requests = await tx.doc(PublicationRequests, existing.id);
         const choices = publicationChoices(options);
-        if (!requests.choices.some((saved) => canonical(saved) === canonical(choices))) requests.choices.push(choices);
+        if (!requests.choices.some((saved) => canonical(publicationChoices(saved)) === canonical(choices))) requests.choices.push(choices);
         // The controller might have completed since the host read its pointer. Either
         // it sees this request, or this transaction performs the handoff itself.
         const runs = await tx.doc(AuditRuns, prKey, null);
