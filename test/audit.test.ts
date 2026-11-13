@@ -235,12 +235,6 @@ test("CLI audit assesses a closed, unmerged PR using remote pinned code, rejects
   assert.ok(rejection.includes("https://example.com/also-invented"));
   assert.match(rejection, /Use supplied PR, comment or reply URLs/);
   // Guard the policy delivered to the model, not a simulated model's judgement of claims.
-  assert.match(policy, /not-migration:.*no database migration that blocks\s+approval[\s\S]*?data migrations and backfills limited to local databases/);
-  assert.match(policy, /no schema migration, database cutover or nonlocal data migration/);
-  assert.match(policy, /Shared development, CI, UAT, staging and production databases are not local/);
-  assert.match(policy, /default localhost URL alone is not proof of local-only scope when the\s+migration can target a nonlocal database/);
-  assert.match(policy, /if its scope\s+is unknown, use uncertain/);
-  assert.match(policy, /For a local-only data migration, identify the migration and explain\s+why its database targets are local-only/);
   assert.match(policy, /Accept specific reports of external testing, deployment or operator verification/);
   assert.match(policy, /Do not mark a finding uncertain\s+solely because these external results cannot be independently inspected\./);
   assert.match(policy, /For reported testing, state that the results were not independently inspected\./);

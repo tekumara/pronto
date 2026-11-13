@@ -4,7 +4,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { readAudit } from "../src/discussion/audit-reader.ts";
 import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 // A small external fixture isolates the final verdict rule: an open GitHub thread
@@ -815,36 +814,6 @@ for (const action of ["comment", "approve"] as const) {
     assert.match(cached, /Comment would be posted/, "a failed write must not create a submission receipt");
     assert.equal(calls, 1, "a failed write must not invalidate the completed assessment");
     assert.equal(github.attempts.length, 2, "startup retries the earlier explicit --apply, not the new preview");
-  });
-}
-
-for (const statuses of [[], ["outstanding"]] satisfies Status[][]) {
-  test(`a local-only data migration ${statuses.length ? "does not override outstanding findings" : "can be approved without a migration override"}`, { timeout: 20000 }, async (t) => {
-    const github = githubEvidence({ empty: !statuses.length, title: "Seed local database",
-      description: "Fill missing customer IDs in the developer's local database.",
-      files: [{ filename: "scripts/seed-local.ts", status: "added", patch: "@@ -0,0 +1,5 @@\n+import { Client } from 'pg';\n+const db = new Client({ host: '127.0.0.1' });\n+await db.connect();\n+await db.query('UPDATE customers SET external_id = id');\n+await db.end();" }],
-    });
-    const reason = "The seed command updates customer IDs only in the developer's local database.";
-    let calls = 0;
-    const f = await fixture(t, (body, response) => {
-      if (++calls > 1) return reply(response, [{ role: "assistant", content: "Done." }]);
-      assess(body, response, statuses, { status: "not-migration", reason });
-    }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
-
-    const preview = await f.run("", ["--approve", "--apply=false", url]);
-    const saved = readAudit({ prUrl: url }, f.stateDir);
-    assert.deepEqual((saved.data as { databaseMigration: unknown }).databaseMigration, { status: "not-migration", reason });
-    if (statuses.length) {
-      assert.match(preview, /Approval would be skipped: outstanding or uncertain findings remain/);
-      assert.doesNotMatch(preview, /PR would be approved/);
-    } else {
-      assert.match(preview, /PR would be approved/);
-      const applied = await f.run("", ["--approve", "--apply", url]);
-      assert.match(applied, /Reusing saved assessment/);
-      assert.match(applied, /PR approved/);
-      assert.equal(github.approvals.length, 1);
-      assert.equal(calls, 1, "the approved review must reuse the assessed classification");
-    }
   });
 }
 

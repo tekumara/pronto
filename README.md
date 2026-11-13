@@ -57,7 +57,7 @@ One-shot CLI and MCP audits select approval by default; webhook audits do not un
 
 - explicit permission to approve and post reviews
 - no outstanding or uncertain findings in Pronto’s assessment
-- an assessment that rules out a database migration requiring human approval
+- an assessment that rules out a database migration
 
 You can explicitly allow uncertain findings or migration approvals. Outstanding findings still block approval.
 
