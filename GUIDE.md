@@ -513,6 +513,8 @@ Unfinished audit?
                               Print report
 ```
 
+Each fresh assessment attempt runs in its own agent conversation. An invocation does not always start a new conversation. Pronto first resumes an unfinished attempt or reuses the latest successful assessment if the evidence and policy match. A first run, a cache miss, `--force`, or recovery that schedules a fresh attempt creates a new conversation. Changed comments or comment metadata can cause a cache miss even if the head SHA is unchanged.
+
 `--force`, or a saved restart intent, overrides this flow. It cancels any unfinished attempt, fetches fresh evidence and skips cache lookup.
 
 After interruption, select the same PR again using the same state directory to resume its saved snapshot and model. A batch can resume several PRs independently. If an older unfinished snapshot contains marked Pronto output, resuming stops before model execution. Use `--force` to start with fresh, filtered evidence. Historical snapshots and transcripts remain unchanged.
