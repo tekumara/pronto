@@ -1,7 +1,7 @@
 import type { Context, JsonValue } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { defineDoc, defineExtension, defineTask, ROOT_CONVERSATION_ID, type Harness, type TaskId } from "@earendil-works/pi-durable";
-import { missingReviewerReviews, reviewerPollDelayMs } from "../audit/reviewer-gate.ts";
+import { missingReviewerReviews, reviewerPollDelayMs, waitForReviewerWakeOrPoll, type ReviewerWakeups } from "../audit/reviewer-gate.ts";
 import { auditTargetKey, parseReviewTarget } from "../github/reviews.ts";
 import { createAuditQueue, type Enqueued } from "./audit-queue.ts";
 
@@ -22,11 +22,12 @@ function record(value: JsonValue): Record<string, JsonValue> | undefined {
 
 /** Durable admission per repository; the ordinary queue only dispatches ready tasks across repositories. */
 export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch, requiredReviewers = [],
-  onReviewWait, onReviewSatisfied, onReviewError }: {
+  onReviewWait, onReviewSatisfied, onReviewError, reviewerWakeups }: {
   concurrency: number;
   audit(url: string, reason?: string): Promise<void>;
   beforeDispatch?(url: string): Promise<void>;
   requiredReviewers?: string[];
+  reviewerWakeups: ReviewerWakeups;
   onError(url: string, error: unknown): void;
   onReviewWait?(url: string, missing: string[]): void;
   onReviewSatisfied?(url: string): void;
@@ -92,27 +93,35 @@ export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch
     phases: {
       review: async (task, runtime, context) => {
         const reviewers = task.input.requiredReviewers ?? [];
-        let missing: string[];
+        const target = parseReviewTarget(task.input.url);
+        const waiter = reviewerWakeups.subscribe(target, reviewers);
+        const retryNow = async () => {
+          await waitForReviewerWakeOrPoll(waiter, reviewerPollDelayMs(task.state.checkpoint.attempt), runtime.signal, runtime.setTimer);
+          await runtime.sleepUntil(runtime.now(), {
+            phase: "review", attempt: task.state.checkpoint.attempt + 1,
+          }, context);
+        };
         try {
-          missing = await missingReviewerReviews(parseReviewTarget(task.input.url), reviewers, context.abortSignal);
-        } catch (error) {
-          if (context.abortSignal?.aborted || runtime.signal.aborted) throw error;
-          if (task.state.checkpoint.attempt === 0 || task.state.checkpoint.attempt % 10 === 0) onReviewError?.(task.input.url, error);
-          await runtime.sleepUntil(runtime.now() + reviewerPollDelayMs(task.state.checkpoint.attempt), {
-            phase: "review", attempt: task.state.checkpoint.attempt + 1,
-          }, context);
-          return;
+          let missing: string[];
+          try {
+            missing = await missingReviewerReviews(target, reviewers, context.abortSignal);
+          } catch (error) {
+            if (context.abortSignal?.aborted || runtime.signal.aborted) throw error;
+            if (task.state.checkpoint.attempt === 0 || task.state.checkpoint.attempt % 10 === 0) onReviewError?.(task.input.url, error);
+            await retryNow();
+            return;
+          }
+          if (missing.length) {
+            if (task.state.checkpoint.attempt === 0) onReviewWait?.(task.input.url, missing);
+            await retryNow();
+            return;
+          }
+          if (task.state.checkpoint.attempt > 0) onReviewSatisfied?.(task.input.url);
+          schedule(task.input.url, task.id);
+          await runtime.sleepUntil(runtime.now(), { phase: "dispatch", attempt: 0 }, context);
+        } finally {
+          waiter.close();
         }
-        if (missing.length) {
-          if (task.state.checkpoint.attempt === 0) onReviewWait?.(task.input.url, missing);
-          await runtime.sleepUntil(runtime.now() + reviewerPollDelayMs(task.state.checkpoint.attempt), {
-            phase: "review", attempt: task.state.checkpoint.attempt + 1,
-          }, context);
-          return;
-        }
-        if (task.state.checkpoint.attempt > 0) onReviewSatisfied?.(task.input.url);
-        schedule(task.input.url, task.id);
-        await runtime.sleepUntil(runtime.now(), { phase: "dispatch", attempt: 0 }, context);
       },
       dispatch: async (task, runtime, context) => {
         const done = Promise.withResolvers<void>();

@@ -5,7 +5,7 @@ import { createRegistry, ProviderDoc, type ConversationId, type Cursor, type Har
 import { auditTargetKey, parseReviewTarget, type ReviewTarget } from "../github/reviews.ts";
 import { auditLabel, stripControlCharacters, type Log } from "../logging.ts";
 import { createWebhookQueue, type WebhookAdmission } from "../server/webhook-queue.ts";
-import { waitForReviewerReviews } from "./reviewer-gate.ts";
+import { createReviewerWakeups, waitForReviewerReviews } from "./reviewer-gate.ts";
 import { createAuditScheduler } from "../server/audit-scheduler.ts";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "../state.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
@@ -37,9 +37,11 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   let closing: Promise<void> | undefined;
   let recovering: Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> | undefined;
   const scheduler = webhooks ? createAuditScheduler(webhooks.concurrency) : undefined;
+  const reviewerWakeups = createReviewerWakeups();
   const webhookQueue = webhooks ? createWebhookQueue({
     concurrency: webhooks.concurrency,
     requiredReviewers: webhooks.requiredReviewers,
+    reviewerWakeups,
     audit: async (url, reason) => {
       await auditor.scheduleAudit(url, webhooks.options, { source: "webhook", ...(reason ? { reason } : {}) }, BACKGROUND_CONTEXT, true);
     },
@@ -120,6 +122,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       if (!closing) harness.resume();
       return outcome;
     },
+    reviewSubmitted(url: string, reviewer: string): void {
+      reviewerWakeups.notify(parseReviewTarget(url), reviewer);
+    },
     /** Starts staged recovery work, without readmitting a PR that may already be running. */
     async resume(): Promise<void> {
       if (recovering) await recovering;
@@ -165,7 +170,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
             const error = detail;
             output?.("warn", scope, `Could not check required reviewer reviews; gate remains closed: ${error instanceof Error ? error.message : String(error)}`);
           }
-        });
+        }, reviewerWakeups);
       }
       return scheduler.run(url, () => {
         context.abortSignal?.throwIfAborted();

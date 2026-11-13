@@ -23,6 +23,18 @@ function logToken(value: unknown): string {
     && !/[^\w[\]-]/.test(value) ? value : "-";
 }
 
+/** Identifies valid submitted-review webhook payloads for reviewer-gate wakeups. */
+export function submittedReviewWebhook(event: string | undefined, payload: unknown): { url: string; reviewer: string } | undefined {
+  if (event !== "pull_request_review") return undefined;
+  const body = object(payload);
+  if (body?.action !== "submitted") return undefined;
+  const pull = object(body.pull_request);
+  const reviewer = loginOf(object(body.review)?.user);
+  if (typeof pull?.html_url !== "string" || !reviewer) return undefined;
+  try { return { url: parseReviewTarget(pull.html_url).url, reviewer }; }
+  catch { return undefined; }
+}
+
 /** Formats only bounded metadata for logs, never comment bodies or the full payload. */
 export function formatDeliveryContext(event: string | undefined, payload: unknown): string {
   const body = object(payload);

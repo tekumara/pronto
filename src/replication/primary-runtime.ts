@@ -206,6 +206,10 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
       if (!ready() || !term?.auditor) return "closed" as const;
       return term.auditor.enqueue(url, deliveryId, admission);
     },
+    reviewSubmitted(url: string, reviewer: string): void {
+      const term = active;
+      if (ready() && term?.auditor) term.auditor.reviewSubmitted(url, reviewer);
+    },
     async close(): Promise<void> {
       stopping = true;
       stopped.abort();

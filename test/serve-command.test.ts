@@ -275,6 +275,38 @@ test("serve durably waits for the first required review and includes its inline 
   assert.equal(result.code, 0, result.stderr);
 });
 
+test("wakes the required-review gate when a configured reviewer submits a review", { timeout: 20_000 }, async (t) => {
+  const gh = github();
+  const model = hangingModel();
+  const f = await fixture(t, model.respond, {
+    entrypoint: resolve("src/cli/audit.ts"), github: gh.handler,
+  });
+  const run = f.start(["serve", "--port", "0", "--require-review-from", "copilot-pull-request-reviewer[bot]"], { env });
+  const out = watchOutput(run.child);
+  t.after(() => { if (run.child.exitCode === null) run.child.kill("SIGTERM"); });
+  const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const base = `http://127.0.0.1:${port}`;
+  assert.equal((await deliver(base, reviewRequested("me", prUrl))).status, 202);
+  await out.until(/INFO\s+acme\/demo#7\s+Waiting for required review from copilot-pull-request-reviewer\[bot\]/);
+
+  const review = { id: 987, user: { login: "Copilot-Pull-Request-Reviewer[bot]" }, state: "COMMENTED",
+    submitted_at: "2026-11-13T03:11:17Z", commit_id: headSha, html_url: `${prUrl}#pullrequestreview-987`, body: "Copilot review completed." };
+  gh.state.submittedReviews.push(review);
+  const payload = JSON.stringify({ action: "submitted", sender: { login: "Copilot" },
+    pull_request: { html_url: prUrl, head: { sha: headSha } }, review });
+  const started = performance.now();
+  assert.equal((await deliver(base, payload, { event: "pull_request_review" })).status, 204,
+    "a review without a Pronto mention only wakes the gate; it does not request another audit");
+  await out.until(/INFO\s+acme\/demo#7\s+Required reviewer review received/);
+  assert.ok(performance.now() - started < 4_000, "the submitted-review webhook should wake the gate before its 5-second first poll");
+  await model.started;
+  assert.equal(model.calls.count, 1, "the audit proceeds to the model after rechecking submitted review history");
+
+  run.child.kill("SIGTERM");
+  const result = await run.done;
+  assert.equal(result.code, 0, result.stderr);
+});
+
 for (const { migration, apply, verbose, outcome } of [
   { migration: false, apply: true, verbose: false, outcome: "Approved" },
   { migration: false, apply: false, verbose: false, outcome: "Preview only · would approve" },

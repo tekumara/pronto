@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { Accepted, WebhookAdmission } from "./webhook-queue.ts";
 import type { AuditMcpEndpoint } from "../discussion/mcp.ts";
 import { auditLabel, createServeLogger, type Log } from "../logging.ts";
-import { classifyDelivery, formatDeliveryContext, formatWebhookObservation, verifySignature } from "./webhook.ts";
+import { classifyDelivery, formatDeliveryContext, formatWebhookObservation, submittedReviewWebhook, verifySignature } from "./webhook.ts";
 
 export const DEFAULT_WEBHOOK_PATH = "/webhook";
 // GitHub caps payloads at 25 MB, but a pull_request event is a small fraction of that.
@@ -16,6 +16,8 @@ export type WebhookServerOptions = {
   login: string;
   /** Resolves only after durable admission (including delivery deduplication) commits. */
   enqueue: (url: string, deliveryId?: string, admission?: WebhookAdmission) => Promise<Accepted>;
+  /** Wakes reviewer gates on a verified submitted-review webhook; the gate still verifies GitHub review history. */
+  onReviewSubmitted?: (url: string, reviewer: string) => void;
   /** Audit once when a PR is first ready, whether opened ready or converted from draft. */
   auditOnReady?: boolean;
   /** Application admission gate. Health stays live while standby or bootstrapping. */
@@ -63,7 +65,7 @@ function send(res: ServerResponse, status: number, body?: object, headers: Recor
 }
 
 /** Receives GitHub deliveries. Waits for durable admission, not audit execution: GitHub gives up on a slow response. */
-export function createWebhookServer({ secret, login, enqueue, auditOnReady = false, ready = () => true, mcp, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
+export function createWebhookServer({ secret, login, enqueue, onReviewSubmitted, auditOnReady = false, ready = () => true, mcp, path = DEFAULT_WEBHOOK_PATH, maxBodyBytes = MAX_BODY_BYTES, log = createServeLogger() }: WebhookServerOptions) {
   if (!secret) throw new Error("A webhook secret is required.");
   if (!login) throw new Error("The reviewer login is required.");
   if (mcp && [path, "/healthz", "/readyz"].includes(mcp.path)) throw new Error("The MCP path must differ from the webhook, health and readiness paths.");
@@ -102,6 +104,8 @@ export function createWebhookServer({ secret, login, enqueue, auditOnReady = fal
     const event = header(req, "x-github-event");
     const observation = formatWebhookObservation(event, payload);
     if (observation) log("debug", "webhook", `Observed GitHub event · ${observation}`, detail);
+    const submittedReview = submittedReviewWebhook(event, payload);
+    if (submittedReview) onReviewSubmitted?.(submittedReview.url, submittedReview.reviewer);
     const delivery = classifyDelivery(event, payload, login, { auditOnReady });
     if (delivery.kind === "pong") return send(res, 200, { status: "pong" });
     if (delivery.kind === "ignore") {

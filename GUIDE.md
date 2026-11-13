@@ -170,7 +170,7 @@ The server refuses to start without `PRONTO_WEBHOOK_SECRET`, with a token GitHub
 - With `--audit-on-ready`, the first event that makes a PR ready starts one audit. This includes PRs opened as ready and drafts that become ready. Pronto saves the first-ready marker across restarts.
 - A new or edited PR comment, inline comment or reply that mentions the token's user as `@login`. Submitted or edited review summaries also count. Mentions match whole logins, ignoring case. Emails, longer logins and team mentions do not count.
 
-Use `--require-review-from <login>` to wait until GitHub shows a submitted review from that login before any audit proceeds. Repeat the flag to require a submitted review from each listed login. Pronto checks review history, so it does not need a `review_requested` event. Once a review exists, Pronto does not wait for another pass. Serve saves waiting webhook work and resumes it after a restart.
+Use `--require-review-from <login>` to wait until GitHub shows a submitted review from that login before any audit proceeds. Repeat the flag to require a submitted review from each listed login. Pronto checks review history, so it does not need a `review_requested` event. A matching submitted-review webhook wakes the gate for an immediate recheck; polling remains as a fallback. Once a review exists, Pronto does not wait for another pass. Serve saves waiting webhook work and resumes it after a restart.
 
 Ordinary issue comments, pending reviews and Pronto's marked audit output do not start audits. Other deliveries are acknowledged without starting an audit. Use `--verbose` to log why they were ignored.
 
@@ -208,7 +208,7 @@ Incomplete-assessment errors include the conversation, submission and model iden
 
 ### Webhook reliability
 
-In serve mode, Pronto saves accepted audit requests before returning `202`. When you set `--require-review-from`, waiting audits poll GitHub's submitted review history without using an audit slot. The wait survives restarts. Waiting work and one queued rerun per PR also survive restarts. Delivery deduplication survives restarts for the last 1000 accepted delivery IDs per repository.
+In serve mode, Pronto saves accepted audit requests before returning `202`. When you set `--require-review-from`, waiting audits wake on matching submitted-review webhooks and recheck GitHub's submitted review history; polling is the fallback, and waits use no audit slot. The wait survives restarts. Waiting work and one queued rerun per PR also survive restarts. Delivery deduplication survives restarts for the last 1000 accepted delivery IDs per repository.
 
 With `--apply`, Pronto saves verdict publication as a durable task. It does the same for skip reviews when `--report-skips` is enabled. Startup resumes pending publications without running the model again, including assessments first published from the cache. If an approval's head or base commit has changed, Pronto retires that publication and runs a fresh assessment with its saved publication choices. Preview-only assessments do not become pending writes when the server restarts with different flags.
 

@@ -18,7 +18,7 @@ function printServeHelp(): void {
   console.log(`--host <address> sets the address to bind (default: ${DEFAULT_HOST}; use 0.0.0.0 to accept outside connections, behind TLS).`);
   console.log(`--concurrency <n> sets how many audits run at once (default: ${DEFAULT_CONCURRENCY}).`);
   console.log("--webhook-path <path> sets the path that receives deliveries (default: /webhook). GET /healthz reports health.");
-  console.log("--audit-on-ready triggers one audit at the PR's first ready-for-review event; --require-review-from <login> waits for at least one submitted review from that GitHub login before any audit proceeds. Repeat --require-review-from for multiple logins.");
+  console.log("--audit-on-ready triggers one audit at the PR's first ready-for-review event; --require-review-from <login> waits for at least one submitted review from that GitHub login before any audit proceeds. Matching submitted-review webhooks wake the gate; polling remains a fallback. Repeat --require-review-from for multiple logins.");
   console.log("--verbose includes observed GitHub events and review metadata, ignored deliveries, delivery IDs, model tool calls, cache changes and full reports. MCP tool calls and audit trigger sources are logged at INFO.");
   console.log("--mcp exposes audit tools and the discussion skill on the same HTTP listener (default: off), including task-based delivery of long audits to clients that declare MCP Tasks support. Requires PRONTO_MCP_TOKEN and --mcp-public-url <https-url> (or an HTTP loopback URL for local use); the token can run audits and publish reviews with apply=true. Terminate public HTTPS at a reverse proxy. See MCP.md.");
   console.log("--mcp-allow-origin <https-origin> adds an exact allowed browser origin; repeat for multiple origins. MCP bearer auth is separate from webhook signatures. --mcp cannot yet be combined with --replicated-state.");
@@ -67,6 +67,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
     const runtime = await createPrimaryRuntime(replica, { models, audit: options, concurrency, log, requiredReviewers });
     let stopping = false;
     const server = createWebhookServer({ secret, login, auditOnReady, enqueue: (url, id, admission) => runtime.enqueue(url, id, admission),
+      onReviewSubmitted: (url, reviewer) => runtime.reviewSubmitted(url, reviewer),
       ready: () => !stopping && runtime.ready(), path, log });
     const stopped = Promise.withResolvers<NodeJS.Signals>();
     const stop = (signal: NodeJS.Signals) => { stopping = true; stopped.resolve(signal); void runtime.close().catch(() => {}); };
@@ -91,7 +92,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
     if (stopping) return "closed";
     const outcome = await auditor.enqueue(url, id, admission);
     return stopping ? "closed" : outcome;
-  }, path, log, mcp });
+  }, onReviewSubmitted: (url, reviewer) => auditor.reviewSubmitted(url, reviewer), path, log, mcp });
   const stopped = Promise.withResolvers<NodeJS.Signals>();
   const stop = (signal: NodeJS.Signals) => { stopping = true; stopped.resolve(signal); };
   process.on("SIGINT", stop);
