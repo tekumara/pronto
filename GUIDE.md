@@ -428,15 +428,17 @@ One-shot CLI audits select and submit an approval by default when eligible. You 
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--approve` defaults to true for one-shot CLI and MCP audits, and false for webhook audits configured by `pronto serve`. Set it to false to select a comment review instead. `--apply=false` previews the selected action without submitting a review. Approval requires a PR classified as `not-migration`, with no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, also qualify if the PR is not a database migration. No `addressed` finding is required.
+`--approve` defaults to true for one-shot CLI and MCP audits, and false for webhook audits configured by `pronto serve`. Set it to false to select a comment review instead. `--apply=false` previews the selected action without submitting a review. Approval requires a PR classified as `not-migration`, with no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, also qualify if the migration classification permits approval. No `addressed` finding is required.
 
-Pronto does not approve database-migration PRs by default. The model classifies the PR using its title, description, changed files and patches, inspecting pinned code as needed. Database schema or data migrations, backfills and database cutovers block approval by default, even when the PR also contains unrelated changes. Migration-framework maintenance, documentation or test fixtures alone do not count as a database migration.
+Pronto classifies data migrations and backfills limited to databases on the developer's own machine as `not-migration`. This includes databases in local containers. The saved classification reason identifies the migration and explains its local scope. You can read it through audit discussion. The model must establish that scope from the available evidence. A script name, environment label, description or default localhost URL alone is not enough if the migration can target a nonlocal database. Shared development, CI, UAT, staging and production databases are not local. If the target scope is unknown, the classification is `uncertain` and blocks approval by default.
 
-The audit still runs and saves its assessment. With `--apply`, it posts the verdict as a `COMMENT` review unless a matching receipt exists in local history. The terminal report and comment explain why approval is blocked. Finding statuses and the audit verdict remain unchanged. Neither `--allow-uncertain` nor `--force` overrides this approval block.
+Schema migrations, database cutovers and data migrations affecting any nonlocal database still block approval by default. A local data migration does not exempt other migrations in the same PR. The model uses the PR title, description, changed files and patches, and inspects pinned code as needed. Migration-framework maintenance, documentation or test fixtures alone do not count as a database migration. These classifications are model assessments, not a guarantee of database scope.
+
+When migration status blocks approval, the audit still runs and saves its assessment. With `--apply`, it posts the verdict as a `COMMENT` review unless a matching receipt exists in local history. The terminal report and comment explain why approval is blocked. Finding statuses and the audit verdict remain unchanged. Neither `--allow-uncertain` nor `--force` overrides this approval block.
 
 Approval is also blocked if migration status is `uncertain`, or an older saved report has no migration classification. Use `--force` to request a fresh assessment when classification is missing. Completed assessments from the previous policy are refreshed automatically.
 
-Add `--approve-migrations` to allow approval of database-migration PRs:
+Add `--approve-migrations` to allow approval of other database-migration PRs:
 
 ```sh
 pronto --apply --approve --approve-migrations https://github.com/owner/repo/pull/42
@@ -477,7 +479,7 @@ The normal report is followed by a labelled comment preview and the planned acti
 [audit:dry-run] PR would be approved at 0123456789abcdef0123456789abcdef01234567
 ```
 
-Database migrations and uncertain or missing migration classifications skip approval unless you add `--approve-migrations`. Outstanding findings also skip approval. Uncertain findings skip approval unless you add `--allow-uncertain`. Audits with no actionable findings otherwise qualify for approval. An eligible approval still checks the current head and base SHAs; changed commits stop the preview with an error.
+Schema migrations, database cutovers, nonlocal data migrations and uncertain or missing migration classifications skip approval unless you add `--approve-migrations`. Data migrations limited to local databases do not need that flag. Outstanding findings also skip approval. Uncertain findings skip approval unless you add `--allow-uncertain`. Audits with no actionable findings otherwise qualify for approval. An eligible approval still checks the current head and base SHAs; changed commits stop the preview with an error.
 
 To submit the selected actions, leave `--apply` at its default or set `--apply=true`:
 
