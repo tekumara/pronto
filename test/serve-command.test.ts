@@ -453,8 +453,8 @@ for (const failure of ["model error", "missing assessment"] as const) {
       } else reply(response, [{ role: "assistant", content: "No structured report." }]);
     }, { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
     // Keep an older, reusable success: recovery must retry the latest failed attempt, not reuse it.
-    await f.run("", [prUrl]);
-    const failed = f.start(["--force", "--apply", prUrl]);
+    await f.run("", [prUrl, "--approve=false", "--apply=false"]);
+    const failed = f.start(["--force", "--approve=false", "--apply", prUrl]);
     failed.child.stdin.end();
     assert.equal((await failed.done).code, 1);
     assert.equal(calls, 2);
@@ -551,12 +551,12 @@ test("serve does not hold repository databases that have nothing to resume", { t
   const gh = github();
   const f = await fixture(t, (_body, response) => assess(response), { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
   // A finished audit leaves its repository database with no unfinished work.
-  await f.run("", [prUrl]);
+  await f.run("", [prUrl, "--approve=false", "--apply=false"]);
   const run = f.start(["serve", "--port", "0"], { env });
   const out = watchOutput(run.child);
   await out.until(/Listening on /);
   assert.doesNotMatch(out.output, /Recovering audit/);
-  const cli = await f.run("", [prUrl]);
+  const cli = await f.run("", [prUrl, "--approve=false", "--apply=false"]);
   assert.match(cli, /Reusing saved assessment/, "the CLI must still be able to open the repository while the server runs");
   run.child.kill("SIGTERM");
   assert.equal((await run.done).code, 0);
@@ -756,13 +756,13 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   const requestId = runAuditStart[1]!;
   await out.until(new RegExp(`INFO\\s+mcp\\s+pronto-audits/run_audit completed requestId=${requestId} · duration=\\d+\\.\\d+ms`));
   await out.until(new RegExp(`INFO\\s+acme/demo#7\\s+Triggered by MCP tool run_audit requestId=${requestId}`));
-  assert.equal(skipped.apply, false, "webhook --apply must not leak into remote CLI defaults");
+  assert.equal(skipped.apply, true, "MCP uses the one-shot CLI default, independently of webhook startup flags");
   const labelled = await runMcpAudit(client, { targets: [prUrl], skipDrafts: false, skipLabels: ["unused", "BLOCKED"] });
   assert.match(labelled.results[0]!.reason!, /matching skip label/);
   assert.equal(gh.reviews.length, 0);
   assert.deepEqual(modelNames, []);
 
-  const args = { targets: ["7"], model: "local/variant", skipDrafts: false, exclude: ["dist/**"] };
+  const args = { targets: ["7"], model: "local/variant", skipDrafts: false, exclude: ["dist/**"], approve: false, apply: false };
   const first = await runMcpAudit(client, args);
   assert.equal(first.results[0]!.status, "completed");
   assert.equal(first.results[0]!.prUrl, prUrl);
@@ -782,15 +782,16 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   assert.equal(file.patch, null);
   const cached = await runMcpAudit(client, args);
   assert.equal(cached.results[0]!.cached, true);
-  const currentBranch = await runMcpAudit(client, { model: "local/variant", skipDrafts: false, exclude: ["dist/**"] });
+  const currentBranch = await runMcpAudit(client, { model: "local/variant", skipDrafts: false, exclude: ["dist/**"], approve: false, apply: false });
   assert.equal(currentBranch.results[0]!.prUrl, prUrl);
   assert.equal(currentBranch.results[0]!.cached, true);
   const forced = await runMcpAudit(client, { ...args, force: true });
   assert.notEqual(forced.results[0]!.auditId, first.results[0]!.auditId);
   assert.deepEqual(modelNames, ["variant", "variant"]);
-  await runMcpAudit(client, { ...args, apply: true, approve: true });
+  const defaultPublication = await runMcpAudit(client, { targets: ["7"], model: "local/variant", skipDrafts: false, exclude: ["dist/**"] });
+  assert.equal(defaultPublication.apply, true);
   assert.equal(gh.reviews.length, 1);
-  assert.equal(gh.reviews[0]!.event, "APPROVE");
+  assert.equal(gh.reviews[0]!.event, "APPROVE", "omitted MCP apply and approve publish the eligible approval by default");
   const approved = await runMcpAudit(client, args);
   assert.match(approved.results[0]!.reason!, /already approved/);
   assert.equal((await runMcpAudit(client, { ...args, skipApproved: false })).results[0]!.status, "completed");
@@ -826,7 +827,7 @@ test("MCP skip reporting is opt-in and independent of webhook startup flags", { 
   t.after(() => client.close());
   const args = { targets: [prUrl] };
 
-  for (const options of [{ apply: true }, { apply: true, reportSkips: false }, { reportSkips: true }]) {
+  for (const options of [{ apply: true }, { apply: true, reportSkips: false }, { reportSkips: true, apply: false }]) {
     const skipped = await runMcpAudit(client, { ...args, ...options });
     assert.equal(skipped.results[0]!.status, "skipped");
     assert.match(skipped.results[0]!.reason!, /already been merged/);
@@ -867,7 +868,7 @@ test("MCP approval flags preserve migration and uncertain-finding safeguards", {
   const client = await auditMcpClient(`http://127.0.0.1:${port}/mcp`, token);
   t.after(() => client.close());
   const args = { targets: [prUrl], approve: true };
-  await runMcpAudit(client, { ...args, allowUncertain: true, approveMigrations: true });
+  await runMcpAudit(client, { ...args, apply: false, allowUncertain: true, approveMigrations: true });
   assert.equal(gh.reviews.length, 0, "approval options alone must not publish");
   await runMcpAudit(client, { ...args, apply: true });
   assert.equal(gh.reviews[0]!.event, "COMMENT");
@@ -900,7 +901,7 @@ test("MCP batches and webhooks share the concurrency limit and serialize the sam
     return first.handler(request, response);
   } });
   const token = randomBytes(32).toString("hex");
-  const run = f.start(["serve", "--port", "0", "--concurrency", "1", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"],
+  const run = f.start(["serve", "--port", "0", "--concurrency", "1", "--skip-approved=false", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"],
     { env: { ...env, PRONTO_MCP_TOKEN: token } });
   const out = watchOutput(run.child);
   const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
@@ -920,7 +921,7 @@ test("MCP batches and webhooks share the concurrency limit and serialize the sam
   await out.until(/acme\/demo#7\s+Reusing saved assessment/);
   assert.equal(calls, 2, "the queued webhook should recheck rather than lose or duplicate the running audit");
   const failedUrl = "https://github.com/acme/demo/pull/9";
-  const partial = await client.callTool({ name: "run_audit", arguments: { targets: [prUrl, failedUrl] } });
+  const partial = await client.callTool({ name: "run_audit", arguments: { targets: [prUrl, failedUrl], skipApproved: false } });
   assert.equal(partial.isError, true);
   const results = (partial.structuredContent as { results: { prUrl: string; status: string; error?: string }[] }).results;
   assert.deepEqual(results.map(({ prUrl: url, status }) => [url, status]), [[prUrl, "completed"], [failedUrl, "failed"]]);
@@ -944,7 +945,7 @@ test("cancelling a queued MCP audit prevents it from starting", { timeout: 30_00
   }, { entrypoint: resolve("src/cli/audit.ts"), github: (request, response) =>
     /\/(?:pulls|issues)\/8(?:\/|\?|$)/.test(request.url!) ? second.handler(request, response) : first.handler(request, response) });
   const token = randomBytes(32).toString("hex");
-  const run = f.start(["serve", "--port", "0", "--concurrency", "1", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"],
+  const run = f.start(["serve", "--port", "0", "--concurrency", "1", "--skip-approved=false", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"],
     { env: { ...env, PRONTO_MCP_TOKEN: token } });
   const out = watchOutput(run.child);
   const [, port] = await out.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);

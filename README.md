@@ -1,6 +1,6 @@
 # Pronto
 
-Pronto is a GitHub app that helps reduce pull request (PR) cycle time. It makes review follow-up faster by showing what feedback has been dealt with, what still needs attention, and who should act next. When enabled, it can also approve PRs once all actionable review findings appear addressed, subject to the [approval conditions and safeguards](#approval-conditions-and-safeguards).
+Pronto helps reduce pull request (PR) cycle time by showing what review feedback has been addressed, what still needs attention, and who should act next. One-shot CLI and MCP audits post a verdict review by default, approving eligible PRs and commenting when approval is blocked. Pass `--apply=false` (or `apply: false` through MCP) to preview instead, or `--approve=false` (`approve: false`) to post a comment rather than an approval. Webhook audits started by `pronto serve` remain preview-only unless `--apply` is set at startup. See the [approval conditions and safeguards](#approval-conditions-and-safeguards).
 
 ## Summon it from GitHub
 
@@ -49,11 +49,11 @@ Pronto skips the audit when:
 - the PR changes more than 10,000 lines, counting additions and deletions after configured file exclusions
 - the PR’s latest commit already has a reviewer’s approval, unless auditing approved PRs is enabled
 
-Pronto logs skips without posting or previewing a review by default. Add `--report-skips` to preview a skip review, or combine it with `--apply` to post the review. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. A skip never approves the PR or calls the model. Repeating the same reason at the same commit does not post another review when a local receipt exists.
+Pronto logs skips without posting or previewing a review by default. Add `--report-skips` to report a skip; one-shot CLI and MCP audits post that review by default, while `--apply=false` previews it. In webhook mode, posting also requires `--apply` at startup. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. A skip never approves the PR or calls the model. Repeating the same reason at the same commit does not post another review when a local receipt exists.
 
 ## Approval conditions and safeguards
 
-Automatic approval is off by default. By default, an approval requires:
+One-shot CLI and MCP audits select approval by default; webhook audits do not unless `pronto serve` is configured with `--approve`. An approval requires:
 
 - explicit permission to approve and post reviews
 - no outstanding or uncertain findings in Pronto’s assessment
@@ -67,7 +67,7 @@ The goal is less time chasing review feedback and waiting for another review rou
 
 ## Discuss a saved audit
 
-External agents can read and run audits and use the discussion skill through an authenticated MCP endpoint. The token also permits review publication when requested. The agent retains the selected audit reference. See [MCP setup](MCP.md) for HTTPS, credentials and a runnable client.
+External agents can read and run audits and use the discussion skill through an authenticated MCP endpoint. Calling `run_audit` publishes a review by default; set `apply: false` to preview. The token grants this write access as well as read access, and the agent retains the selected audit reference. See [MCP setup](MCP.md) for HTTPS, credentials and a runnable client.
 
 ## Technical guide
 

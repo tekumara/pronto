@@ -1,21 +1,24 @@
 import { compileExclusions } from "../audit/exclusions.ts";
 import { parseReviewTarget } from "../github/reviews.ts";
 
-export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--report-skips] [--exclude <path>]... [--force] [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [<number> | <branch> | <owner/repo#number> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
+export const AUDIT_CLI_USAGE = "Usage: pronto [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--report-skips] [--exclude <path>]... [--force] [--approve[=true|false]] [--allow-uncertain] [--approve-migrations] [--apply[=true|false]] [<number> | <branch> | <owner/repo#number> | <GitHub PR URL> | --pr <target>...] [provider/model-id]";
 
-export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--audit-on-ready] [--require-review-from <login>]... [--replicated-state] [--mcp --mcp-public-url <https-url-or-http-loopback-url> [--mcp-allow-origin <https-origin>]...] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--report-skips] [--exclude <path>]... [--approve] [--allow-uncertain] [--approve-migrations] [--apply] [provider/model-id]";
+export const SERVE_USAGE = "Usage: pronto serve [--port <n>] [--host <address>] [--concurrency <n>] [--webhook-path <path>] [--verbose] [--audit-on-ready] [--require-review-from <login>]... [--replicated-state] [--mcp --mcp-public-url <https-url-or-http-loopback-url> [--mcp-allow-origin <https-origin>]...] [--skip <label>]... [--skip-drafts[=true|false]] [--skip-approved[=true|false]] [--report-skips] [--exclude <path>]... [--approve[=true|false]] [--allow-uncertain] [--approve-migrations] [--apply[=true|false]] [provider/model-id]";
 
 export function parseAuditOptions(args: string[], source: "cli" | "serve") {
   const usage = source === "cli" ? AUDIT_CLI_USAGE : SERVE_USAGE;
-  // Boolean flags default to true and take an optional true|false value.
-  const booleanFlags = ["--skip-drafts", "--skip-approved"];
-  const flags = ["--force", ...booleanFlags, "--report-skips", "--approve", "--allow-uncertain", "--approve-migrations", "--apply"];
+  // These flags accept optional explicit values so preview and approval selection remain configurable.
+  const booleanFlags = ["--skip-drafts", "--skip-approved", "--approve", "--apply"];
+  const flags = ["--force", ...booleanFlags, "--report-skips", "--allow-uncertain", "--approve-migrations"];
   const supplied = new Set<string>();
   const positional: string[] = [];
   const targets: string[] = [];
   const skipLabels: string[] = [];
   const exclude: string[] = [];
-  const booleans = { "--skip-drafts": true, "--skip-approved": true };
+  const booleans: Record<string, boolean> = {
+    "--skip-drafts": true, "--skip-approved": true,
+    "--approve": source === "cli", "--apply": source === "cli",
+  };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg.startsWith("-")) { positional.push(arg); continue; }
@@ -54,7 +57,7 @@ export function parseAuditOptions(args: string[], source: "cli" | "serve") {
     if (!flags.includes(flag)) throw new Error(`Unknown audit option: ${arg}\n${usage}`);
     if (supplied.has(flag)) throw new Error(`${flag} can be supplied only once\n${usage}`);
     supplied.add(flag);
-    if (flag === "--skip-drafts" || flag === "--skip-approved") {
+    if (booleanFlags.includes(flag)) {
       const value = arg.startsWith(`${flag}=`) ? arg.slice(flag.length + 1)
         : ["true", "false"].includes(args[i + 1]) ? args[++i] : "true";
       if (value !== "true" && value !== "false") throw new Error(`${flag} must be true or false\n${usage}`);
@@ -72,6 +75,6 @@ export function parseAuditOptions(args: string[], source: "cli" | "serve") {
   // Validate every explicit URL before credentials, storage or network access.
   for (const selector of selectors) if (selector.includes("://")) parseReviewTarget(selector);
   return { selectors, requested, skipLabels, skipDrafts: booleans["--skip-drafts"], skipApproved: booleans["--skip-approved"], reportSkips: supplied.has("--report-skips"), exclude, force: supplied.has("--force"),
-    approve: supplied.has("--approve"), allowUncertain: supplied.has("--allow-uncertain"),
-    approveMigrations: supplied.has("--approve-migrations"), apply: supplied.has("--apply") };
+    approve: booleans["--approve"], allowUncertain: supplied.has("--allow-uncertain"),
+    approveMigrations: supplied.has("--approve-migrations"), apply: booleans["--apply"] };
 }

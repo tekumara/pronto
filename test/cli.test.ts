@@ -27,6 +27,8 @@ test("npm link exposes pronto from source outside the checkout", { timeout: 2000
   assert.match(stdout, /--skip-drafts.*default: true/);
   assert.match(stdout, /--exclude <path>/);
   assert.match(stdout, /pronto serve \[options\] starts a webhook server/);
+  assert.match(stdout, /--approve\[=true\|false\].*default: true/);
+  assert.match(stdout, /--apply\[=true\|false\].*default: true/);
   assert.match(stdout, /--approve-migrations.*default: false/);
 });
 
@@ -154,7 +156,7 @@ for (const { name, args, head = "feature/pr-inference", commands = [], repositor
   test(`CLI resolves ${name} without gh`, { timeout: 20_000 }, async (t) => {
     const f = await selectionFixture(t, [], [], false, { head, state }, fixtureRepository);
     const env = checkout ? await gitCheckout(f.cwd, commands) : { PATH: f.cwd, GH_HOST: "" };
-    const output = await f.run("", args, { env: { ...env, GH_REPO: repository } });
+    const output = await f.run("", [...args, "--apply=false"], { env: { ...env, GH_REPO: repository } });
     assert.match(output, /PR title: Selected PR/);
     assert.ok(output.includes(expectedUrl), "the report must audit the selected PR");
   });
@@ -176,7 +178,7 @@ for (const { name, labels, args, draft = false, fixtureRepository = "acme/demo",
 ]) {
   test(name, { timeout: 20_000 }, async (t) => {
     const f = await selectionFixture(t, labels, [], draft, undefined, fixtureRepository);
-    const output = await f.run("", args, { env: { PATH: f.cwd, GH_REPO: "", GH_HOST: "" } });
+    const output = await f.run("", [...args, "--apply=false"], { env: { PATH: f.cwd, GH_REPO: "", GH_HOST: "" } });
     assert.match(output, /PR title: Selected PR/);
     assert.match(output, /Verdict:/);
     assert.doesNotMatch(output, /Skipping/);
@@ -207,7 +209,7 @@ for (const { name, reviews, args, approver } of [
 ]) {
   test(`CLI ${approver ? "skips" : "audits"} a PR with ${name}`, { timeout: 20_000 }, async (t) => {
     const f = await selectionFixture(t, [], reviews);
-    const output = await f.run("", [prUrl, "local/test", ...args], { env: { PATH: f.cwd } });
+    const output = await f.run("", [prUrl, "local/test", ...args, "--apply=false"], { env: { PATH: f.cwd } });
     if (approver) {
       assert.ok(output.includes(`[audit] Skipping ${prUrl}: PR is already approved by ${approver} at ${headSha}.`));
       assert.doesNotMatch(output, /PR title:|Verdict:/, "an approved PR must not fetch evidence or reach the model");
@@ -253,6 +255,10 @@ for (const { name, args, message } of [
   { name: "blank inline skip label", args: [prUrl, "--skip=  "], message: /--skip requires a non-empty label/ },
   { name: "an option instead of a skip label", args: [prUrl, "--skip", "--force"], message: /--skip requires a non-empty label/ },
   { name: "an invalid --skip-approved value", args: [prUrl, "--skip-approved=maybe"], message: /--skip-approved must be true or false/ },
+  { name: "an invalid --approve value", args: [prUrl, "--approve=maybe"], message: /--approve must be true or false/ },
+  { name: "a repeated --approve", args: [prUrl, "--approve", "--approve=false"], message: /--approve can be supplied only once/ },
+  { name: "an invalid --apply value", args: [prUrl, "--apply=maybe"], message: /--apply must be true or false/ },
+  { name: "a repeated --apply", args: [prUrl, "--apply", "--apply=false"], message: /--apply can be supplied only once/ },
   { name: "a repeated --skip-approved", args: [prUrl, "--skip-approved", "--skip-approved=false"], message: /--skip-approved can be supplied only once/ },
   { name: "an invalid --skip-drafts value", args: [prUrl, "--skip-drafts=maybe"], message: /--skip-drafts must be true or false/ },
   { name: "a repeated --skip-drafts", args: [prUrl, "--skip-drafts", "--skip-drafts=false"], message: /--skip-drafts can be supplied only once/ },

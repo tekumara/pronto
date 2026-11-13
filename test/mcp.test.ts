@@ -12,7 +12,7 @@ import { AuditDocument } from "../src/audit/audit-records.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SkillsClient } from "@modelcontextprotocol/client/ext/skills";
 import { auditChatInstructions } from "../src/discussion/audit-skill.ts";
-import { fixture, tool } from "./fixtures.ts";
+import { previewFixture as fixture, tool } from "./fixtures.ts";
 import { assessments, auditCheckpointHook, baseSha, codeUrl, commentUrl, githubEvidence, headSha, prUrl } from "./audit-evidence.ts";
 
 const auditEntry = resolve("src/cli/audit.ts");

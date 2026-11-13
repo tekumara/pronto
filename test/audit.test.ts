@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
+import { previewFixture as fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 import { prUrl, headSha, baseSha, accessId, codeUrl, commentUrl, githubEvidence, evidenceInput, assessments } from "./audit-evidence.ts";
 

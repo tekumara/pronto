@@ -4,7 +4,7 @@ A durable PR review auditor built on Pi Durable.
 
 Check whether human and bot review findings on a GitHub pull request have been addressed by code changes or supported explanations. The auditor compares review discussions with code at pinned commits and reports which findings are addressed, outstanding, uncertain or not actionable.
 
-Audits are read-only by default. When you provide a PR URL, you do not need a local checkout. Pi Durable saves the evidence and assessment in SQLite, resumes interrupted audits and reuses assessments when the evidence is unchanged. Add `--apply` to post the verdict as a PR review comment; add `--approve` as well to make that review an approval when the verdict allows it. Without `--apply`, Pronto previews the comment and any selected approval.
+One-shot CLI and MCP audits post a verdict review by default. When approval is eligible, the review is an approval; otherwise it is a comment. Pass `--apply=false` to preview without publishing, or `--approve=false` to publish a comment instead of an approval. Webhook audits started by `pronto serve` remain preview-only unless `--apply` is set at startup. When you provide a PR URL, you do not need a local checkout. Pi Durable saves the evidence and assessment in SQLite, resumes interrupted audits and reuses assessments when the evidence is unchanged.
 
 Use the [optional audit discussion chat](#optional-audit-discussion-chat) to ask about existing findings, author replies and evidence. To discuss them from another agent, expose the same tools and skill through [the authenticated MCP endpoint](MCP.md).
 
@@ -38,7 +38,7 @@ Set `GH_REPO=owner/repo` (or `host/owner/repo`) to choose the repository explici
 
 Use `owner/repo#number` to select a PR in a specific repository, for example `pronto example-org/example-repo#2423`. Number and branch selection in the current repository require Git and a checkout unless you set `GH_REPO`. An explicit PR URL or `owner/repo#number` target needs neither. The GitHub CLI is optional when you provide a token; Pronto only uses `gh auth token` as an authentication fallback. Selection failures stop the command before model setup or audit storage.
 
-Pronto logs skips without posting or previewing a review by default. Add `--report-skips` to preview a skip review, or combine it with `--apply` to post the review. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. Skip reviews use `COMMENT`, never `APPROVE`, even with `--approve`.
+Pronto logs skips without posting or previewing a review by default. Add `--report-skips` to report a skip; one-shot CLI audits post that review by default, while `--apply=false` previews it. In webhook mode, posting also requires `--apply` at startup. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. Skip reviews use `COMMENT`, never `APPROVE`, even with `--approve`.
 
 They are pinned to the PR’s current head commit and use the same durable publication and local duplicate prevention as verdict reviews. The same reason at the same head does not post again when a receipt exists. A different reason or head can produce a new review.
 
@@ -182,7 +182,7 @@ Ignored-delivery logs include the PR URL and sender, plus the requested reviewer
 
 `--replicated-state` enables experimental term-isolated S3 state. It defaults to off; ordinary serve, audits and chat do not need replica configuration or start replication. See [replicated state setup, RustFS tests and safety limits](REPLICATED_STATE.md) before enabling it. `GET /readyz` reports admission readiness separately from `/healthz` liveness. An unready replicated process returns 503 for application requests, without forwarding them.
 
-`--mcp --mcp-public-url <https-url-or-http-loopback-url>` adds an MCP endpoint to this listener. It requires `PRONTO_MCP_TOKEN`, which lets clients read and run audits and publish reviews when they request `apply`. Existing read-only MCP tokens gain these permissions. MCP is disabled by default and cannot be combined with `--replicated-state`. See [MCP setup](MCP.md) for access and client requirements.
+`--mcp --mcp-public-url <https-url-or-http-loopback-url>` adds an MCP endpoint to this listener. It requires `PRONTO_MCP_TOKEN`, which lets clients read and run audits; `run_audit` publishes reviews by default. Existing read-only MCP tokens gain this write permission. MCP is disabled by default and cannot be combined with `--replicated-state`. See [MCP setup](MCP.md) for access and client requirements.
 
 `--force` and `--pr` are rejected. `--force` would bypass the assessment cache on every delivery. To audit a branch named `serve` from the CLI, write `pronto --pr serve`.
 
@@ -336,10 +336,10 @@ Reported testing counts as `addressed` for approval eligibility. This relies on 
 
 ### Post a verdict comment
 
-Add `--apply` to post a compact audit comment as a PR review. It shows the verdict, finding counts, and each outstanding or uncertain finding with who raised it, who acts next, what they need to do, and the original review link. Reasoning, evidence links and audit metadata sit in collapsed GitHub Markdown sections:
+One-shot CLI audits post the verdict review by default. It is an approval when eligible, or a comment otherwise. Pass `--apply=false` to preview without publishing. The review shows the verdict, finding counts, and each outstanding or uncertain finding with who raised it, who acts next, what they need to do, and the original review link. Reasoning, evidence links and audit metadata sit in collapsed GitHub Markdown sections:
 
 ```sh
-pronto --apply https://github.com/owner/repo/pull/42
+pronto https://github.com/owner/repo/pull/42
 ```
 
 Example comment:
@@ -406,7 +406,7 @@ The headline is “Changes needed” when findings remain outstanding, or “Ver
 
 Outstanding findings appear before uncertain findings. Their reasoning and evidence appear in the first collapsed section. When a database migration blocks approval, its explanation appears there under “Database migration assessment”. The visible approval-block line stays short. The section is omitted when there are no pending findings or migration explanations. Audit context remains available, including the model used, estimated cost of model and tool usage, audited head, fetch window, thread-resolution counts, non-actionable count and meaning of `addressed`. Cached assessments retain the model and cost of the original assessment. In the posted comment, only the person who acts next is written as `@login`, and only on the `Awaiting` line, so GitHub notifies them once. The next step is a short imperative saying what to do. The person who raised the finding is never tagged on that basis, bots (`[bot]` accounts and Copilot) are never mentioned, and the terminal report stays plain. Each shows `Raised by` (the comment author, taken from the evidence) and `Awaiting` (the person who must act next). The auditor chooses `Awaiting` from the thread order: the PR author when a reply is missing or does not do what was asked, or when a bot raised the finding; the reviewer who opened the thread when the author's reply hands a decision back. The login must appear in the PR evidence or be `unknown`, and a report without it is rejected. Saved assessments without a specific next step or `Awaiting` use a generic action and `unknown`. The terminal report retains explanations and evidence for all findings.
 
-The verdict comment is previewed by default. With `--apply`, Pronto posts it unless a matching review is recorded in local history. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to submit PR reviews.
+One-shot CLI audits publish the verdict review by default: a comment unless approval is eligible. Pass `--apply=false` to preview without publishing. `--apply` can appear before or after the target or CLI model argument, and you can combine it with `--force`. Your GitHub token needs permission to submit PR reviews.
 
 `--apply` checks local records of [submitted audit reviews](GLOSSARY.md#language) in the repository's SQLite database. When the verdict body, review type and audited head match a recorded review, Pronto skips the write and prints its saved URL. Evidence-fetch times and trailing whitespace do not affect the match. This applies to cached assessments and forced refreshes. A preview followed by `--apply` still posts if no matching receipt exists. Changed verdict content or a different head can produce a new review.
 
@@ -418,17 +418,17 @@ Reviews are pinned to the audited head commit. Pronto never edits or replaces an
 
 With `--apply`, the durable publisher posts verdict reviews only after a complete, validated assessment. Skip-reason reviews need no assessment and always use `COMMENT`. A cache hit can post a review, such as for an assessment first run as a preview. The model remains read-only. Marked Pronto comments and reviews do not invalidate the evidence cache. Changes to other PR discussion still do.
 
-Publication flags are not sticky defaults for future audits. They are saved for the specific admitted assessment and publication task. A failed request retains the completed assessment and publication intent and exits 1. Reopening that repository, or starting serve mode, can finish the earlier authorised write even without a new `--apply`. The new invocation's preview does not authorise another write. A crash or receipt-storage failure leaves the publication recoverable, subject to the reconciliation limits above.
+Publication choices are saved for the specific admitted assessment and publication task, not applied to unrelated audits. A failed request retains the completed assessment and publication intent and exits 1. Reopening that repository, or starting serve mode, can finish the earlier authorised write even without a new `--apply`. A new invocation with `--apply=false` does not authorise another write. A crash or receipt-storage failure leaves the publication recoverable, subject to the reconciliation limits above.
 
 ### Approve clean audits
 
-Add `--apply --approve` to submit one GitHub approval review that carries the verdict comment as its body:
+One-shot CLI audits select and submit an approval by default when eligible. You can make that intent explicit with `--apply --approve`:
 
 ```sh
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--approve` defaults to false. Without `--apply`, it previews the approval decision without submitting a review. By default, approval requires a PR classified as `not-migration`, with no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, also qualify if the PR is not a database migration. No `addressed` finding is required.
+`--approve` defaults to true for one-shot CLI and MCP audits, and false for webhook audits configured by `pronto serve`. Set it to false to select a comment review instead. `--apply=false` previews the selected action without submitting a review. Approval requires a PR classified as `not-migration`, with no `outstanding` or `uncertain` findings. Audits with only `not-actionable` findings, or no findings, also qualify if the PR is not a database migration. No `addressed` finding is required.
 
 Pronto does not approve database-migration PRs by default. The model classifies the PR using its title, description, changed files and patches, inspecting pinned code as needed. Database schema or data migrations, backfills and database cutovers block approval by default, even when the PR also contains unrelated changes. Migration-framework maintenance, documentation or test fixtures alone do not count as a database migration.
 
@@ -442,7 +442,7 @@ Add `--approve-migrations` to allow approval of database-migration PRs:
 pronto --apply --approve --approve-migrations https://github.com/owner/repo/pull/42
 ```
 
-`--approve-migrations` defaults to false for each new audit. A pending publication retains its saved choice. It bypasses the migration approval block, including uncertain or missing migration classifications. It still requires `--approve`, and `--apply` to submit a review. Outstanding findings always prevent approval. Uncertain findings still require `--allow-uncertain`.
+`--approve-migrations` defaults to false for each new audit. A pending publication retains its saved choice. It bypasses the migration approval block, including uncertain or missing migration classifications. Approval selection and publication must still be enabled (`--approve` and `--apply` true); both default to true for one-shot CLI and MCP audits. Outstanding findings always prevent approval. Uncertain findings still require `--allow-uncertain`.
 
 The model always saves a migration classification. This flag only changes approval eligibility, not the classification, findings or cache. A cache hit uses the saved findings with the current approval options. With `--apply`, it posts only if the resulting verdict body, review type and head do not match a local submission receipt.
 
@@ -454,20 +454,20 @@ Add `--allow-uncertain` to permit approval with uncertain findings, provided the
 pronto --apply --approve --allow-uncertain https://github.com/owner/repo/pull/42
 ```
 
-`--allow-uncertain` defaults to false for each new audit. A pending publication retains its saved choice. It still requires `--approve`, and `--apply` to submit a review. Audits with only uncertain findings can qualify. Audits with no actionable findings qualify without this flag. The migration approval block still applies unless you add `--approve-migrations`. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
+`--allow-uncertain` defaults to false for each new audit. A pending publication retains its saved choice. Approval selection and publication must still be enabled (`--approve` and `--apply` true); both default to true for one-shot CLI and MCP audits. Audits with only uncertain findings can qualify. Audits with no actionable findings qualify without this flag. The migration approval block still applies unless you add `--approve-migrations`. The flag does not change finding statuses or the report: uncertain findings remain visible under “Verification needed”.
 
 With `--apply`, the host submits the approval after a complete, validated assessment, including a cache hit. It rechecks the PR's head and base SHAs before approving. If either differs from the saved snapshot, it reruns the assessment with current evidence before publishing. The review is pinned to the audited head SHA. Its body is the verdict comment, so the verdict and the approval appear as one review rather than a comment plus a body-less approval. Approval assesses the supplied review findings, not the PR's overall correctness or CI status.
 
 With `--apply --approve`, the host decides eligibility first. An eligible audit selects one `APPROVE` review carrying the verdict. Otherwise it selects a `COMMENT` review, and the terminal explains why approval was skipped. Either review is posted only if no matching receipt exists in local history. Your GitHub token needs permission to submit PR reviews. GitHub does not allow authors to approve their own PRs.
 
-The approval choice is saved for that publication task and any reassessment needed because its commits changed, not applied to unrelated audits. Other approval errors exit 1 but retain the completed assessment and pending publication. Because the verdict is the approval review's body, a rejected approval does not fall back to a separate comment. A head or base change prevents publishing the stale approval. GitHub rejects approval of your own PR, for example. An explicit new audit without `--approve` can request a `COMMENT` review instead; it does not revoke an earlier pending approval. Check the PR after ambiguous network failures.
+The approval choice is saved for that publication task and any reassessment needed because its commits changed, not applied to unrelated audits. Other approval errors exit 1 but retain the completed assessment and pending publication. Because the verdict is the approval review's body, a rejected approval does not fall back to a separate comment. A head or base change prevents publishing the stale approval. GitHub rejects approval of your own PR, for example. An explicit new audit with `--approve=false` can request a `COMMENT` review instead; it does not revoke an earlier pending approval. Check the PR after ambiguous network failures.
 
 ### Preview comments and approvals
 
-Audits run in dry-run mode by default. They show the exact comment body without writing to GitHub. Add `--approve` to preview whether the verdict permits approval:
+To preview a one-shot CLI audit without writing to GitHub, pass `--apply=false`. It shows the exact comment body and planned action. Approval selection remains enabled by default; pass `--approve=false` as well to preview a comment-only action:
 
 ```sh
-pronto --approve https://github.com/owner/repo/pull/42
+pronto --apply=false https://github.com/owner/repo/pull/42
 ```
 
 The normal report is followed by a labelled comment preview and the planned actions. The preview checks local review submission history and says when posting would be skipped. It creates no publication task or submission receipt and makes no GitHub duplicate lookup for the preview. Opening a repository can still recover an earlier explicitly authorised publication. For an addressed verdict with no recorded approval, the action preview looks like this:
@@ -479,15 +479,15 @@ The normal report is followed by a labelled comment preview and the planned acti
 
 Database migrations and uncertain or missing migration classifications skip approval unless you add `--approve-migrations`. Outstanding findings also skip approval. Uncertain findings skip approval unless you add `--allow-uncertain`. Audits with no actionable findings otherwise qualify for approval. An eligible approval still checks the current head and base SHAs; changed commits stop the preview with an error.
 
-To perform the selected actions, add `--apply`:
+To submit the selected actions, leave `--apply` at its default or set `--apply=true`:
 
 ```sh
 pronto --apply --approve https://github.com/owner/repo/pull/42
 ```
 
-`--apply` defaults to false for each new audit. When supplied, it authorises publication unless a matching review is recorded locally; with `--approve`, that review is an approval if eligible. Without `--apply`, the new audit creates no pending GitHub write. A previously authorised publication can still finish during recovery, using its saved choices.
+`--apply` defaults to true for one-shot CLI and MCP audits, and false for webhook audits configured by `pronto serve`. A true value authorises publication unless a matching review is recorded locally; with `--approve` true, the review is an approval if eligible. Set `--apply=false` to prevent a new GitHub write. A previously authorised publication can still finish during recovery, using its saved choices.
 
-With no action flags, the default preview shows the rendered comment body and the planned comment action. A preview does not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed; omit `--apply` to preview.
+With no action flags, a one-shot CLI audit publishes its verdict review and approves when eligible. Pass `--apply=false` to preview; previews do not test GitHub write permissions or reviewer restrictions. The former `--dry-run` flag has been removed.
 
 The audit otherwise runs normally: it fetches evidence, may call the model, saves its assessment and uses the cache. Dry-run mode prevents new publication requests, not local storage writes or model requests. It does not revoke earlier authorised publications. You can combine previews with `--force` to reassess fresh evidence.
 
@@ -667,7 +667,7 @@ Pronto rejects a second chat process for the same working directory and state di
 
 ### Use another agent over MCP
 
-`pronto serve --mcp --mcp-public-url https://audits.example.com/mcp` exposes audit tools and the canonical discussion skill on the webhook listener. It adds no model runtime or conversation store. The process keeps its usual serve credentials and startup recovery. The MCP token grants both audit reads and execution, including publication when requested. MCP supports `2026-07-28` only. Terminate HTTPS at a reverse proxy and keep the HTTP listener private. MCP is disabled without the flag and cannot be combined with experimental replicated state.
+`pronto serve --mcp --mcp-public-url https://audits.example.com/mcp` exposes audit tools and the canonical discussion skill on the webhook listener. It adds no model runtime or conversation store. The process keeps its usual serve credentials and startup recovery. The MCP token grants both audit reads and execution; `run_audit` publishes reviews by default. MCP supports `2026-07-28` only. Terminate HTTPS at a reverse proxy and keep the HTTP listener private. MCP is disabled without the flag and cannot be combined with experimental replicated state.
 
 See [MCP setup and client requirements](MCP.md), including Caddy configuration, native skill loading and a runnable latest-SDK client. The token shares all readable audits and can run audits using the server's credentials; it is not a per-PR permission. The external agent owns its conversation history and selected audit reference.
 

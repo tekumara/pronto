@@ -7,7 +7,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readAudit } from "../src/discussion/audit-reader.ts";
-import { fixture, reply, tool } from "./fixtures.ts";
+import { previewFixture as fixture, reply, tool } from "./fixtures.ts";
 import { prUrl, headSha, baseSha, commentUrl, githubEvidence, assessments, auditCheckpointHook } from "./audit-evidence.ts";
 
 const auditEntry = resolve("src/cli/audit.ts");

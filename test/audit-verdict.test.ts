@@ -150,7 +150,7 @@ for (const cached of [false, true]) {
       if (interrupting && request.url === "/github/user") return;
       await github.handler(request, response);
     } });
-    if (cached) await f.run("", [url]);
+    if (cached) await f.run("", [url, "--approve=false", "--apply=false"]);
     const preload = join(f.directory, "crash-before-publication.cjs");
     await writeFile(preload, `const write = process.stdout.write;
 process.stdout.write = function(chunk, ...args) {
@@ -192,7 +192,7 @@ for (const { revision, cached, status, event, crash, alreadyApproved } of [
         status: "migration", reason: "This changes database data.",
       });
     }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
-    if (cached) await f.run("", [url]);
+    if (cached) await f.run("", [url, "--approve=false", "--apply=false"]);
     const flags = ["--apply", "--approve", "--allow-uncertain", "--approve-migrations"];
     const failed = f.start([url, ...flags]);
     failed.child.stdin.end();
@@ -228,7 +228,7 @@ process.stdout.write = function(chunk, ...args) {
       assert.equal(snapshots.length, 1, "the crash must be before fresh evidence is admitted");
       assert.equal(github.attempts.length, 1);
       github.state.login = "another-auditor";
-      const blocked = f.start([url]);
+      const blocked = f.start([url, "--approve=false", "--apply=false"]);
       blocked.child.stdin.end();
       const result = await blocked.done;
       assert.equal(result.code, 1, "reassessment must retain the publication's original account restriction");
@@ -290,7 +290,7 @@ test("skip reviews deduplicate by head and reason and stay out of later audit ev
   assert.equal(github.posted.length, 1);
   const repeated = await f.run("", [url, "--report-skips", "--force", "--apply"]);
   assert.match(repeated, /Skip comment skipped: matching skip review recorded locally/);
-  const preview = await f.run("", [url, "--report-skips"]);
+  const preview = await f.run("", [url, "--report-skips", "--apply=false"]);
   assert.match(preview, /Skip comment would be skipped: matching skip review recorded locally/);
   assert.equal(github.posted.length, 1, "changing action flags must not duplicate a skip review");
 
@@ -306,7 +306,7 @@ test("skip reviews deduplicate by head and reason and stay out of later audit ev
   assert.equal(calls, 0);
 
   github.state.draft = github.state.merged = false;
-  await f.run("", [url]);
+  await f.run("", [url, "--apply=false", "--approve=false"]);
   assert.equal(calls, 1, "skipping must not create an assessment or poison a later audit");
 });
 
@@ -338,8 +338,30 @@ test("a skip publication survives a crash without an assessment and recovers wit
   assert.equal(github.attempts.length, 1, "recovery must save the same duplicate-prevention receipt");
 });
 
+test("CLI defaults to publishing eligible approvals and supports explicit comment and preview choices", { timeout: 20000 }, async (t) => {
+  const github = githubEvidence();
+  const f = await fixture(t, (body, response) => assess(body, response), {
+    entrypoint: resolve("src/cli/audit.ts"), github: github.handler,
+  });
+
+  const approved = await f.run("", [url]);
+  assert.match(approved, /PR approved/);
+  assert.equal(github.posted[0]!.event, "APPROVE", "omitted --approve and --apply select and publish an eligible approval");
+  assert.equal(github.approvals.length, 1);
+
+  const preview = await f.run("", [url, "--skip-approved=false", "--approve=false", "--apply=false"]);
+  assert.match(preview, /Comment would be posted/);
+  assert.doesNotMatch(preview, /PR would be approved/);
+  assert.equal(github.posted.length, 1, "--apply=false must leave GitHub unchanged");
+
+  const comment = await f.run("", [url, "--skip-approved=false", "--approve=false"]);
+  assert.match(comment, /Verdict comment posted to the PR/);
+  assert.equal(github.posted[1]!.event, "COMMENT", "apply remains true by default when approval is explicitly disabled");
+  assert.equal(github.approvals.length, 1);
+});
+
 for (const status of ["addressed", "uncertain"] as const) {
-  test(`${status} verdict is read-only by default and gates opt-in approval independently of an open GitHub thread`, { timeout: 20000 }, async (t) => {
+  test(`${status} verdict preview is explicit and approval eligibility is independent of an open GitHub thread`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence();
     let calls = 0;
     const f = await fixture(t, (body, response) => {
@@ -348,7 +370,7 @@ for (const status of ["addressed", "uncertain"] as const) {
     }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const verdict = status === "addressed" ? /Verdict: All actionable findings appear addressed/ : /Verdict: Not all actionable findings are addressed/;
     const commentHeadline = status === "addressed" ? /## Review audit · All actionable findings addressed/ : /## Review audit · Verification needed/;
-    const output = await f.run("", [url]);
+    const output = await f.run("", [url, "--approve=false", "--apply=false"]);
     assert.match(output, verdict);
     assert.match(output, /GitHub: 0\/1 inline threads resolved/);
     const preview = output.split("[audit:dry-run] Verdict comment preview:\n\n");
@@ -365,7 +387,7 @@ for (const status of ["addressed", "uncertain"] as const) {
     assert.equal(github.approvals.length, 0, "audits must not approve without --approve");
 
     if (status === "addressed") {
-      const firstPost = await f.run("", [url, "--apply"]);
+      const firstPost = await f.run("", [url, "--approve=false", "--apply"]);
       assert.match(firstPost, /Reusing saved assessment/);
       assert.equal(calls, 1, "output flags must not bypass the assessment cache");
       assert.equal(github.comments.length, 1);
@@ -431,12 +453,12 @@ test("--apply skips duplicate verdict reviews using local history across directo
     assess(body, response, [status]);
   }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
 
-  const preview = await f.run("", [url]);
+  const preview = await f.run("", [url, "--approve=false", "--apply=false"]);
   assert.match(preview, /Comment would be posted/);
   assert.equal(github.comments.length, 0);
   assert.deepEqual(github.issueComments, original, "dry-run must not change existing comments");
 
-  const first = await f.run("", ["--apply", url]);
+  const first = await f.run("", ["--approve=false", "--apply", url]);
   assert.match(first, /Reusing saved assessment/);
   assert.ok(first.includes(`[audit] Verdict comment posted to the PR: ${url}#pullrequestreview-100`));
   assert.equal(github.comments.length, 1, "an assessment first run as a preview can still be published");
@@ -444,38 +466,38 @@ test("--apply skips duplicate verdict reviews using local history across directo
   // A later GitHub edit must not change the local submission receipt.
   github.reviews[0].body = `Edited outside Pronto\n\n${auditMarker}`;
   const published = structuredClone(github.reviews);
-  const cachedPreview = await f.run("", [url]);
+  const cachedPreview = await f.run("", [url, "--approve=false", "--apply=false"]);
   assert.match(cachedPreview, /Comment would be skipped: matching verdict review recorded locally/);
   const otherCwd = join(f.directory, "other-project");
   await mkdir(otherCwd);
-  const cached = await f.run("", ["--apply", url, "local/test"], { cwd: otherCwd });
+  const cached = await f.run("", ["--approve=false", "--apply", url, "local/test"], { cwd: otherCwd });
   assert.match(cached, /Reusing saved assessment/);
   assert.ok(cached.includes(`Comment skipped: matching verdict review recorded locally: ${url}#pullrequestreview-100`));
   assert.doesNotMatch(cached, /Verdict comment posted/);
   assert.equal(calls, 1, "publishing or skipping output must not invalidate the assessment cache");
 
-  const forced = await f.run("", ["--force", "--apply", url]);
+  const forced = await f.run("", ["--approve=false", "--force", "--apply", url]);
   assert.match(forced, /Comment skipped: matching verdict review recorded locally/);
   assert.equal(calls, 2, "--force refreshes the assessment, not an unchanged verdict review");
   assert.deepEqual(github.reviews, published, "matching reviews must not be posted again or edited");
   assert.equal(github.attempts.length, 1);
 
   status = "addressed";
-  const changed = await f.run("", [url, "--force", "--apply"]);
+  const changed = await f.run("", [url, "--approve=false", "--force", "--apply"]);
   assert.match(changed, /Verdict comment posted/);
   assert.equal(github.comments.length, 2, "a changed verdict still posts a new review");
   assert.match(github.comments[1], /## Review audit · All actionable findings addressed/);
   assert.deepEqual(github.reviews.slice(0, published.length), published, "earlier reviews stay as posted");
 
   github.state.headSha = "b".repeat(40);
-  const newHead = await f.run("", ["--apply", url]);
+  const newHead = await f.run("", ["--approve=false", "--apply", url]);
   assert.match(newHead, /Verdict comment posted/);
   assert.equal(github.comments.length, 3, "the same verdict for a different head is a new review");
   assert.deepEqual(github.posted.map((review) => [review.event, review.commit_id]),
     [["COMMENT", sha], ["COMMENT", sha], ["COMMENT", github.state.headSha]]);
 
   github.state.login = "another-auditor";
-  const otherAccount = await f.run("", ["--apply", url]);
+  const otherAccount = await f.run("", ["--approve=false", "--apply", url]);
   assert.match(otherAccount, /Comment skipped: matching verdict review recorded locally/);
   assert.equal(github.comments.length, 3, "local review submission history is shared across GitHub accounts");
   assert.equal(calls, 4, "changing the GitHub account must not require a fresh assessment");
@@ -517,10 +539,10 @@ test("a fresh local history does not adopt matching reviews from GitHub", { time
     calls++;
     assess(body, response);
   }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
-  await f.run("", [url, "--apply"]);
+  await f.run("", [url, "--approve=false", "--apply"]);
   assert.equal(github.comments.length, 1);
 
-  const fresh = await f.run("", [url, "--apply"], {
+  const fresh = await f.run("", [url, "--approve=false", "--skip-approved=false", "--apply"], {
     env: { PRONTO_STATE_DIR: join(f.directory, "fresh-state") },
   });
   assert.match(fresh, /Verdict comment posted/);
@@ -613,7 +635,7 @@ test("terminal reports number each finding and verdict comments keep open findin
   assert.match(disclosures[1][2], /inline threads: 0\/1 resolved \(0 unknown\)/);
   assert.match(disclosures[1][2], /other findings: 1 not actionable/);
   assert.doesNotMatch(body, /Null guard|already fixed|Duplicate request|repeats the access check|\u001b/);
-  const cached = await f.run("", [url]);
+  const cached = await f.run("", [url, "--apply=false"]);
   assert.match(cached, /model used: `local\/test`/);
   assert.match(cached, /audit cost: US\$0\.02/);
 });
@@ -717,7 +739,7 @@ for (const crash of [false, true]) test(`${crash ? "a crash before the receipt" 
     await github.handler(request, response);
     if (request.method === "POST" && request.url?.endsWith("/reviews")) accepted.resolve();
   } });
-  const { child, done } = f.start([url, "--apply"]);
+  const { child, done } = f.start([url, "--approve=false", "--apply"]);
   child.stdin.end();
   if (crash) {
     await accepted.promise;
@@ -745,7 +767,7 @@ for (const crash of [false, true]) test(`${crash ? "a crash before the receipt" 
   assert.equal(calls, 1);
   assert.equal(github.attempts.length, 1, "reconciliation must find the accepted review before retrying POST");
 
-  const repeated = await f.run("", [url, "--apply", "--skip-approved=false"]);
+  const repeated = await f.run("", [url, "--approve=false", "--apply", "--skip-approved=false"]);
   assert.ok(repeated.includes(`Comment skipped: matching verdict review recorded locally: ${url}#pullrequestreview-100`));
   assert.equal(github.attempts.length, 1, "recovery saved a receipt for later invocations");
 });
@@ -776,7 +798,7 @@ for (const action of ["comment", "approve"] as const) {
       calls++;
       assess(body, response);
     }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
-    const { child, done } = f.start(["--apply", ...(action === "approve" ? ["--approve"] : []), url]);
+    const { child, done } = f.start(["--apply", ...(action === "approve" ? ["--approve"] : ["--approve=false"]), url]);
     child.stdin.end();
     const result = await done;
     assert.equal(result.code, 1);
@@ -787,7 +809,7 @@ for (const action of ["comment", "approve"] as const) {
     assert.equal(github.comments.length, 0, "a failed approval review must not leave the verdict anywhere else");
     assert.equal(github.approvals.length, 0);
 
-    const cached = await f.run("", [url]);
+    const cached = await f.run("", [url, "--approve=false", "--apply=false"]);
     assert.match(cached, /Reusing saved assessment/);
     assert.match(cached, /Comment would be posted/, "a failed write must not create a submission receipt");
     assert.equal(calls, 1, "a failed write must not invalidate the completed assessment");
@@ -823,7 +845,7 @@ for (const { statuses, migrationStatus } of [
       : statuses[0] === "addressed" ? /Verdict: All actionable findings appear addressed/
       : /Verdict: Not all actionable findings are addressed/;
 
-    const preview = await f.run("", [...flags, url]);
+    const preview = await f.run("", [...flags, "--apply=false", url]);
     assert.match(preview, verdict);
     assert.match(preview, /Approval would be skipped: database migration/);
     assert.doesNotMatch(preview, /PR would be approved/);
@@ -857,11 +879,11 @@ for (const { statuses, migrationStatus } of [
     assert.equal(github.comments.length, 1);
     assert.equal(github.approvals.length, 0, "neither --force nor --allow-uncertain may override the migration guard");
 
-    const withoutApproval = await f.run("", ["--apply", "--approve-migrations", url]);
+    const withoutApproval = await f.run("", ["--apply", "--approve=false", "--approve-migrations", url]);
     assert.doesNotMatch(withoutApproval, /PR approved/);
     assert.equal(github.approvals.length, 0, "--approve-migrations must not imply --approve");
 
-    const allowed = await f.run("", [...flags, "--approve-migrations", url]);
+    const allowed = await f.run("", [...flags, "--approve-migrations", "--apply=false", url]);
     assert.match(allowed, /Reusing saved assessment/);
     assert.match(allowed, /PR would be approved/);
     assert.doesNotMatch(allowed, /Approval blocked:|Approval would be skipped/);
@@ -873,7 +895,7 @@ for (const { statuses, migrationStatus } of [
     assert.doesNotMatch(allowedApply, /Approval blocked:|Approval skipped/);
     assert.equal(github.approvals.length, 1);
 
-    const guardedAgain = await f.run("", [...flags, "--skip-approved=false", url]);
+    const guardedAgain = await f.run("", [...flags, "--skip-approved=false", "--apply=false", url]);
     assert.match(guardedAgain, /Approval would be skipped: database migration/);
     assert.equal(github.approvals.length, 1, "allowing migrations must not persist to later invocations");
     assert.equal(calls, 2, "allowing migration approval must not invalidate the assessment cache");
@@ -902,13 +924,13 @@ for (const { statuses, approve, allowUncertain, approveMigrations } of [
     { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
     const noActionable = statuses.every((status) => status === "not-actionable");
     if (noActionable) {
-      const preview = await f.run("", ["--approve", url]);
+      const preview = await f.run("", ["--approve", "--apply=false", url]);
       assert.match(preview, /## Review audit · No actionable findings identified/);
       assert.doesNotMatch(preview, /Reasoning and evidence/);
       assert.match(preview, /PR would be approved/);
       assert.equal(github.comments.length, 0);
       assert.equal(github.approvals.length, 0, "clean audits still require --apply to submit approval");
-      await f.run("", ["--apply", url]);
+      await f.run("", ["--apply", "--approve=false", url]);
       assert.equal(github.approvals.length, 0, "publishing a clean verdict must not imply approval");
     }
     const output = await f.run("", [...flags, url]);
@@ -944,22 +966,22 @@ for (const { statuses, approve, allowUncertain, approveMigrations } of [
 }
 
 for (const { flags, status, approve } of [
-  { flags: [] as string[], status: "addressed", approve: false },
+  { flags: ["--approve=false"], status: "addressed", approve: false },
   { flags: ["--approve"], status: "addressed", approve: true },
-  { flags: [] as string[], status: "not-actionable", approve: false },
+  { flags: ["--approve=false"], status: "not-actionable", approve: false },
   { flags: ["--approve"], status: "not-actionable", approve: true },
   { flags: ["--approve"], status: "uncertain", approve: false },
-  { flags: ["--allow-uncertain"], status: "uncertain", approve: false },
+  { flags: ["--approve=false", "--allow-uncertain"], status: "uncertain", approve: false },
   { flags: ["--approve", "--allow-uncertain"], status: "uncertain", approve: true },
 ] satisfies { flags: string[]; status: Status; approve: boolean }[]) {
-  test(`default dry-run previews ${flags.join(" ") || "no mutation flags"} (${status}) and requires --apply on every invocation`, { timeout: 20000 }, async (t) => {
+  test(`explicit apply=false previews ${flags.join(" ")} (${status}) without a GitHub write`, { timeout: 20000 }, async (t) => {
     const github = githubEvidence();
     let calls = 0;
     const f = await fixture(t, (body, response) => {
       calls++;
       assess(body, response, [status]);
     }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
-    const run = () => f.run("", [...flags, url, "local/test"]);
+    const run = () => f.run("", [...flags, "--apply=false", url, "local/test"]);
     const output = await run();
     const preview = output.match(/\[audit:dry-run\] Verdict comment preview:\n\n([\s\S]*?)\n\n\[audit:dry-run\] Comment would/);
     assert.ok(preview, "dry-run must show the exact proposed comment body");
@@ -978,7 +1000,7 @@ for (const { flags, status, approve } of [
     assert.match(cached, /Reusing saved assessment/);
     assert.equal(calls, 1, "dry-run must use and publish the normal assessment cache");
     if (flags.includes("--approve") && flags.includes("--allow-uncertain")) {
-      const strict = await f.run("", ["--approve", url]);
+      const strict = await f.run("", ["--approve", "--apply=false", url]);
       assert.match(strict, /Reusing saved assessment/);
       assert.match(strict, /Approval would be skipped/);
       assert.equal(calls, 1, "uncertainty policy must not persist or invalidate the assessment cache");
@@ -986,7 +1008,7 @@ for (const { flags, status, approve } of [
     assert.equal(github.comments.length, 0);
     assert.equal(github.approvals.length, 0, "cached dry-runs must not submit reviews either");
 
-    const applied = await f.run("", [...flags, url, "--apply"]);
+    const applied = await f.run("", [...flags, url, "--apply=true"]);
     assert.doesNotMatch(applied, /\[audit:dry-run\]/);
     assert.equal(github.comments.length, 1);
     assert.equal(github.approvals.length, approve ? 1 : 0);
@@ -1009,7 +1031,7 @@ for (const revision of ["headSha", "baseSha"] as const) {
         github.state[revision] = "b".repeat(40);
         assess(body, response, [calls === 1 ? "addressed" : "outstanding"]);
       }, { entrypoint: resolve("src/cli/audit.ts"), github: github.handler });
-      const { child, done } = f.start(["--approve", ...(apply ? ["--apply"] : []), url]);
+      const { child, done } = f.start(["--approve", ...(apply ? ["--apply"] : ["--apply=false"]), url]);
       child.stdin.end();
       const result = await done;
       assert.equal(result.code, apply ? 0 : 1, result.stderr);

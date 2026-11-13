@@ -9,7 +9,7 @@ import { selectModel } from "../model.ts";
 
 export const runAuditTool = {
   name: "run_audit",
-  description: "Run the CLI audit for one or more PRs. This can spend model credits; apply=true can post GitHub reviews, including approvals. Use only when explicitly requested. Defaults match pronto, not serve's webhook flags. Omitted targets select the server's current branch; numbers and branches use the server's Git/GH_REPO, never the client's checkout. Returns a normal result if the audit finishes within one second. If the client declares io.modelcontextprotocol/tasks, longer calls return a durable task; poll tasks/get at its pollIntervalMs. tasks/cancel is cooperative and cannot undo saved audit or publication work. Use read_audit with the returned auditId to inspect completed evidence.",
+  description: "Run the CLI audit for one or more PRs. This can spend model credits and, by default, posts the verdict with the server's GitHub credentials, approving eligible PRs. Set apply=false to preview without publishing or approve=false to publish a comment instead of an approval. Use only when explicitly requested. Defaults match pronto, not serve's webhook flags. Omitted targets select the server's current branch; numbers and branches use the server's Git/GH_REPO, never the client's checkout. Returns a normal result if the audit finishes within one second. If the client declares io.modelcontextprotocol/tasks, longer calls return a durable task; poll tasks/get at its pollIntervalMs. tasks/cancel is cooperative and cannot undo saved audit or publication work. Use read_audit with the returned auditId to inspect completed evidence.",
   parameters: obj({
     targets: opt(arr(str({ minLength: 1 }), { minItems: 1, description: "CLI PR selectors: URL, owner/repo#number, number or branch. Omit for the server's current branch." })),
     model: opt(str({ minLength: 1, description: "CLI provider/model-id; omitted uses the server's CLI default model." })),
@@ -19,10 +19,10 @@ export const runAuditTool = {
     reportSkips: opt(bool({ description: "--report-skips previews skip reviews, or posts with apply; default false. Your own approval remains a quiet skip." })),
     exclude: opt(arr(str({ minLength: 1 }), { description: "Repeatable --exclude path patterns." })),
     force: opt(bool({ description: "--force bypasses cache and restarts unfinished work." })),
-    approve: opt(bool({ description: "--approve selects approval when eligible; it does not publish without apply." })),
+    approve: opt(bool({ description: "--approve selects approval when eligible; default true. Set false to publish a COMMENT review instead." })),
     allowUncertain: opt(bool({ description: "--allow-uncertain allows approval of uncertain findings." })),
     approveMigrations: opt(bool({ description: "--approve-migrations permits approval of migration or uncertain migration status." })),
-    apply: opt(bool({ description: "--apply publishes the verdict, or a skip review when reportSkips is true, using the server's GitHub credentials; default false." })),
+    apply: opt(bool({ description: "--apply publishes the verdict, or a skip review when reportSkips is true, using the server's GitHub credentials; default true. Set false to preview only." })),
   }),
 };
 export type RunAuditArguments = Static<typeof runAuditTool.parameters>;
@@ -36,9 +36,9 @@ export function createMcpAuditRunner(auditor: ReturnType<typeof createAuditor>, 
       ...(args.skipDrafts === undefined ? [] : [`--skip-drafts=${args.skipDrafts}`]),
       ...(args.skipApproved === undefined ? [] : [`--skip-approved=${args.skipApproved}`]),
       ...(args.reportSkips ? ["--report-skips"] : []),
-      ...(args.force ? ["--force"] : []), ...(args.approve ? ["--approve"] : []),
+      ...(args.force ? ["--force"] : []), `--approve=${args.approve ?? true}`,
       ...(args.allowUncertain ? ["--allow-uncertain"] : []), ...(args.approveMigrations ? ["--approve-migrations"] : []),
-      ...(args.apply ? ["--apply"] : []),
+      `--apply=${args.apply ?? true}`,
       ...(args.targets ? args.targets.map((target) => `--pr=${target}`) : [""]),
       ...(args.model === undefined ? [] : [args.model]),
     ];

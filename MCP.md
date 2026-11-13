@@ -2,7 +2,7 @@
 
 `pronto serve --mcp` exposes audit evidence, audit execution and the audit-discussion skill on the webhook server's HTTP listener. Your external agent supplies its own conversation history. Pronto does not host another chat agent or start a second process.
 
-The MCP token can run audits and post GitHub reviews when a caller sets `apply: true`. Previously read-only MCP tokens now have these permissions. Rotate or restrict existing tokens before enabling the upgraded endpoint.
+Calling `run_audit` posts a GitHub verdict review by default, approving eligible PRs and commenting when approval is blocked. Pass `apply: false` to preview without publishing, or `approve: false` to publish a comment instead of an approval. Previously read-only MCP tokens now have these permissions by default. Rotate or restrict existing tokens before enabling the upgraded endpoint.
 
 The endpoint supports MCP `2026-07-28` only. It uses stateless Streamable HTTP with JSON responses, per-request metadata and `server/discover`. It advertises the `io.modelcontextprotocol/tasks` extension for long `run_audit` calls. It does not support stdio, `initialize`, protocol sessions, GET event streams or older MCP versions.
 
@@ -34,7 +34,7 @@ The MCP path must differ from the webhook path, `/healthz` and `/readyz`. MCP be
 
 The token must contain at least 32 characters and differ from `PRONTO_WEBHOOK_SECRET`. Do not reuse a GitHub credential. There is no token argument: putting secrets in command arguments exposes them to process listings and shell history. Never put a token in a URL. Changing the token revokes existing clients. There are no read-only tokens, per-client identities or per-repository permissions.
 
-The token grants access to all readable audits in that state directory, including private review text and saved code. It also allows file inspection at pinned commits and audit execution using the server's GitHub credentials. Audits can spend model credits, force reassessments and publish reviews or approvals with `apply: true`. Give the token only to clients you trust with those permissions. An `auditRef` identifies evidence; it is not a credential or permission grant.
+The token grants access to all readable audits in that state directory, including private review text and saved code. It also allows file inspection at pinned commits and audit execution using the server's GitHub credentials. Audits can spend model credits, force reassessments and publish reviews or approvals by default. Give the token only to clients you trust with those permissions. An `auditRef` identifies evidence; it is not a credential or permission grant.
 
 Saved evidence reads do not contact GitHub. Additional `read_github_file` calls and audit execution use the server's GitHub authentication through `GITHUB_TOKEN`, `GH_TOKEN` or the existing `gh` fallback. Incoming MCP credentials are never used as GitHub credentials.
 
@@ -52,14 +52,14 @@ Authenticated clients can call `run_audit` with these arguments:
 | `reportSkips` | `--report-skips`; default `false` |
 | `exclude` | Repeated `--exclude` path patterns; default empty |
 | `force` | `--force`; default `false` |
-| `approve` | `--approve`; default `false` |
+| `approve` | `--approve`; default `true` |
 | `allowUncertain` | `--allow-uncertain`; default `false` |
 | `approveMigrations` | `--approve-migrations`; default `false` |
-| `apply` | `--apply`; default `false` |
+| `apply` | `--apply`; default `true` |
 
-For example, `run_audit({targets: ["https://github.com/owner/repo/pull/42"], force: true})` reassesses a PR without publishing. To publish an eligible approval, add `apply: true` and `approve: true`. The defaults match the CLI, not the webhook flags passed to `pronto serve`. As with the CLI, previously authorised publications can still recover.
+Omitting `approve` and `apply` selects and publishes an approval when eligible; if approval is blocked, the verdict is published as a comment. Pass `apply: false` to preview without publishing, or `approve: false` to publish a comment instead of an approval. For example, `run_audit({targets: ["https://github.com/owner/repo/pull/42"], force: true, apply: false})` reassesses a PR without publishing. These defaults match the one-shot CLI, not the webhook flags passed to `pronto serve`, which remain preview-only unless configured with `--apply`. As with the CLI, previously authorised publications can still recover.
 
-Skips are logged and returned without a review by default. Set `reportSkips: true` to preview a skip review, or combine it with `apply: true` to post the review. A skip caused by the server's own current approval remains quiet, even with both options. Repeated skip reviews are suppressed when a matching receipt is saved locally. This option does not affect verdict reviews for completed audits.
+Skips are logged and returned without a review by default. Set `reportSkips: true` to report a skip; MCP audits post that review by default, while `apply: false` previews it. A skip caused by the server's own current approval remains quiet, even with both options. Repeated skip reviews are suppressed when a matching receipt is saved locally. This option does not affect verdict reviews for completed audits.
 
 Numbers and branches use the server's `GH_REPO` or Git checkout, not the client's. An omitted target uses the server's current branch. Use explicit PR URLs when that context is not intended. The tool resolves and validates the whole batch before starting audits. The request body is limited to 64 KiB.
 
@@ -69,9 +69,9 @@ The synchronous result, or the completed task's `result`, contains `apply` and a
 
 The task handle includes a `taskId`, `ttlMs` and `pollIntervalMs`. Call `tasks/get` with that ID, sending the tasks extension capability on every request, and wait at least the advertised poll interval between polls. Pronto currently asks clients to poll every 1,000 ms. Task IDs and results are stored in the `mcp-tasks.sqlite` database under the configured state directory; completed task records are retained for 24 hours. In-progress tasks resume after a server restart using the audit runner's existing recovery behavior.
 
-`tasks/cancel` requests cooperative cancellation. Pronto aborts waiting or active work where possible, but cancellation cannot undo an audit or publication that has already been saved. A server restart may also recover durable audit work independently of the task handle. Check the audit and GitHub before retrying an `apply: true` request.
+`tasks/cancel` requests cooperative cancellation. Pronto aborts waiting or active work where possible, but cancellation cannot undo an audit or publication that has already been saved. A server restart may also recover durable audit work independently of the task handle. Check the audit and GitHub before retrying a request with the default `apply: true`.
 
-MCP and webhook audits share `--concurrency` and do not overlap on the same PR. Work waiting for a slot is held in memory; cancellation removes a waiting call. A disconnect or shutdown can interrupt an active call. Once audit work or publication intent is saved, it may continue or recover after restart, including an explicitly requested `apply`. A lost response does not prove that no review was posted. Check the saved audit and GitHub before retrying.
+MCP and webhook audits share `--concurrency` and do not overlap on the same PR. Work waiting for a slot is held in memory; cancellation removes a waiting call. A disconnect or shutdown can interrupt an active call. Once audit work or publication intent is saved, it may continue or recover after restart, including the default `apply: true`. A lost response does not prove that no review was posted. Check the saved audit and GitHub before retrying.
 
 ## Put Caddy in front
 

@@ -102,6 +102,23 @@ export async function fixture(t: TestContext, respond: (body: Request, response:
   return { directory, cwd, agentDir, stateDir, start, run };
 }
 
+/** Assessment-focused CLI tests opt out explicitly so publication defaults stay covered at their owning tests. */
+export async function previewFixture(t: TestContext, respond: Parameters<typeof fixture>[1],
+  options: Parameters<typeof fixture>[2] = {}) {
+  const f = await fixture(t, respond, options);
+  const previewArgs = (args: string[], launch: Launch = {}) => {
+    const selectedEntrypoint = launch.entrypoint ?? options.entrypoint ?? entrypoint;
+    if (args[0] === "serve" || selectedEntrypoint !== resolve("src/cli/audit.ts")) return args;
+    const has = (flag: string) => args.some((arg) => arg === flag || arg.startsWith(`${flag}=`));
+    return [...args, ...(has("--approve") ? [] : ["--approve=false"]), ...(has("--apply") ? [] : ["--apply=false"])];
+  };
+  return {
+    ...f,
+    start: (args: string[] = [], launch: Launch = {}) => f.start(previewArgs(args, launch), launch),
+    run: (input: string, args: string[] = [], launch: Launch = {}) => f.run(input, previewArgs(args, launch), launch),
+  };
+}
+
 // Only git is on the child's PATH: discovery must not depend on an installed gh.
 export async function gitCheckout(cwd: string, commands: string[][] = []) {
   const git = (await exec("which", ["git"])).stdout.trim();

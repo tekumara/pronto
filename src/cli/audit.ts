@@ -19,10 +19,10 @@ async function main() {
     console.log("--report-skips previews skip reviews, or posts them with --apply (default: off). Your own current approval remains a quiet skip.");
     console.log("--exclude <path> leaves matching changed files out of the size limit and the audit; their patches are withheld and they are listed in the output. Repeat for multiple paths. Paths are repository-relative: * and ? stay within a directory, ** crosses directories, and a directory excludes everything under it.");
     console.log("--force bypasses the assessment cache and restarts any unfinished audit.");
-    console.log("--approve selects approval when no outstanding or uncertain findings remain; requires --apply to submit (default: false).");
+    console.log("--approve[=true|false] selects approval when eligible (default: true; --approve=false selects a COMMENT review).");
     console.log("--allow-uncertain allows --approve with uncertain findings and no outstanding findings (default: false).");
     console.log("--approve-migrations allows --approve for database migrations or uncertain/missing migration status; the audit always runs (default: false).");
-    console.log("--apply submits a verdict review to GitHub unless a matching review is recorded in local history (default: false; otherwise previews only).");
+    console.log("--apply[=true|false] submits the verdict review to GitHub unless a matching review is recorded in local history (default: true; --apply=false previews only).");
     return;
   }
   const { selectors, requested, skipLabels, skipDrafts, skipApproved, reportSkips, exclude, force, approve, allowUncertain, approveMigrations, apply } = parseAuditOptions(args, "cli");

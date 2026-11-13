@@ -8,7 +8,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, defineDoc, defineDocFamily, type ConversationId, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { ReviewSnapshot } from "../src/github/reviews.ts";
-import { fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
+import { previewFixture as fixture, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 const url = "https://github.com/acme/project/pull/9";
 const audit = resolve("src/cli/audit.ts");
@@ -354,9 +354,9 @@ test("invalid audit flags are rejected before audit storage or network access", 
   const github = evidence();
   const f = await fixture(t, () => assert.fail("Invalid commands must not reach the model"), { entrypoint: audit, github: github.handler });
   for (const args of [[url, "--froce"], [url, "--force", "--force"],
-    [url, "--comment"], [url, "--approve", "--approve"], [url, "--approve=false"],
+    [url, "--comment"], [url, "--approve", "--approve=false"], [url, "--approve=maybe"],
     [url, "--approve-migrations", "--approve-migrations"], [url, "--approve-migrations=false"],
-    [url, "--apply", "--apply"], [url, "--apply=false"], [url, "--dry-run"], [url, "--apply", "--dry-run"], [url, "local/test", "extra"],
+    [url, "--apply", "--apply=false"], [url, "--apply=maybe"], [url, "--dry-run"], [url, "--apply", "--dry-run"], [url, "local/test", "extra"],
     [url, "--sticky"], [url, "--sticky=false"],
     [url, "--exclude"], [url, "--exclude="], [url, "--exclude", "--apply"], [url, "--exclude", "/"], [url, "--exclude=./"]]) {
     const { child, done } = f.start(args);

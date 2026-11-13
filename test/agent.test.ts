@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { fixture, reply, tool } from "./fixtures.ts";
+import { previewFixture as fixture, reply, tool } from "./fixtures.ts";
 import { prUrl, headSha, accessId, codeUrl, commentUrl, githubEvidence, assessments } from "./audit-evidence.ts";
 
 test("terminal chat keeps help local and refuses the former audit runner", { timeout: 20000 }, async (t) => {

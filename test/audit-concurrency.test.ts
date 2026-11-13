@@ -6,7 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import type { ReviewSnapshot } from "../src/github/reviews.ts";
-import { fixture, gitCheckout, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
+import { previewFixture as fixture, gitCheckout, noDatabaseMigration, reply, tool, type Request } from "./fixtures.ts";
 
 const urls = [42, 43].map((pr) => `https://github.com/acme/demo/pull/${pr}`);
 
