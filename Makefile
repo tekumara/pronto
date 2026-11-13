@@ -30,7 +30,7 @@ audit: ## Audit the PR URLs supplied in PRS
 
 # Resolve gh auth outside nono so the sandbox doesn't need Keychain access.
 nono-serve: ## Run Pronto with Copilot review gating and verbose logging inside nono
-	GITHUB_TOKEN="$$(gh auth token)" nono run --profile pronto --allow-cwd --listen-port $(PORT) -- "$(NODE_BIN)" --experimental-strip-types src/cli/audit.ts serve --verbose --audit-on-ready --require-review-from 'copilot-pull-request-reviewer[bot]' --apply --approve --port $(PORT) --mcp --mcp-public-url "$(MCP_PUBLIC_URL)" 2>&1 | tee -a /tmp/pronto-serve.log
+	nono run --profile pronto --allow-cwd --listen-port $(PORT) -- "$(NODE_BIN)" --experimental-strip-types src/cli/audit.ts serve --verbose --audit-on-ready --require-review-from 'copilot-pull-request-reviewer[bot]' --apply --approve --port $(PORT) --mcp --mcp-public-url "$(MCP_PUBLIC_URL)" 2>&1 | tee -a /tmp/pronto-serve.log
 
 # Start local-only RustFS for S3-compatible replication tests. Override S3_* as needed.
 s3: ## Start local RustFS for S3 replication tests
