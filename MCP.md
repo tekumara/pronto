@@ -127,9 +127,9 @@ The external agent must retain the returned reference in its own conversation hi
 
 ```text
 read_audit({prUrl})
-  → auditRef, audit metadata, summary content
-read_audit({auditRef, section: "findings"})
-  → the same attempt's findings and original sources
+  → auditRef, audit metadata, finding explanations and evidence in summary content
+read_audit({auditRef, section: "findings", commentKey: "inline:101"})
+  → the same attempt's full assessment and original source for that finding
 read_github_file({auditRef, path: "src/access.ts", revision: "head"})
   → additional numbered code at that attempt's pinned commit
 ```
@@ -142,9 +142,9 @@ To switch deliberately, use `read_audit({prUrl, latest: true})` without the old 
 
 ### Retrieve complete sources
 
-`read_audit` provides `summary`, `findings`, `discussion`, `files`, `instructions` and `code`. A returned `commentKey` narrows findings or discussion to one saved source.
+`read_audit` provides `summary`, `findings`, `discussion`, `files`, `instructions` and `code`. The default `summary` includes each finding's recorded reason, evidence links, source URL and any next step or `awaiting` value. These are the auditor's saved assessments, not independently verified conclusions. Use `findings` to read the assessment with its full original source. A returned `commentKey` narrows findings or discussion to one saved source.
 
-Its `content` is a character slice of section JSON, not always a complete JSON value. Each call returns at most 16,000 characters. Follow `nextOffset` with the same reference, section and comment key, join the content, then parse the complete JSON. Retain long replies' final qualifications. Tool results provide the same data as structured content and text.
+Its `content` is a character slice of section JSON, not always a complete JSON value. Each call returns at most 16,000 characters. Follow `nextOffset` with the same reference, section and comment key, join the content, then parse the complete JSON. Summaries with many findings can require multiple pages. Retain the final qualifications of long explanations and replies. Tool results provide the same data as structured content and text.
 
 Read saved `code` excerpts before requesting more code. `read_github_file` accepts only a repository-relative path and `head` or `base`, never arbitrary URLs, repositories, SHAs or moving branches. It returns at most 300 numbered lines. If an excerpt exceeds its 100,000-byte output limit, request fewer lines. A single oversized line is unavailable rather than silently truncated. Additional reads are labelled as new inspection, not evidence the original auditor necessarily saw.
 

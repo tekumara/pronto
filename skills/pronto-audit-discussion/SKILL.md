@@ -24,8 +24,8 @@ An error about a particular attempt does not mean the PR has no saved audit. Ret
 
 Use `read_audit` sections:
 
-- `summary` for identity, completion state, counts and finding keys
-- `findings` for accepted assessments, reasons, citations, next steps and their original sources
+- `summary` for identity, completion state, counts and each finding's recorded reason, evidence, next steps and source URL
+- `findings` for accepted assessments and their full original sources
 - `discussion` for the original PR description, comments and replies
 - `files` for saved patches and changed paths
 - `instructions` for the rubric saved with that attempt

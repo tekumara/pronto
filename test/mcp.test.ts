@@ -67,12 +67,13 @@ async function section(client: Client, args: Record<string, unknown>) {
   let content = "";
   let offset: number | null = 0;
   let reference = args.auditRef;
+  const limit = typeof args.limit === "number" ? args.limit : 6000;
   do {
-    const page = await data(client, "read_audit", { ...args, ...(reference ? { auditRef: reference } : {}), limit: 6000, offset });
+    const page = await data(client, "read_audit", { ...args, ...(reference ? { auditRef: reference } : {}), limit, offset });
     reference ??= page.auditRef;
     assert.equal(page.auditRef, reference);
     assert.equal(page.offset, content.length);
-    assert.ok(page.content.length <= 6000);
+    assert.ok(page.content.length <= limit);
     content += page.content;
     offset = page.nextOffset;
   } while (offset !== null);
@@ -85,8 +86,11 @@ test("latest MCP client discovers and verifies the canonical skill and retrieves
   let auditTurn = 0;
   const f = await fixture(t, (_body, response) => {
     if (auditTurn++ === 0) tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
-    else if (auditTurn === 2) tool(response, "report_review_assessment", assessments());
-    else assert.fail("MCP must not start a model or reassess the PR");
+    else if (auditTurn === 2) {
+      const report = assessments();
+      Object.assign(report.assessments[0]!.findings[0]!, { nextStep: "Verify access checks." });
+      tool(response, "report_review_assessment", report);
+    } else assert.fail("MCP must not start a model or reassess the PR");
   }, { github: (request, response) => {
     if (request.url === `/github/repos/contributor/fork/contents/src/wide.ts?ref=${headSha}`) {
       const content = "x".repeat(120000);
@@ -107,7 +111,17 @@ test("latest MCP client discovers and verifies the canonical skill and retrieves
   const summary = await data(client, "read_audit", { prUrl });
   assert.equal(summary.audit.status, "completed");
   assert.equal(summary.audit.headSha, headSha);
-  assert.equal(JSON.parse(summary.content).counts.outstanding, 1);
+  const summaryContent = JSON.parse(summary.content);
+  assert.equal(summaryContent.counts.outstanding, 1);
+  assert.deepEqual(summaryContent.findings.find((finding: { commentKey: string }) => finding.commentKey === "inline:102"), {
+    commentKey: "inline:102", sourceAuthor: "human", sourceUrl: commentUrl(102), findingIndex: 1,
+    summary: "Null check", status: "addressed", reason: "The guard handles a missing user.", evidence: [codeUrl, commentUrl(103)],
+  });
+  assert.equal(summaryContent.findings[0].awaiting, "human");
+  assert.equal(summaryContent.findings[0].nextStep, "Verify access checks.");
+  const firstPage = await data(client, "read_audit", { auditRef: summary.auditRef, section: "summary", limit: 500 });
+  assert.notEqual(firstPage.nextOffset, null);
+  assert.deepEqual(await section(client, { auditRef: summary.auditRef, section: "summary", limit: 500 }), summaryContent);
   assert.ok(typeof summary.auditRef === "string" && summary.auditRef.length > 0);
   assert.ok(tools.tools.find((entry) => entry.name === "read_audit")?.annotations?.readOnlyHint);
 

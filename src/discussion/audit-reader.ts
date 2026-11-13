@@ -115,10 +115,13 @@ export function readAudit({ prUrl, auditId, section = "summary", commentKey }: {
     let data: unknown;
     switch (section) {
       case "summary": {
-        const authors = new Map(snapshot.comments.map((comment) => [comment.key, comment.author]));
+        const sources = new Map(snapshot.comments.map((comment) => [comment.key, comment]));
         const findings = saved.report?.flatMap((assessment) => assessment.findings.map((finding, index) => ({
-          commentKey: assessment.commentKey, sourceAuthor: authors.get(assessment.commentKey) ?? "unknown",
-          findingIndex: index + 1, summary: finding.summary, status: finding.status,
+          commentKey: assessment.commentKey, sourceAuthor: sources.get(assessment.commentKey)?.author ?? "unknown",
+          sourceUrl: sources.get(assessment.commentKey)?.url ?? null, findingIndex: index + 1,
+          summary: finding.summary, status: finding.status, reason: finding.reason, evidence: finding.evidence,
+          ...(finding.nextStep !== undefined ? { nextStep: finding.nextStep } : {}),
+          ...(finding.awaiting !== undefined ? { awaiting: finding.awaiting } : {}),
         }))) ?? [];
         const counts: Record<string, number> = {};
         for (const finding of findings) counts[finding.status] = (counts[finding.status] ?? 0) + 1;
