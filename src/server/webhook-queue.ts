@@ -233,14 +233,16 @@ export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch
       return result.outcome;
     },
     /** Called before normal admissions or scheduler startup, while the auditor owns this database. */
-    async recover(harness: Harness, context: Context): Promise<string[]> {
-      if (!await harness.snapshot(Queue, context)) return [];
+    async recover(harness: Harness, context: Context): Promise<{ urls: string[]; gates: { url: string; reviewers: string[] }[] }> {
+      if (!await harness.snapshot(Queue, context)) return { urls: [], gates: [] };
       return harness.commit(async (tx) => {
         const queue = await tx.doc(Queue);
         queue.firstReady ??= {};
+        const gates: { url: string; reviewers: string[] }[] = [];
         for (const [pr, pending] of Object.entries(queue.pending)) {
           pending.requiredReviewers ??= [...configuredReviewers];
           const task = await tx.task(pending.task);
+          let gatePending: boolean;
           if (!task || task.state.status === "terminal") {
             const root = await tx.conversation(ROOT_CONVERSATION_ID);
             if (!root) throw new Error("Webhook queue conversation is missing");
@@ -249,10 +251,15 @@ export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch
             }, {
               ownership: { kind: "conversation" }, conversationId: root.id,
             });
+            gatePending = !!pending.requiredReviewers.length;
+          } else {
+            const checkpoint = record(task.state.checkpoint ?? null);
+            gatePending = checkpoint?.phase === "review" && !!pending.requiredReviewers.length;
           }
+          if (gatePending) gates.push({ url: pending.url, reviewers: [...pending.requiredReviewers] });
           pending.running = false;
         }
-        return Object.values(queue.pending).map(({ url }) => url);
+        return { urls: Object.values(queue.pending).map(({ url }) => url), gates };
       }, context);
     },
     close() { closed = true; dispatch.close(); shutdown.abort(new Error("Webhook queue is closed")); },

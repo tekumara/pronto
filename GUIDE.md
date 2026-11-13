@@ -208,7 +208,7 @@ Incomplete-assessment errors include the conversation, submission and model iden
 
 ### Webhook reliability
 
-In serve mode, Pronto saves accepted audit requests before returning `202`. When you set `--require-review-from`, waiting audits wake on matching submitted-review webhooks and recheck GitHub's submitted review history; polling is the fallback, and waits use no audit slot. The wait survives restarts. Waiting work and one queued rerun per PR also survive restarts. Delivery deduplication survives restarts for the last 1000 accepted delivery IDs per repository.
+In serve mode, Pronto saves accepted audit requests before returning `202`. When you set `--require-review-from`, waiting audits wake on matching submitted-review webhooks and recheck GitHub's submitted review history; polling is the fallback, and waits use no audit slot. On startup, Pronto lists each recovered reviewer gate by PR and configured reviewer. The wait survives restarts. Waiting work and one queued rerun per PR also survive restarts. Delivery deduplication survives restarts for the last 1000 accepted delivery IDs per repository.
 
 With `--apply`, Pronto saves verdict publication as a durable task. It does the same for skip reviews when `--report-skips` is enabled. Startup resumes pending publications without running the model again, including assessments first published from the cache. If an approval's head or base commit has changed, Pronto retires that publication and runs a fresh assessment with its saved publication choices. Preview-only assessments do not become pending writes when the server restarts with different flags.
 

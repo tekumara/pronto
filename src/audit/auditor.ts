@@ -17,6 +17,8 @@ import { auditRequest, type AuditLog, type AuditOptions, type AuditOutcome, type
 
 export type { AuditOptions } from "./request.ts";
 export type AuditTrigger = { source: "webhook"; reason?: string } | { source: "mcp"; tool: string; requestId?: string };
+type PendingReviewGate = { url: string; reviewers: string[] };
+type Recovery = { urls: string[]; gates: PendingReviewGate[]; skipped: { database: string; error: unknown }[] };
 
 function describeTrigger(trigger: AuditTrigger): string {
   return trigger.source === "webhook" ? `GitHub webhook${trigger.reason ? ` · ${trigger.reason}` : ""}`
@@ -35,7 +37,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
   const restoredRequests = new Set<string>();
   const shutdown = new AbortController();
   let closing: Promise<void> | undefined;
-  let recovering: Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> | undefined;
+  let recovering: Promise<Recovery> | undefined;
   const scheduler = webhooks ? createAuditScheduler(webhooks.concurrency) : undefined;
   const reviewerWakeups = createReviewerWakeups();
   const webhookQueue = webhooks ? createWebhookQueue({
@@ -225,25 +227,26 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
      * Retain every database with pending work, including ones without an assessment conversation.
      * Normal admissions wait for discovery; discovery cannot race an already-used auditor.
      */
-    recover(context: Context = BACKGROUND_CONTEXT): Promise<{ urls: string[]; skipped: { database: string; error: unknown }[] }> {
+    recover(context: Context = BACKGROUND_CONTEXT): Promise<Recovery> {
       if (recovering) return recovering;
       if (repositories.size || requests.size) return Promise.reject(new Error("Recover before admitting audits"));
       return recovering = (async () => {
         const urls: string[] = [];
+        const gates: PendingReviewGate[] = [];
         const skipped: { database: string; error: unknown }[] = [];
         for (const { host, name } of await listRepositoryDatabases(state?.root)) {
           if (closing) throw new Error("Auditor is closed");
           let repository: RepositoryAudit | undefined;
           try {
             repository = await openRepository(host, name);
-            const pending = webhookQueue ? await webhookQueue.recover(repository.harness, context) : [];
+            const intake = webhookQueue ? await webhookQueue.recover(repository.harness, context) : { urls: [], gates: [] };
             const unfinished = await unfinishedAudits(repository.harness, context);
             const failed = await failedAudits(repository.harness, context);
             const reassessments = Object.values(await pendingReassessments(repository.harness, context));
             // Intake and assessment recovery for the same PR select one execution, not a rerun.
             const selected = new Map<string, string>();
             for (const url of [...unfinished.map((target) => target.url), ...failed.map((target) => target.url),
-              ...reassessments.map(({ target }) => target.url), ...pending]) {
+              ...reassessments.map(({ target }) => target.url), ...intake.urls]) {
               selected.set(String(parseReviewTarget(url).pr), url);
             }
             if (closing || (!selected.size && !repository.publications.length)) {
@@ -264,6 +267,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
             }
             for (const target of failed) failedRecoveries.add(auditTargetKey(target));
             urls.push(...selected.values());
+            gates.push(...intake.gates);
           } catch (error) {
             await repository?.harness.close(BACKGROUND_CONTEXT).catch(() => {});
             if (closing || state?.strictRecovery) throw error;
@@ -277,7 +281,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
           const { harness } = await repositoryFor(parseReviewTarget(url));
           await webhookQueue.admit(harness, url);
         }
-        return { urls, skipped };
+        return { urls, gates, skipped };
       })();
     },
     close(): Promise<void> {

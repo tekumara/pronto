@@ -256,7 +256,7 @@ test("serve durably waits for the first required review and includes its inline 
   const second = f.start(args, { env });
   const secondOut = watchOutput(second.child);
   await secondOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
-  await secondOut.until(/INFO\s+acme\/demo#7\s+Recovering audit/);
+  await secondOut.until(/INFO\s+acme\/demo#7\s+Recovering audit · required-review gate pending for copilot-pull-request-reviewer\[bot\]/);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(modelCalls, 0, "the durable wait survives a server restart while the review is still absent");
 

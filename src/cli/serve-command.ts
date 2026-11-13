@@ -99,7 +99,7 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
   process.on("SIGTERM", stop);
   try {
     // Before listening, so a delivery cannot race recovery to open the same repository database.
-    const { urls: recoverable, skipped } = await auditor.recover();
+    const { urls: recoverable, gates, skipped } = await auditor.recover();
     for (const { database, error } of skipped) log("warn", "serve", `Skipped ${database}, so its audits are not recovered: ${describe(error)}`);
     if (stopping) return;
     await mcp?.resumeTasks();
@@ -108,9 +108,13 @@ async function runConfiguredServe(config: ReturnType<typeof parseServeOptions>, 
     log("info", "serve", `Reviewing as ${login} with ${model.provider}/${model.id}${options.apply ? "" : " · new webhook audits: previews only, add --apply to submit reviews; saved publications still recover"}`);
     log("info", "serve", `Listening on http://${host}:${address.port}${path} · up to ${concurrency} audits at once`);
     if (mcp) log("info", "serve", `MCP at ${config.mcp!.publicUrl} · audit execution enabled`);
+    const gatesByUrl = new Map(gates.map(({ url, reviewers }) => [url, reviewers]));
     for (const url of recoverable) {
       if (stopping) break;
-      log("info", auditLabel(url), "Recovering audit");
+      const reviewers = gatesByUrl.get(url);
+      log("info", auditLabel(url), reviewers?.length
+        ? `Recovering audit · required-review gate pending for ${reviewers.join(", ")}`
+        : "Recovering audit");
     }
     await auditor.resume();
     const signal = await stopped.promise;

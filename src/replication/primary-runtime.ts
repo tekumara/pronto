@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 import { createAuditor, type AuditOptions } from "../audit/auditor.ts";
 import type { WebhookAdmission } from "../server/webhook-queue.ts";
 import type { createModelRuntime } from "../model.ts";
-import type { Log } from "../logging.ts";
+import { auditLabel, type Log } from "../logging.ts";
 import { Litestream } from "./litestream.ts";
 import { S3Control, conditionalConflict, type ControlHead, type ReplicaConfig } from "./s3-control.ts";
 
@@ -170,6 +170,9 @@ export async function createPrimaryRuntime(config: ReplicaConfig, options: {
       // recover() stages intent only. No harness resumes before the independent baseline is complete.
       const recovered = await term.auditor.recover();
       if (recovered.skipped.length) throw new Error("Incomplete repository recovery");
+      for (const { url, reviewers } of recovered.gates) {
+        options.log("info", auditLabel(url), `Recovering audit · required-review gate pending for ${reviewers.join(", ")}`);
+      }
       await term.child.flush();
       live(term);
       await mutate(term, true);
