@@ -1,6 +1,6 @@
 import type { Context } from "@earendil-works/chord";
 import { defineDoc, defineDocFamily, defineExtension, defineTask, type ConversationId, type Cursor, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { fetchViewerLogin, reconcileAuditReview, StaleReviewSnapshotError, submitAuditReview, type ReviewSnapshot } from "../github/reviews.ts";
+import { fetchViewerLogin, GitHubApiError, reconcileAuditReview, StaleReviewSnapshotError, submitAuditReview, type ReviewSnapshot } from "../github/reviews.ts";
 
 export type PublicationChoices = { apply: boolean; approve: boolean; allowUncertain: boolean; approveMigrations: boolean; reportSkips: boolean };
 export function publicationChoices(options: Partial<PublicationChoices>): PublicationChoices {
@@ -14,6 +14,24 @@ export type PublicationIntent = {
 // A null URL hands a stale approval back to assessment, rather than recording a submission.
 export type PublicationResult = { url: string | null };
 type ReassessmentRequest = Pick<PublicationIntent, "target" | "choices" | "fingerprint"> & { author: string | null };
+type PublicationRejection = { code: "self_approval"; httpStatus: 422; message: string; recordedAt: string };
+type PublicationDelivery = {
+  intent: PublicationIntent; taskId: TaskId<PublicationResult>; author: string | null; attempted: boolean; failed: boolean;
+  rejection?: PublicationRejection;
+};
+
+function selfApprovalRejection(error: unknown): Omit<PublicationRejection, "recordedAt"> | undefined {
+  if (!(error instanceof GitHubApiError) || error.status !== 422) return undefined;
+  let body: unknown;
+  try { body = JSON.parse(error.responseBody); } catch { return undefined; }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const errors = (body as { errors?: unknown }).errors;
+  if (!Array.isArray(errors)) return undefined;
+  const message = errors.map((item) => typeof item === "string" ? item
+    : item && typeof item === "object" && !Array.isArray(item) && "message" in item && typeof item.message === "string" ? item.message : "")
+    .find((item) => item.trim().replace(/\s+/g, " ").toLowerCase() === "review can not approve your own pull request");
+  return message ? { code: "self_approval", httpStatus: 422, message } : undefined;
+}
 const Reassessments = defineDoc<{ pending: Record<string, ReassessmentRequest> }>({
   kind: "app.audit-reassessments", version: 1, scope: "session", checkpointWhen: () => false,
   initial: () => ({ pending: {} }),
@@ -35,9 +53,9 @@ export const SubmittedAuditReviews = defineDocFamily<{
   kind: "app.submitted-audit-reviews", version: 1, scope: "session", family: true, checkpointWhen: () => false,
   initial: () => ({ reviews: {} }),
 });
-// The intent is immutable. Only delivery state and the pointer to a retry task change.
+// The intent is immutable; delivery state tracks attempts, retries and permanent rejections.
 const Publications = defineDocFamily<{
-  pending: Record<string, { intent: PublicationIntent; taskId: TaskId<PublicationResult>; author: string | null; attempted: boolean; failed: boolean }>;
+  pending: Record<string, PublicationDelivery>;
 }, null>({
   kind: "app.audit-publications", version: 1, scope: "session", family: true, checkpointWhen: () => false,
   initial: () => ({ pending: {} }),
@@ -107,12 +125,16 @@ function publicationTask(beforePublish?: () => Promise<void>) {
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
+        const rejection = selfApprovalRejection(error);
         await runtime.commit(async (tx) => {
           const pending = (await tx.doc(Publications, pr, null)).pending[intent.fingerprint];
-          if (pending?.taskId === task.id) pending.failed = true;
+          if (pending?.taskId === task.id) {
+            pending.failed = true;
+            if (rejection) pending.rejection = { ...rejection, recordedAt: new Date(runtime.now()).toISOString() };
+          }
           return { status: "terminal", outcome: { status: "failed", error: { message } } };
         }, context);
-        runtime.report(new Error(`Verdict publication pending for ${intent.target.url}: ${message}`));
+        runtime.report(new Error(`${rejection ? "Verdict publication rejected" : "Verdict publication pending"} for ${intent.target.url}: ${message}`));
       }
     },
   },
@@ -136,6 +158,7 @@ export async function enqueuePublication(tx: Tx, conversationId: ConversationId,
   if ((await tx.doc(SubmittedAuditReviews, pr, null)).reviews[intent.fingerprint]) return null;
   const publications = await tx.doc(Publications, pr, null);
   const pending = publications.pending[intent.fingerprint];
+  if (pending?.rejection) return pending.taskId;
   if (pending && !pending.failed) return pending.taskId;
   const savedIntent = pending?.intent ?? intent;
   const taskId = await tx.createTask(PublishReview, savedIntent, {
@@ -157,7 +180,7 @@ export async function recoverPublications(harness: Harness, context: Context): P
       if (record.version !== PublishReview.definition.version) continue;
       const intent = record.input as PublicationIntent;
       const delivery = (await harness.snapshot(Publications, String(intent.target.pr), context))?.pending[intent.fingerprint];
-      if (delivery?.taskId !== record.id) continue;
+      if (delivery?.taskId !== record.id || delivery.rejection) continue;
       let taskId = delivery.taskId;
       if (record.state.status === "terminal") {
         if (!["failed", "faulted"].includes(record.state.outcome.status)) continue;

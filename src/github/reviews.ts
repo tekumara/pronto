@@ -65,6 +65,18 @@ export function auditTargetKey(target: ReviewTarget): string {
   return `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.pr}`;
 }
 
+export class GitHubApiError extends Error {
+  readonly status: number;
+  readonly responseBody: string;
+
+  constructor(status: number, responseBody: string, message: string) {
+    super(message);
+    this.name = "GitHubApiError";
+    this.status = status;
+    this.responseBody = responseBody;
+  }
+}
+
 function failureDetails(error: unknown): string {
   const details: string[] = [];
   const pending = [error];
@@ -105,9 +117,10 @@ function github(signal?: AbortSignal) {
     if (!response.ok) {
       const details = [`GitHub request failed (${response.status}): ${endpoint}`,
         diagnostic(response.statusText || STATUS_CODES[response.status] || "")];
+      let responseBody = "";
       try {
-        const body = diagnostic(await response.text());
-        if (body) details.push(`Response: ${body}`);
+        responseBody = diagnostic(await response.text());
+        if (responseBody) details.push(`Response: ${responseBody}`);
       } catch (error) {
         details.push(`Response body unavailable: ${diagnostic(failureDetails(error))}`);
       }
@@ -115,7 +128,7 @@ function github(signal?: AbortSignal) {
         const value = response.headers.get(name);
         if (value !== null) details.push(`${name}: ${diagnostic(value)}`);
       }
-      throw new Error(details.filter(Boolean).join("\n"));
+      throw new GitHubApiError(response.status, responseBody, details.filter(Boolean).join("\n"));
     }
     return response;
   };

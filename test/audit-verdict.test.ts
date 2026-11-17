@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -39,7 +40,8 @@ const auditMarker = "<!-- pronto:review-audit -->";
 const auditBody = `## Review audit · Verification needed\n\n${auditMarker}`;
 
 function githubEvidence(options: {
-  commentStatus?: number; approvalStatus?: number; empty?: boolean; issueComment?: boolean;
+  commentStatus?: number; approvalStatus?: number; approvalError?: { message?: string; errors?: unknown[] };
+  empty?: boolean; issueComment?: boolean;
   issueComments?: IssueComment[]; pageSize?: number;
   title?: string; description?: string; files?: { filename: string; status: string; patch?: string }[];
 } = {}) {
@@ -65,6 +67,10 @@ function githubEvidence(options: {
       attempts.push(body);
       const approving = body.event === "APPROVE";
       response.statusCode = (approving ? options.approvalStatus : options.commentStatus) ?? 200;
+      if (response.statusCode >= 400) {
+        json(approving ? options.approvalError ?? { message: "Review rejected", errors: [] } : { message: "Review rejected" });
+        return;
+      }
       if (response.statusCode < 300) {
         const id = 100 + reviews.length;
         comments.push(body.body);
@@ -135,6 +141,113 @@ async function recoverPublisher(f: Awaited<ReturnType<typeof fixture>>, complete
     await run.done;
   }
 }
+
+type SavedPublication = { failed: boolean; rejection?: { code: string; httpStatus: number; message: string; recordedAt: string } };
+
+async function savedPublications(stateDir: string): Promise<SavedPublication[]> {
+  const db = new DatabaseSync(join(stateDir, "repos/github.com/acme~demo.sqlite"), { readOnly: true });
+  try {
+    const document = db.prepare("SELECT id FROM documents WHERE json_extract(record, '$.kind')='app.audit-publications'").get();
+    if (!document) return [];
+    const revisions = db.prepare("SELECT kind, content FROM document_revisions WHERE document_id=? ORDER BY seq").all(document.id!);
+    const { apply } = await import("@earendil-works/chord/delta");
+    let value: any;
+    for (const revision of revisions) value = revision.kind === "base" ? JSON.parse(String(revision.content)) : apply(value, JSON.parse(String(revision.content)));
+    return Object.values(value.pending) as SavedPublication[];
+  } finally { db.close(); }
+}
+
+async function startServeBriefly(f: Awaited<ReturnType<typeof fixture>>): Promise<string> {
+  const run = f.start(["serve", "--port", "0"], { env: { PRONTO_WEBHOOK_SECRET: "[REDACTED:Generic Password Field]" } });
+  let output = "";
+  let listening = false;
+  const ready = Promise.withResolvers<void>();
+  run.child.stdout.on("data", (chunk) => {
+    output += chunk;
+    if (!listening && output.includes("Listening on http://")) { listening = true; ready.resolve(); }
+  });
+  void run.done.then((result) => {
+    if (!listening) ready.reject(new Error(`Server exited before listening: ${result.stderr}\n${output}`));
+  });
+  try {
+    await ready.promise;
+    await delay(500);
+    return output;
+  } finally {
+    run.child.kill("SIGTERM");
+    await run.done;
+  }
+}
+
+test("persists self-approval as a terminal publication rejection and does not retry it after restart", { timeout: 20000 }, async (t) => {
+  const failure: { approvalStatus: number | undefined; approvalError: { message: string; errors: unknown[] } | undefined } = {
+    approvalStatus: 422,
+    approvalError: { message: "Validation Failed", errors: ["Review Can not approve your own pull request"] },
+  };
+  const github = githubEvidence(failure);
+  const f = await fixture(t, (body, response) => assess(body, response), {
+    entrypoint: resolve("src/cli/audit.ts"), github: github.handler,
+  });
+  const first = f.start([url, "--apply", "--approve"]);
+  first.child.stdin.end();
+  const result = await first.done;
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Review Can not approve your own pull request/);
+  assert.equal(github.attempts.length, 1);
+  assert.equal(github.posted.length, 0);
+
+  const [saved] = await savedPublications(f.stateDir);
+  assert.equal(saved!.failed, true);
+  const rejection = saved!.rejection;
+  assert.ok(rejection);
+  assert.deepEqual(rejection, {
+    code: "self_approval", httpStatus: 422,
+    message: "Review Can not approve your own pull request", recordedAt: rejection.recordedAt,
+  });
+  assert.ok(Number.isFinite(Date.parse(rejection.recordedAt)));
+
+  const recovered = await startServeBriefly(f);
+  assert.doesNotMatch(recovered, /Recovering saved verdict publication/);
+  assert.equal(github.attempts.length, 1, "startup must leave the permanent rejection untouched");
+  assert.equal(github.posted.length, 0, "a rejected approval must never be recorded as submitted");
+
+  const repeated = f.start([url, "--apply", "--approve"]);
+  repeated.child.stdin.end();
+  const repeatedResult = await repeated.done;
+  assert.equal(repeatedResult.code, 1);
+  assert.match(repeatedResult.stdout, /Reusing saved assessment/);
+  assert.equal(github.attempts.length, 1, "an explicit repeat of the rejected intent must not create another POST");
+
+  const comment = await f.run("", [url, "--apply", "--approve=false"]);
+  assert.match(comment, /Verdict comment posted/);
+  assert.deepEqual(github.attempts.map(({ event }) => event), ["APPROVE", "COMMENT"],
+    "a different publication intent can still be submitted");
+});
+
+test("keeps other 422 publication failures retryable", { timeout: 20000 }, async (t) => {
+  const failure: { approvalStatus: number | undefined; approvalError: { message: string; errors: unknown[] } | undefined } = {
+    approvalStatus: 422,
+    approvalError: { message: "Validation Failed", errors: ["You have exceeded a secondary rate limit"] },
+  };
+  const github = githubEvidence(failure);
+  const f = await fixture(t, (body, response) => assess(body, response), {
+    entrypoint: resolve("src/cli/audit.ts"), github: github.handler,
+  });
+  const first = f.start([url, "--apply", "--approve"]);
+  first.child.stdin.end();
+  assert.equal((await first.done).code, 1);
+  assert.equal(github.attempts.length, 1);
+  const [saved] = await savedPublications(f.stateDir);
+  assert.equal(saved!.failed, true);
+  assert.equal(saved!.rejection, undefined, "a generic 422 must not be classified as permanent self-approval");
+
+  failure.approvalStatus = undefined;
+  failure.approvalError = undefined;
+  const recovered = await recoverPublisher(f);
+  assert.match(recovered, /Saved verdict published:/);
+  assert.equal(github.attempts.length, 2, "a retryable 422 should be retried during recovery");
+  assert.equal(github.posted.length, 1);
+});
 
 for (const cached of [false, true]) {
   test(`${cached ? "cached" : "fresh"} assessment completion survives a crash before POST with its explicit approval choices`, { timeout: 20000 }, async (t) => {
