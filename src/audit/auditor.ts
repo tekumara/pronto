@@ -1,7 +1,8 @@
+import { inspect } from "node:util";
 import type { Context } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createRegistry, ProviderDoc, type ConversationId, type Cursor, type Harness } from "@earendil-works/pi-durable";
+import { createRegistry, ProviderDoc, type ConversationId, type Cursor, type Harness, type Report } from "@earendil-works/pi-durable";
 import { auditTargetKey, parseReviewTarget, type ReviewTarget } from "../github/reviews.ts";
 import { auditLabel, stripControlCharacters, type Log } from "../logging.ts";
 import { createWebhookQueue, type WebhookAdmission } from "../server/webhook-queue.ts";
@@ -19,6 +20,15 @@ export type { AuditOptions } from "./request.ts";
 export type AuditTrigger = { source: "webhook"; reason?: string } | { source: "mcp"; tool: string; requestId?: string };
 type PendingReviewGate = { url: string; reviewers: string[] };
 type Recovery = { urls: string[]; gates: PendingReviewGate[]; skipped: { database: string; error: unknown }[] };
+
+const reportInspectOptions = { depth: 6, colors: false, compact: true, breakLength: 120, maxArrayLength: 30, maxStringLength: 4_000 };
+
+function reportMessage(report: Report): string {
+  const error = report.error;
+  const summary = error instanceof Error ? error.message
+    : typeof error === "string" ? error : inspect(error, reportInspectOptions);
+  return `${report.kind}: ${summary}`;
+}
 
 function describeTrigger(trigger: AuditTrigger): string {
   return trigger.source === "webhook" ? `GitHub webhook${trigger.reason ? ` · ${trigger.reason}` : ""}`
@@ -72,7 +82,9 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
     registry.install(auditAssessment.gated(gate));
     return openStateHarness({ kind: "repo", host, name }, {
       models: gate.models, registry, settings: auditAssessment.settings,
-      onReport: (error) => output ? output("error", `${host}/${name}`, error instanceof Error ? error.message : String(error)) : console.error(error),
+      onReport: (report) => output
+        ? output("error", `${host}/${name}`, reportMessage(report), inspect(report, reportInspectOptions))
+        : console.error(report),
       // No execution environment or coding tools: audits cannot access local files.
     }, BACKGROUND_CONTEXT, state?.root).then(async (harness) => {
       gate.attach(harness);
