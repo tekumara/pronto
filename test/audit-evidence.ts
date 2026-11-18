@@ -89,7 +89,7 @@ export function githubEvidence(options: { moved?: boolean; incompleteFiles?: boo
 }
 
 /** Interrupt the real CLI at a committed resumable-work boundary, not a fabricated pending receipt. */
-export async function auditCheckpointHook(directory: string, crash: "report" | "publication") {
+export async function auditCheckpointHook(directory: string, crash: "report" | "publication" | "skip") {
   const hook = join(directory, "checkpoint.mjs");
   await writeFile(hook, `
 import { DatabaseSync } from 'node:sqlite';
@@ -100,9 +100,10 @@ DatabaseSync.prototype.exec = function(sql) {
   if (sql.trim().toUpperCase() === 'COMMIT') {
     try {
       const saved = readAudit({prUrl: ${JSON.stringify(prUrl)}});
-      const stop = ${JSON.stringify(crash)} === 'report'
-        ? saved.audit.reportAccepted && saved.audit.status === 'incomplete'
-        : this.prepare('SELECT id FROM tasks WHERE kind = ? AND status = ? LIMIT 1').get(JSON.stringify('app.publish-audit-review'), 'pending');
+      const stop = ${JSON.stringify(crash)} === 'skip' ? saved.kind === 'skip'
+        : ${JSON.stringify(crash)} === 'report'
+          ? saved.audit.reportAccepted && saved.audit.status === 'incomplete'
+          : this.prepare('SELECT id FROM tasks WHERE kind = ? AND status = ? LIMIT 1').get(JSON.stringify('app.publish-audit-review'), 'pending');
       if (stop) process.exit(79);
     } catch {}
   }

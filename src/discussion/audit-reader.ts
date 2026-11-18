@@ -3,12 +3,15 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { apply } from "@earendil-works/chord/delta";
 import { CURRENT_SQLITE_SCHEMA_VERSION } from "@earendil-works/pi-durable/storage/sqlite";
 import { ToolResultEntry, type AgentState, type EntryRecord, type SubmissionRecord, type TaskRecord } from "@earendil-works/pi-durable";
-import { AUDIT_CONTROLLER_KIND, AuditDocument, AuditIdentity, AuditRuns, type AuditResult, type AuditRunsState, type AuditState } from "../audit/audit-records.ts";
+import { AUDIT_CONTROLLER_KIND, AuditDocument, AuditIdentity, AuditRuns, AuditSkips,
+  type AuditResult, type AuditRunsState, type AuditSkipAttempt, type AuditSkipsState, type AuditState } from "../audit/audit-records.ts";
 import { parseReviewTarget } from "../github/reviews.ts";
 import { repositoryDatabaseIdentity, repositoryDatabasePath, stateDirectory } from "../state.ts";
 
-export type AuditSection = "summary" | "findings" | "discussion" | "files" | "instructions" | "code";
-export type AuditSelection = { prUrl: string; auditId: number; snapshotId: string };
+export type AuditSection = "summary" | "findings" | "discussion" | "files" | "instructions" | "code" | "attempts";
+export type AuditSelection =
+  | { kind: "audit"; prUrl: string; auditId: number; snapshotId: string }
+  | { kind: "skip"; prUrl: string; skipId: string };
 
 type DocumentRow = { id: number };
 type RevisionRow = { seq: number; kind: string; version: number; content: string };
@@ -19,8 +22,8 @@ type Controller = TaskRecord<{ pr: string }, { phase: "assess" }, AuditResult>;
  * writable state, and a repository Harness can recover assessments and explicitly authorised publications.
  * BEGIN is a deferred read transaction so WAL readers see a consistent commit without taking Pronto's writer lock.
  */
-export function readAudit({ prUrl, auditId, section = "summary", commentKey }: {
-  prUrl: string; auditId?: number; section?: AuditSection; commentKey?: string;
+export function readAudit({ prUrl, auditId, skipId, section = "summary", commentKey }: {
+  prUrl: string; auditId?: number; skipId?: string; section?: AuditSection; commentKey?: string;
 }, root = stateDirectory()) {
   const target = parseReviewTarget(prUrl);
   const host = encodeURIComponent(new URL(target.url).hostname.toLowerCase());
@@ -61,10 +64,45 @@ export function readAudit({ prUrl, auditId, section = "summary", commentKey }: {
       }
       return value as T;
     };
+    if (skipId !== undefined && (!skipId.trim() || skipId.length > 256)) throw new Error("skipId must be a non-empty saved skip attempt ID.");
     const runs = document<AuditRunsState>(AuditRuns.definition.kind, "session", 0, String(target.pr));
+    const skips = document<AuditSkipsState>(AuditSkips.definition.kind, "session", 0, String(target.pr));
     const id = auditId ?? runs?.active;
-    if (!id) throw new Error(`No saved audit for ${target.url}. Chat does not run audits.`);
-    const saved = document<AuditState>(AuditDocument.definition.kind, "conversation", id);
+    const saved = id == null ? undefined : document<AuditState>(AuditDocument.definition.kind, "conversation", id);
+    let selectedSkip = skipId === undefined ? undefined : skips?.attempts.find((attempt) => attempt.attemptId === skipId);
+    if (skipId !== undefined && !selectedSkip) throw new Error(`No saved skipped attempt ${skipId} for ${target.url}.`);
+    if (!selectedSkip && auditId === undefined) {
+      const latestSkip = skips?.attempts.at(-1);
+      if (latestSkip && (!saved?.snapshot || Date.parse(latestSkip.recordedAt) >= Date.parse(saved.snapshot.startedAt))) selectedSkip = latestSkip;
+    }
+    if (selectedSkip) {
+      const savedTarget = parseReviewTarget(selectedSkip.prUrl);
+      const sameTarget = selectedSkip.pr === target.pr && savedTarget.pr === target.pr
+        && savedTarget.owner.toLowerCase() === target.owner.toLowerCase()
+        && savedTarget.repo.toLowerCase() === target.repo.toLowerCase()
+        && new URL(savedTarget.url).origin === new URL(target.url).origin;
+      if (!sameTarget) throw new Error(`Skipped attempt ${selectedSkip.attemptId} does not belong to ${target.url}.`);
+      for (const sha of [selectedSkip.headSha, selectedSkip.baseSha]) {
+        if (!/^[a-f0-9]{40}$/i.test(sha)) throw new Error("Saved skipped attempt has an invalid pinned commit.");
+      }
+      if (commentKey) throw new Error("A skipped attempt has no saved sources.");
+      const audit = {
+        prUrl: selectedSkip.prUrl, auditId: null, skipId: selectedSkip.attemptId, snapshotId: null,
+        headSha: selectedSkip.headSha, baseSha: selectedSkip.baseSha, startedAt: selectedSkip.recordedAt,
+        status: "skipped", reasonCode: selectedSkip.reasonCode, reason: selectedSkip.reason,
+        reportAccepted: false, submissionStatus: "not-created", failure: null, assessedAt: null, lastCheckedAt: null,
+        latestAttemptId: runs?.active ?? null, cachedSuccessId: runs?.latestSuccess?.conversationId ?? null,
+        limitations: ["This attempt was skipped before audit evidence was collected; no findings or code evidence are available."],
+      };
+      let data: unknown;
+      switch (section) {
+        case "summary": data = { ...selectedSkip, status: "skipped", evidenceCollected: false }; break;
+        case "attempts": data = { skips: skips?.attempts ?? [] }; break;
+        default: data = { unavailable: "This attempt was skipped before audit evidence was collected." }; break;
+      }
+      return { kind: "skip" as const, audit, skip: selectedSkip, snapshot: null, data };
+    }
+    if (id == null) throw new Error(`No saved audit or skipped attempt for ${target.url}. Chat does not run audits.`);
     const snapshot = saved?.snapshot;
     if (!saved || !snapshot) throw new Error(`Saved audit ${id} has no evidence snapshot. This does not establish that the PR has no audit. Latest saved attempt: ${runs?.active ?? "none"}; use the default lookup unless the user requested this ID.`);
     const savedTarget = parseReviewTarget(snapshot.target.url);
@@ -140,6 +178,7 @@ export function readAudit({ prUrl, auditId, section = "summary", commentKey }: {
         break;
       case "files": data = snapshot.files; break;
       case "instructions": data = agent?.instructions ?? { unavailable: "The original audit instructions were not saved." }; break;
+      case "attempts": data = { skips: skips?.attempts ?? [] }; break;
       case "code": {
         const rows = db.prepare("SELECT record FROM entries WHERE conversation_id = ? ORDER BY id").all(id);
         const excerpts = rows.flatMap((row) => {
@@ -153,7 +192,7 @@ export function readAudit({ prUrl, auditId, section = "summary", commentKey }: {
       }
       default: throw new Error("Unknown audit section.");
     }
-    return { audit, snapshot, data };
+    return { kind: "audit" as const, audit, snapshot, data };
   } finally {
     // Closing a read connection does not checkpoint, create a lock file, or invoke any Durable scheduler.
     db.close();

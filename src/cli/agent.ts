@@ -24,7 +24,7 @@ Examples
   What truthful explanation could address the concern?
 
 Tools
-  read_audit        Read saved findings, discussion, patches, rubric and code excerpts
+  read_audit        Read saved audits, skipped attempts, findings, discussion, rubric and code
   read_github_file  Inspect additional code at the selected audit's pinned commits
 
 Chat keeps the selected attempt across questions and restarts.

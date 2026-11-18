@@ -38,11 +38,11 @@ Set `GH_REPO=owner/repo` (or `host/owner/repo`) to choose the repository explici
 
 Use `owner/repo#number` to select a PR in a specific repository, for example `pronto example-org/example-repo#2423`. Number and branch selection in the current repository require Git and a checkout unless you set `GH_REPO`. An explicit PR URL or `owner/repo#number` target needs neither. The GitHub CLI is optional when you provide a token; Pronto only uses `gh auth token` as an authentication fallback. Selection failures stop the command before model setup or audit storage.
 
-Pronto logs skips without posting or previewing a review by default. Add `--report-skips` to report a skip; one-shot CLI audits post that review by default, while `--apply=false` previews it. In webhook mode, posting also requires `--apply` at startup. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. Skip reviews use `COMMENT`, never `APPROVE`, even with `--approve`.
+Pronto saves every skipped attempt locally with its reason and pinned commits, without creating an audit conversation or evidence. `read_audit` retrieves the latest attempt; use its `skipId` to retrieve a particular skip. Skips are logged without posting or previewing a review by default. Add `--report-skips` to report a skip; one-shot CLI audits post that review by default, while `--apply=false` previews it. In webhook mode, posting also requires `--apply` at startup. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. Skip reviews use `COMMENT`, never `APPROVE`, even with `--approve`.
 
 They are pinned to the PR’s current head commit and use the same durable publication and local duplicate prevention as verdict reviews. The same reason at the same head does not post again when a receipt exists. A different reason or head can produce a new review.
 
-Skipping preserves unfinished work and cached assessments, without collecting an audit snapshot or calling the model. Publication failures exit with code 1 and keep the pending review for recovery.
+Skipping preserves unfinished work and cached assessments, without collecting an audit snapshot or calling the model. The saved skip record is separate from audit evidence; a later eligible request follows the usual audit recovery and cache rules while keeping the skip history available. Publication failures exit with code 1 and keep the pending review for recovery.
 
 Already merged PRs are skipped with a message and exit code 0, even with `--force`, `--apply` or `--approve`. Pronto checks live merge status before starting, resuming or reusing an audit.
 
@@ -648,10 +648,10 @@ The model has 2 tools:
 
 | Tool | Reads |
 | --- | --- |
-| `read_audit` | Saved summary, findings with their original sources, discussion, patches, original instructions and successful code excerpts |
+| `read_audit` | Saved audits and skipped attempts: findings with original sources, discussion, patches, original instructions, successful code excerpts and skip history |
 | `read_github_file` | Additional numbered code lines at the selected audit's pinned head or base commit, with citable URLs |
 
-`read_audit` initially selects the latest saved attempt for a PR. Its default `auditId=0` keeps an existing selection. A positive `auditId` selects that particular attempt; `latest=true` explicitly switches to the latest. Sections use character offsets and return at most 16,000 characters per call, with `nextOffset` for continuation. Long replies are not silently dropped. Both tools also accept the explicit `auditRef` returned by `read_audit`; remote MCP clients must retain and pass it because connections have no remembered selection.
+`read_audit` initially selects the latest saved attempt for a PR, whether it is an audit or a skip. Its default `auditId=0` keeps an existing selection. A positive `auditId` selects an assessment; `skipId` selects a skipped attempt; `latest=true` explicitly switches to the latest. The `attempts` section lists saved skip history. Sections use character offsets and return at most 16,000 characters per call, with `nextOffset` for continuation. Long replies are not silently dropped. Assessment tools also accept the explicit `auditRef` returned by `read_audit`; remote MCP clients must retain and pass it because connections have no remembered selection. For a skip, pass its `skipId` and `prUrl` instead; it has no code evidence to inspect.
 
 Audit retrieval uses a separate read-only SQLite connection. It can read while a CLI or server process owns the repository database. It cannot resume assessments, recover pending publications, migrate databases or create an audit when none exists.
 

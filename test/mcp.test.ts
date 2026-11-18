@@ -133,7 +133,7 @@ test("latest MCP client discovers and verifies the canonical skill and retrieves
   const manifest = await skills.read(entry);
   assert.equal(manifest.verified, true);
   assert.equal(manifest.body?.trim(), auditChatInstructions, "terminal and MCP must use the same canonical instructions");
-  assert.match(manifest.body!, /Retain that exact `auditRef`/);
+  assert.match(manifest.body!, /Retain the exact `auditRef` or `skipId`/);
   await assert.rejects(client.readResource({ uri: "file:///etc/passwd" }), /not found|not registered/i);
 
   const finding = (await section(client, { auditRef: summary.auditRef, section: "findings", commentKey: "inline:102" }))[0];

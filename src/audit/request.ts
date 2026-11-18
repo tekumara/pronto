@@ -7,7 +7,8 @@ import {
 import { fetchChangedFiles, fetchPullRequest, fetchReviewSnapshot, fetchViewerLogin, findApprovals, isAuditComment, submitAuditReview, type ChangedFile, type ReviewSnapshot, type ReviewTarget } from "../github/reviews.ts";
 import { stripControlCharacters, type LogLevel } from "../logging.ts";
 import type { AuditDiagnostics } from "./audit-diagnostics.ts";
-import { AuditDocument, AuditIdentity, AuditRuns, PublicationRequests, type ModelCostInfo } from "./audit-records.ts";
+import { AuditDocument, AuditIdentity, AuditRuns, AuditSkips, PublicationRequests,
+  type AuditSkipAttempt, type AuditSkipReasonCode, type AuditSkipSource, type ModelCostInfo } from "./audit-records.ts";
 import { auditAssessment } from "./assessment.ts";
 import { compileExclusions, excludedPaths, MAX_LISTED_FILES } from "./exclusions.ts";
 import { canonical, evidenceChanges, evidenceFingerprint } from "./fingerprints.ts";
@@ -51,12 +52,25 @@ async function resolveModelCost(harness: Harness, conversationId: ConversationId
   return { model, costUsd: auditAssessment.cost(await harness.snapshot(UsageDoc, conversationId, context)) };
 }
 
+async function persistSkipAttempt(harness: Harness, attempt: AuditSkipAttempt, intent: ReturnType<typeof planSkip> | undefined,
+  reassessment: Parameters<typeof completeReassessment>[2], context: Context): Promise<{ attempt: AuditSkipAttempt; taskId: Awaited<ReturnType<typeof enqueuePublication>> }> {
+  const root = intent?.choices.apply ? await harness.root(context) : undefined;
+  return harness.commit(async (tx) => {
+    const state = await tx.doc(AuditSkips, String(attempt.pr), null);
+    const saved = state.attempts.find((item) => item.attemptId === attempt.attemptId);
+    if (!saved) state.attempts.push(attempt);
+    let taskId: Awaited<ReturnType<typeof enqueuePublication>> = null;
+    if (intent?.choices.apply && root) taskId = await enqueuePublication(tx, root.id, intent);
+    await completeReassessment(tx, String(attempt.pr), reassessment);
+    return { attempt: saved ?? attempt, taskId };
+  }, context);
+}
+
 async function outputSkip(harness: Harness, snapshot: Pick<ReviewSnapshot, "target" | "headSha" | "baseSha">, reason: string,
-  options: AuditOptions, log: AuditLog, context: Context): Promise<void> {
+  options: AuditOptions, intent: ReturnType<typeof planSkip>, existing: { url: string } | undefined,
+  taskId: Awaited<ReturnType<typeof enqueuePublication>>, log: AuditLog, context: Context): Promise<void> {
   reason = stripControlCharacters(reason);
   log("info", `Skipped · ${reason}`, `[audit] Skipping ${snapshot.target.url}: ${reason}`);
-  const intent = planSkip({ snapshot, reason, choices: options });
-  const existing = (await harness.snapshot(SubmittedAuditReviews, String(snapshot.target.pr), context))?.reviews[intent.fingerprint];
   const dryRun = !options.apply;
   if (dryRun) log("debug", `Skip comment preview:\n\n${intent.body}\n`, `[audit:dry-run] Skip comment preview:\n\n${intent.body}\n`);
   if (existing) {
@@ -64,16 +78,11 @@ async function outputSkip(harness: Harness, snapshot: Pick<ReviewSnapshot, "targ
     log("debug", message, `${dryRun ? "[audit:dry-run]" : "[audit]"} ${message}`);
   } else if (dryRun) {
     log("debug", "Skip comment would be posted.", "[audit:dry-run] Skip comment would be posted.");
-  } else {
-    // A skip has no assessment conversation. Publish under the root without changing saved audit work.
-    const root = await harness.root(context);
-    const taskId = await harness.commit((tx) => enqueuePublication(tx, root.id, intent), context);
-    if (taskId) {
-      const url = await waitForPublication(harness, taskId, context);
-      const message = stripControlCharacters(`Skip comment posted to the PR: ${url}`);
-      log("debug", message, `[audit] ${message}`);
-      log("info", stripControlCharacters(`Review: ${url}`), null);
-    }
+  } else if (taskId) {
+    const url = await waitForPublication(harness, taskId, context);
+    const message = stripControlCharacters(`Skip comment posted to the PR: ${url}`);
+    log("debug", message, `[audit] ${message}`);
+    log("info", stripControlCharacters(`Review: ${url}`), null);
   }
 }
 
@@ -125,7 +134,7 @@ export type AuditOptions = {
 };
 
 export type AuditOutcome =
-  | { status: "skipped"; reason: string }
+  | { status: "skipped"; reason: string; skipId: string }
   | { status: "completed"; auditId: ConversationId; cached: boolean };
 
 export type RepositoryAudit = {
@@ -136,10 +145,11 @@ export type RepositoryAudit = {
 };
 
 /** Run or resume one PR against the repository's existing durable owner. */
-export async function auditRequest({ target, options, repository, context, log, diagnostics }: {
+export async function auditRequest({ target, options, repository, context, log, diagnostics, skipAttempt }: {
   target: ReviewTarget;
   options: AuditOptions & { models: ModelRuntime; retryFailed: boolean; restored: boolean };
   repository: RepositoryAudit; context: Context; log: AuditLog; diagnostics: AuditDiagnostics;
+  skipAttempt: { attemptId: string; source: AuditSkipSource };
 }): Promise<AuditOutcome> {
   const started = performance.now();
   const { harness } = repository;
@@ -165,30 +175,40 @@ export async function auditRequest({ target, options, repository, context, log, 
     const startedAt = new Date().toISOString();
     log("info", "Preparing · fetching GitHub evidence", null);
     const pr = await fetchPullRequest(target, context.abortSignal);
-    const skip = async (reason: string, { publish = true } = {}) => {
-      if (publish && options.reportSkips) await outputSkip(harness, { target, headSha: pr.head.sha, baseSha: pr.base.sha }, reason, options, log, context);
-      else {
-        reason = stripControlCharacters(reason);
-        log("info", `Skipped · ${reason}`, `[audit] Skipping ${target.url}: ${reason}`);
-      }
-      if (reassessment) await harness.commit((tx) => completeReassessment(tx, prKey, reassessment), context);
+    const skip = async (reason: string, reasonCode: AuditSkipReasonCode, {
+      publish = true, changedLines, lineLimit, excludedLines,
+    }: { publish?: boolean; changedLines?: number; lineLimit?: number; excludedLines?: number } = {}) => {
+      reason = stripControlCharacters(reason);
+      const skipSnapshot = { target, headSha: pr.head.sha, baseSha: pr.base.sha };
+      const intent = publish && options.reportSkips ? planSkip({ snapshot: skipSnapshot, reason, choices: options }) : undefined;
+      const existing = intent ? (await harness.snapshot(SubmittedAuditReviews, prKey, context))?.reviews[intent.fingerprint] : undefined;
+      const attempt: AuditSkipAttempt = {
+        attemptId: skipAttempt.attemptId, recordedAt: new Date().toISOString(), pr: target.pr, prUrl: target.url,
+        headSha: pr.head.sha, baseSha: pr.base.sha, reasonCode, reason, source: skipAttempt.source,
+        ...(changedLines !== undefined ? { changedLines } : {}), ...(lineLimit !== undefined ? { lineLimit } : {}),
+        ...(excludedLines !== undefined ? { excludedLines } : {}),
+      };
+      const persisted = await persistSkipAttempt(harness, attempt, intent?.choices.apply ? intent : undefined, reassessment, context);
+      if (intent) await outputSkip(harness, skipSnapshot, reason, options, intent, existing, persisted.taskId, log, context);
+      else log("info", `Skipped · ${reason}`, `[audit] Skipping ${target.url}: ${reason}`);
+      return persisted.attempt;
     };
     if (pr.merged) {
       const reason = "PR has already been merged.";
-      await skip(reason);
-      return { status: "skipped", reason };
+      const saved = await skip(reason, "merged");
+      return { status: "skipped", reason, skipId: saved.attemptId };
     }
     if ((options.skipDrafts ?? true) && pr.draft) {
       const reason = "PR is a draft. Use --skip-drafts=false to audit anyway.";
-      await skip(reason);
-      return { status: "skipped", reason };
+      const saved = await skip(reason, "draft");
+      return { status: "skipped", reason, skipId: saved.attemptId };
     }
     const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));
     const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
     if (skippedLabel) {
       const reason = `PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`;
-      await skip(reason);
-      return { status: "skipped", reason };
+      const saved = await skip(reason, "label");
+      return { status: "skipped", reason, skipId: saved.attemptId };
     }
     const isExcluded = compileExclusions(options.exclude ?? []);
     let changedLines = (pr.additions ?? 0) + (pr.deletions ?? 0);
@@ -206,10 +226,12 @@ export async function auditRequest({ target, options, repository, context, log, 
     }
     if (changedLines > MAX_CHANGED_LINES) {
       const reason = `PR changes ${changedLines} lines${excludedLines ? ` after excluding ${excludedLines} lines` : ""}, more than the ${MAX_CHANGED_LINES} line limit.`;
-      await skip(reason);
+      const saved = await skip(reason, "over_limit", {
+        changedLines, lineLimit: MAX_CHANGED_LINES, ...(excludedLines ? { excludedLines } : {}),
+      });
       if (uncounted) log("debug", `GitHub gave no line counts for ${uncounted} excluded file${uncounted === 1 ? "" : "s"}, so ${uncounted === 1 ? "it still counts" : "they still count"} toward the limit.`);
       if (excluded.length) outputExcludedFiles(excluded.map((file) => file.path), log);
-      return { status: "skipped", reason };
+      return { status: "skipped", reason, skipId: saved.attemptId };
     }
     if (options.skipApproved ?? true) {
       const approvers = await findApprovals(target, pr.head.sha, context.abortSignal);
@@ -218,8 +240,8 @@ export async function auditRequest({ target, options, repository, context, log, 
         const ownApproval = approvers.find((login) => login.toLowerCase() === viewer.toLowerCase());
         const approver = ownApproval ?? approvers[0]!;
         const reason = `PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`;
-        await skip(reason, { publish: !ownApproval });
-        return { status: "skipped", reason };
+        const saved = await skip(reason, "approved", { publish: !ownApproval });
+        return { status: "skipped", reason, skipId: saved.attemptId };
       }
     }
     // Persist restart intent before cancellation/evidence fetching. A crash must not turn a requested restart into

@@ -1,4 +1,5 @@
 import { inspect } from "node:util";
+import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -11,13 +12,13 @@ import { createAuditScheduler } from "../server/audit-scheduler.ts";
 import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity } from "../state.ts";
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
-import { AuditDocument, AuditRuns, type AuditResult } from "./audit-records.ts";
+import { AuditDocument, AuditRuns, AuditSkips, type AuditResult, type AuditSkipSource } from "./audit-records.ts";
 import { auditAssessment } from "./assessment.ts";
 import { createPublisher, pendingReassessments, recoverPublications, waitForPublication } from "./publication.ts";
 import { auditRequest, type AuditLog, type AuditOptions, type AuditOutcome, type RepositoryAudit } from "./request.ts";
 
 export type { AuditOptions } from "./request.ts";
-export type AuditTrigger = { source: "webhook"; reason?: string } | { source: "mcp"; tool: string; requestId?: string };
+export type AuditTrigger = { source: "webhook"; reason?: string; attemptId?: string } | { source: "mcp"; tool: string; requestId?: string };
 type PendingReviewGate = { url: string; reviewers: string[] };
 type Recovery = { urls: string[]; gates: PendingReviewGate[]; skipped: { database: string; error: unknown }[] };
 
@@ -54,8 +55,8 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
     concurrency: webhooks.concurrency,
     requiredReviewers: webhooks.requiredReviewers,
     reviewerWakeups,
-    audit: async (url, reason) => {
-      await auditor.scheduleAudit(url, webhooks.options, { source: "webhook", ...(reason ? { reason } : {}) }, BACKGROUND_CONTEXT, true);
+    audit: async (url, reason, attemptId) => {
+      await auditor.scheduleAudit(url, webhooks.options, { source: "webhook", ...(reason ? { reason } : {}), attemptId }, BACKGROUND_CONTEXT, true);
     },
     beforeDispatch: state ? async (url) => {
       const repository = await repositoryFor(parseReviewTarget(url));
@@ -200,6 +201,11 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
       requests.add(requestKey);
       const scope = `${target.owner}/${target.repo}#${target.pr}`;
       const label = labelOutput ? `[${scope}] ` : "";
+      const skipAttempt = {
+        attemptId: trigger?.source === "webhook" ? trigger.attemptId ?? randomUUID()
+          : trigger?.source === "mcp" ? trigger.requestId ?? randomUUID() : randomUUID(),
+        source: (trigger?.source ?? "cli") as AuditSkipSource,
+      };
       const log: AuditLog = (level, message, cliText) => {
         if (output) output(level, scope, message);
         else if (cliText !== null) console.log(`${label}${cliText ?? `[audit] ${message}`}`);
@@ -217,12 +223,18 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
           try { await waitForPublication(repositoryAudit.harness, taskId, context); }
           catch (error) { log("error", `Pending publication: ${error instanceof Error ? error.message : String(error)}`); }
         }));
+        const savedSkip = (await repositoryAudit.harness.snapshot(AuditSkips, String(target.pr), context))?.attempts
+          .find((attempt) => attempt.attemptId === skipAttempt.attemptId);
+        if (savedSkip) {
+          log("info", `Skipped · ${savedSkip.reason}`, `[audit] Skipping ${target.url}: ${savedSkip.reason}`);
+          return { status: "skipped", reason: savedSkip.reason, skipId: savedSkip.attemptId };
+        }
         const retryFailed = failedRecoveries.delete(requestKey);
         const restored = restoredRequests.delete(requestKey);
         let outcome: AuditOutcome;
         do {
           outcome = await auditRequest({ target, options: { ...options, retryFailed, restored, models },
-            repository: repositoryAudit, context, log, diagnostics });
+            repository: repositoryAudit, context, log, diagnostics, skipAttempt });
           // A live assessment can also become stale before publication. Retire its old
           // approval and consume the durable reassessment without needing another webhook.
         } while ((await pendingReassessments(repositoryAudit.harness, context))[String(target.pr)]);

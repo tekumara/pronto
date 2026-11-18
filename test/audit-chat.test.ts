@@ -7,6 +7,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readAudit } from "../src/discussion/audit-reader.ts";
+import { readSavedAuditPage } from "../src/discussion/audit-tools.ts";
 import { previewFixture as fixture, reply, tool } from "./fixtures.ts";
 import { prUrl, headSha, baseSha, commentUrl, githubEvidence, assessments, auditCheckpointHook } from "./audit-evidence.ts";
 
@@ -116,6 +117,50 @@ test("bounded audit reads preserve complete long author replies and their citati
   await f.run("Read the full author reply\n/quit\n");
   assert.ok(pages > 2);
   assert.equal(github.requests.length, reads, "saved evidence reads must be offline");
+});
+
+test("read_audit retrieves persisted skips and keeps them available after an eligible retry", { timeout: 30000 }, async (t) => {
+  const githubOptions = { large: true };
+  const github = githubEvidence(githubOptions);
+  let modelCalls = 0;
+  const f = await fixture(t, (_body, response) => {
+    if (modelCalls++ === 0) tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
+    else tool(response, "report_review_assessment", assessments());
+  }, { github: github.handle });
+
+  const skippedOutput = await f.run("", [prUrl], { entrypoint: auditEntry });
+  assert.match(skippedOutput, /Skipping .*more than the 10000 line limit/);
+  assert.equal(modelCalls, 0, "a size skip must not start model work");
+
+  const latestSkip = readAudit({ prUrl }, f.stateDir);
+  assert.equal(latestSkip.kind, "skip");
+  assert.equal(latestSkip.audit.status, "skipped");
+  assert.equal(latestSkip.skip.reasonCode, "over_limit");
+  assert.equal(latestSkip.skip.changedLines, 35_000);
+  assert.equal(latestSkip.skip.lineLimit, 10_000);
+  assert.equal(latestSkip.data && (latestSkip.data as { evidenceCollected: boolean }).evidenceCollected, false);
+
+  const page = readSavedAuditPage({ prUrl }, null, f.stateDir);
+  assert.equal(page.selection?.kind, "skip");
+  assert.equal("skipId" in page.page ? page.page.skipId : undefined, latestSkip.skip.attemptId);
+  assert.ok(!("auditRef" in page.page), "a skip must not manufacture an evidence reference");
+  const attempts = readSavedAuditPage({ prUrl, section: "attempts" }, null, f.stateDir);
+  const savedAttempts = JSON.parse(attempts.page.content) as { skips: { attemptId: string }[] };
+  assert.deepEqual(savedAttempts.skips.map(({ attemptId }) => attemptId), [latestSkip.skip.attemptId]);
+
+  githubOptions.large = false;
+  await f.run("", [prUrl], { entrypoint: auditEntry });
+  assert.equal(modelCalls, 2, "the eligible retry should run a fresh assessment");
+  const latestAudit = readAudit({ prUrl }, f.stateDir);
+  assert.equal(latestAudit.kind, "audit");
+  assert.equal(latestAudit.audit.status, "completed");
+
+  const priorSkip = readAudit({ prUrl, skipId: latestSkip.skip.attemptId }, f.stateDir);
+  assert.equal(priorSkip.kind, "skip");
+  assert.equal(priorSkip.skip.reasonCode, "over_limit");
+  const history = readAudit({ prUrl, section: "attempts" }, f.stateDir);
+  assert.equal(history.kind, "audit");
+  assert.deepEqual((history.data as { skips: { attemptId: string }[] }).skips.map(({ attemptId }) => attemptId), [latestSkip.skip.attemptId]);
 });
 
 for (const crash of ["report", "publication"] as const) {

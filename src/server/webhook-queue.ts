@@ -24,7 +24,7 @@ function record(value: JsonValue): Record<string, JsonValue> | undefined {
 export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch, requiredReviewers = [],
   onReviewWait, onReviewSatisfied, onReviewError, reviewerWakeups }: {
   concurrency: number;
-  audit(url: string, reason?: string): Promise<void>;
+  audit(url: string, reason?: string, attemptId?: string): Promise<void>;
   beforeDispatch?(url: string): Promise<void>;
   requiredReviewers?: string[];
   reviewerWakeups: ReviewerWakeups;
@@ -138,7 +138,7 @@ export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch
             await beforeDispatch?.(task.input.url);
             context.abortSignal?.throwIfAborted();
             try {
-              await audit(task.input.url, task.input.reason);
+              await audit(task.input.url, task.input.reason, String(task.id));
             } catch (error) {
               // Shutdown leaves the intake task and its rerun intact, even before evidence admission.
               if (closed || runtime.signal.aborted) throw error;

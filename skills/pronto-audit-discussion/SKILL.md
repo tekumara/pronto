@@ -10,11 +10,11 @@ This skill covers discussion of existing Pronto audits. Discussion alone does no
 
 ## Select and retain the evidence
 
-Use `read_audit` before answering questions about a PR's audit. Supply the GitHub PR URL in `prUrl` initially. The result identifies the saved attempt, snapshot and pinned commits, and returns an `auditRef`.
+Use `read_audit` before answering questions about a PR's audit. Supply the GitHub PR URL in `prUrl` initially. The result identifies the latest saved attempt. A real assessment returns an `auditRef`; a skipped attempt returns a `skipId`, its reason and an explicit note that no evidence was collected.
 
-Retain that exact `auditRef` and pass it to both tools on follow-up calls. It is an opaque reference, not an ID to invent or edit. Remote MCP calls are stateless: a server connection does not remember your selection. Keep the reference in your own conversation history.
+Retain the exact `auditRef` or `skipId` and pass it on follow-up calls. An `auditRef` is for evidence-backed assessment attempts; a `skipId` must be paired with `prUrl` and selects a skip record. Never invent or edit either identifier. Remote MCP calls are stateless: a server connection does not remember your selection. Keep the reference in your own conversation history.
 
-Terminal chat also remembers the selected attempt when arguments are omitted. Its `auditId=0` default keeps that selection, or selects the latest initially.
+Terminal chat also remembers the selected attempt when arguments are omitted. Its `auditId=0` default keeps that selection, or selects the latest initially. Use section `attempts` to list recorded skips; a skipped attempt has no pinned code to inspect.
 
 Switch only when the user asks. To select the latest, supply `prUrl` and `latest=true`, without the old `auditRef`. To select a particular attempt, use a positive `auditId` explicitly supplied by the user or returned by a tool; never guess an ID.
 
@@ -24,7 +24,8 @@ An error about a particular attempt does not mean the PR has no saved audit. Ret
 
 Use `read_audit` sections:
 
-- `summary` for identity, completion state, counts and each finding's recorded reason, evidence, next steps and source URL
+- `summary` for identity, completion state, counts and each finding's recorded reason, evidence, next steps and source URL; for a skip, it gives the reason and confirms no evidence was collected
+- `attempts` for the PR's saved skip history and IDs
 - `findings` for accepted assessments and their full original sources
 - `discussion` for the original PR description, comments and replies
 - `files` for saved patches and changed paths

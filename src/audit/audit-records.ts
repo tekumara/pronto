@@ -28,6 +28,18 @@ export const AuditRuns = defineDocFamily<AuditRunsState, null>({
   kind: "app.review-audit-runs", version: 1, scope: "session", family: true, checkpointWhen: () => false,
   initial: () => ({ active: null, controllerTask: null, complete: true, restartModel: null, latestSuccess: null }),
 });
+export type AuditSkipReasonCode = "merged" | "draft" | "label" | "over_limit" | "approved";
+export type AuditSkipSource = "cli" | "webhook" | "mcp";
+export type AuditSkipAttempt = {
+  attemptId: string; recordedAt: string; pr: number; prUrl: string; headSha: string; baseSha: string;
+  reasonCode: AuditSkipReasonCode; reason: string; source: AuditSkipSource;
+  changedLines?: number; lineLimit?: number; excludedLines?: number;
+};
+export type AuditSkipsState = { attempts: AuditSkipAttempt[] };
+export const AuditSkips = defineDocFamily<AuditSkipsState, null>({
+  kind: "app.review-audit-skips", version: 1, scope: "session", family: true, checkpointWhen: () => false,
+  initial: () => ({ attempts: [] }),
+});
 export const AuditIdentity = defineDoc<{ fingerprint: string | null; policy: string | null }>({
   kind: "app.review-audit-identity", version: 1, scope: "conversation", history: "latest", fork: "initial", checkpointWhen: () => false,
   initial: () => ({ fingerprint: null, policy: null }),

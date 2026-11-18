@@ -8,6 +8,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fixture, gitCheckout, noDatabaseMigration, reply, tool } from "./fixtures.ts";
+import { auditCheckpointHook } from "./audit-evidence.ts";
+import { readAudit } from "../src/discussion/audit-reader.ts";
 import { deliver, reviewRequested, webhookSecret } from "./webhook-fixtures.ts";
 
 const prUrl = "https://github.com/acme/demo/pull/7";
@@ -526,6 +528,41 @@ for (const failure of ["model error", "missing assessment"] as const) {
   });
 }
 
+test("recovered webhook skips remain retrievable without duplicating the attempt", { timeout: 40_000 }, async (t) => {
+  const gh = github();
+  gh.state.merged = true;
+  let modelCalls = 0;
+  const f = await fixture(t, () => { modelCalls++; assert.fail("A merged PR skip must not call the model"); }, {
+    entrypoint: resolve("src/cli/audit.ts"), github: gh.handler,
+  });
+  const hook = await auditCheckpointHook(f.directory, "skip");
+  const first = f.start(["serve", "--port", "0"], { env, nodeArgs: ["--import", hook] });
+  const firstOutput = watchOutput(first.child);
+  const [, port] = await firstOutput.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const accepted = await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl), { id: "skip-recovery" });
+  assert.equal(accepted.status, 202);
+  assert.equal((await first.done).code, 79, "the process stops immediately after the skip record commits");
+
+  const beforeRecovery = readAudit({ prUrl, section: "attempts" }, f.stateDir);
+  assert.equal(beforeRecovery.kind, "skip");
+  const original = (beforeRecovery.data as { skips: { attemptId: string; reasonCode: string }[] }).skips;
+  assert.equal(original.length, 1);
+  assert.equal(original[0]!.reasonCode, "merged");
+
+  const second = f.start(["serve", "--port", "0"], { env });
+  const secondOutput = watchOutput(second.child);
+  await secondOutput.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  await secondOutput.until(/Skipped · PR has already been merged/);
+  second.child.kill("SIGTERM");
+  assert.equal((await second.done).code, 0);
+
+  const afterRecovery = readAudit({ prUrl, section: "attempts" }, f.stateDir);
+  assert.equal(afterRecovery.kind, "skip");
+  const recovered = (afterRecovery.data as { skips: { attemptId: string }[] }).skips;
+  assert.deepEqual(recovered.map(({ attemptId }) => attemptId), [original[0]!.attemptId]);
+  assert.equal(modelCalls, 0);
+});
+
 test("serve retains a bounded delivery window across restart", { timeout: 30_000 }, async (t) => {
   const gh = github();
   gh.state.merged = true;
@@ -739,7 +776,7 @@ async function auditMcpClient(url: string, token: string) {
 async function runMcpAudit(client: Client, args: Record<string, unknown>) {
   const result = await client.callTool({ name: "run_audit", arguments: args });
   assert.ok(!result.isError, JSON.stringify(result));
-  return result.structuredContent as { apply: boolean; results: ({ prUrl: string; status: string; auditId?: number; cached?: boolean; reason?: string })[] };
+  return result.structuredContent as { apply: boolean; results: ({ prUrl: string; status: string; auditId?: number; skipId?: string; cached?: boolean; reason?: string })[] };
 }
 
 test("one MCP credential reads and runs audits with CLI defaults, models, skips, cache and apply", { timeout: 30_000 }, async (t) => {
@@ -784,6 +821,14 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
 
   const skipped = await runMcpAudit(client, { targets: [prUrl] });
   assert.match(skipped.results[0]!.reason!, /draft/);
+  assert.ok(skipped.results[0]!.skipId);
+  const savedSkip = await client.callTool({ name: "read_audit", arguments: { prUrl, skipId: skipped.results[0]!.skipId } });
+  assert.equal(savedSkip.isError, undefined);
+  const savedSkipPage = savedSkip.structuredContent as { skipId: string; audit: { status: string }; content: string; auditRef?: string };
+  assert.equal(savedSkipPage.audit.status, "skipped");
+  assert.equal(savedSkipPage.skipId, skipped.results[0]!.skipId);
+  assert.equal(savedSkipPage.auditRef, undefined, "skips do not create an audit evidence reference");
+  assert.equal(JSON.parse(savedSkipPage.content).evidenceCollected, false);
   const runAuditStart = await out.until(/INFO\s+mcp\s+pronto-audits\/run_audit started requestId=([0-9a-f-]+)/);
   const requestId = runAuditStart[1]!;
   await out.until(new RegExp(`INFO\\s+mcp\\s+pronto-audits/run_audit completed requestId=${requestId} · duration=\\d+\\.\\d+ms`));
@@ -791,6 +836,11 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   assert.equal(skipped.apply, true, "MCP uses the one-shot CLI default, independently of webhook startup flags");
   const labelled = await runMcpAudit(client, { targets: [prUrl], skipDrafts: false, skipLabels: ["unused", "BLOCKED"] });
   assert.match(labelled.results[0]!.reason!, /matching skip label/);
+  assert.ok(labelled.results[0]!.skipId);
+  assert.notEqual(labelled.results[0]!.skipId, skipped.results[0]!.skipId, "a new audit request records a distinct skip attempt");
+  const skipHistory = await client.callTool({ name: "read_audit", arguments: { prUrl, section: "attempts" } });
+  const attempts = JSON.parse((skipHistory.structuredContent as { content: string }).content) as { skips: { attemptId: string }[] };
+  assert.deepEqual(attempts.skips.map(({ attemptId }) => attemptId), [skipped.results[0]!.skipId, labelled.results[0]!.skipId]);
   assert.equal(gh.reviews.length, 0);
   assert.deepEqual(modelNames, []);
 
