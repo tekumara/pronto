@@ -1,29 +1,35 @@
 # Pronto
 
-Pronto helps reduce pull request (PR) cycle time by showing what review feedback has been addressed, what still needs attention, and who should act next. One-shot CLI and MCP audits post a verdict review by default, approving eligible PRs and commenting when approval is blocked. Pass `--apply=false` (or `apply: false` through MCP) to preview instead, or `--approve=false` (`approve: false`) to post a comment rather than an approval. Webhook audits started by `pronto serve` remain preview-only unless `--apply` is set at startup. See the [approval conditions and safeguards](#approval-conditions-and-safeguards).
+Pronto checks whether review feedback on a GitHub pull request (PR) has been addressed. It compares feedback from teammates and review bots with the changed code, then reports what still needs attention and who should act next.
 
-## Summon it from GitHub
+## Run an audit
 
-You can ask Pronto to check a pull request in either of 2 ways:
+You can run an audit in 3 ways:
 
-- request a review from Pronto in the pull request’s Reviewers list
-- @mention Pronto’s GitHub account in a comment on the pull request
+- from the [command line](GUIDE.md#quick-start): run `pronto` with the PR URL
+- from GitHub after [setting up the webhook](GUIDE.md#serve-mode): request a review from Pronto’s reviewer account or @mention that account in a PR comment
+- from an [MCP client](MCP.md#run-an-audit): call `run_audit` with the PR URL
 
-## Find out what is left
+To try the command line without submitting a new review, use `--apply=false`:
 
-Pronto checks feedback from teammates and review bots such as GitHub Copilot, SonarQube etc. It reads the discussion alongside the changed code, then reports:
+```sh
+pronto --apply=false https://github.com/owner/repo/pull/42
+```
 
-- which findings appear addressed
-- which findings are outstanding or unclear
-- who needs to act next and what they should do
+## What an audit reports
 
-“Addressed” can mean a code fix, a supported explanation, or an accepted scope decision. It does not always mean the requested change was made.
+Pronto assigns each finding a status:
 
-You can reply to Pronto’s findings with explanations or context. The next time you @mention Pronto or request a review from it, it reads your replies and considers them as evidence.
+- addressed: a fix, a supported explanation or an accepted decision about scope answers the finding
+- outstanding: the finding still needs action
+- uncertain: Pronto does not have enough evidence to tell whether the finding is addressed
+- not actionable: the comment does not raise an issue to resolve
 
-## Example review comment
+For findings that need attention, Pronto says who should act and what to do next.
 
-A shortened example, using placeholder names and links:
+### Example GitHub review
+
+In this shortened example, “Awaiting” names who should act and “Next step” says what to do:
 
 > ## Review audit · Changes needed
 >
@@ -39,40 +45,58 @@ A shortened example, using placeholder names and links:
 
 The full review also includes expandable sections with reasoning, evidence and audit context.
 
-## When Pronto skips a PR
-
-Pronto skips the audit when:
-
-- the PR has already been merged
-- the PR is a draft, unless auditing drafts is enabled
-- the PR has a label configured to skip audits
-- the PR changes more than 10,000 lines, counting additions and deletions after configured file exclusions
-- the PR’s latest commit already has a reviewer’s approval, unless auditing approved PRs is enabled
-
-Pronto saves every skipped attempt locally with its reason and pinned commits, but does not create an audit conversation or evidence. `run_audit` and `read_audit` identify saved attempts with a stable opaque `attemptId`; use it with the PR URL to retrieve an assessment or skip. Skips are logged without posting or previewing a review by default. Add `--report-skips` to report a skip; one-shot CLI and MCP audits post that review by default, while `--apply=false` previews it. In webhook mode, posting also requires `--apply` at startup. If the skip is caused by your authenticated GitHub account's approval of the current commit, Pronto only logs it, even with `--report-skips`. A skip never approves the PR or calls the model. Repeating the same reason at the same commit does not post another review when a local receipt exists.
-
-## Approval conditions and safeguards
-
-One-shot CLI and MCP audits select approval by default; webhook audits do not unless `pronto serve` is configured with `--approve`. An approval requires:
-
-- explicit permission to approve and post reviews
-- no outstanding or uncertain findings in Pronto’s assessment
-- an assessment that rules out a database migration
-
-You can explicitly allow uncertain findings or migration approvals. Outstanding findings still block approval.
-
-These safeguards rely on the AI’s assessment of the review feedback and migration status. Pronto does not check whether CI or tests have passed, and approval is not proof that the code is correct.
-
-The goal is less time chasing review feedback and waiting for another review round—not replacing tests or a full code review.
+If you have more context, reply to the finding on GitHub. Pronto considers your reply as evidence the next time it audits the PR.
 
 ## Discuss a saved audit
 
-External agents can read and run audits and use the discussion skill through an authenticated MCP endpoint. Calling `run_audit` publishes a review by default; set `apply: false` to preview. The token grants this write access as well as read access, and the agent retains the selected audit reference. See [MCP setup](MCP.md) for HTTPS, credentials and a runnable client.
+Use Pronto’s [terminal chat](GUIDE.md#optional-audit-discussion-chat) or [connect another agent through MCP](MCP.md). For example, ask why a finding is still outstanding or what evidence would address it. Discussion does not rerun the audit or change its verdict.
 
-## Technical guide
+An MCP client [keeps the reference to the selected audit](MCP.md#keep-the-selected-audit-stable) for follow-up questions. The MCP token also lets clients run audits and submit reviews using the server’s GitHub credentials.
 
-See the [technical guide](GUIDE.md) for setup, usage, audit behaviour and development details.
+## Approval conditions and safeguards
 
-Serve also has an opt-in `--replicated-state` experiment using stock Litestream and S3-compatible storage. It defaults to off. See [replicated state setup and safety limits](REPLICATED_STATE.md), including the real RustFS integration command. It is not production hard fencing.
+### Review submission defaults
 
-For a local Kubernetes deployment, see [replicated Pronto and RustFS on k3d with Helm](deploy/README.md). Host tools are managed with mise.
+When Pronto submits a verdict to GitHub, it sends one review: an approval if enabled and the PR qualifies, otherwise a comment.
+
+| How you run the audit | Default | Preview only | Submit comments only |
+| --- | --- | --- | --- |
+| Command line | Submit and approve if eligible | `--apply=false` | `--approve=false` |
+| MCP | Submit and approve if eligible | `apply: false` | `approve: false` |
+| GitHub webhook | Preview only | No flags needed | `pronto serve --apply` |
+
+To let webhook audits approve eligible PRs, start `pronto serve --apply --approve`.
+
+### What blocks approval
+
+By default, Pronto does not approve if its assessment:
+
+- finds outstanding feedback
+- cannot tell whether a finding has been addressed
+- cannot rule out a database migration
+
+You can [allow uncertain findings or bypass the migration check](GUIDE.md#approve-clean-audits). Outstanding findings always block approval.
+
+Before submitting an approval, Pronto checks that the PR’s head and base commits still match the audit. GitHub requires permission to submit reviews and does not let authors approve their own PRs.
+
+Approval reflects Pronto’s assessment of the review feedback. Pronto does not check whether CI or tests passed, and its approval does not replace a full code review.
+
+## When Pronto skips a PR
+
+Pronto skips the audit if the PR:
+
+- has already been merged
+- is a draft, unless you enable draft audits
+- has a label you configured Pronto to skip
+- changes more than 10,000 lines, counting additions and deletions after configured file exclusions
+- already has a reviewer’s approval on the current commit, unless you enable audits of approved PRs
+
+Pronto logs and saves the reason for every skip without calling the model. To also get a GitHub comment or a preview of it, set `--report-skips` on the CLI or `reportSkips: true` in MCP. Skip comments follow the same submission settings as verdict reviews and never approve the PR.
+
+If Pronto skips because its own reviewer account already approved the current commit, it does not preview or submit a comment, even when skip reporting is enabled. Pronto also does not submit a duplicate skip comment if it has a local receipt for the same reason and commit.
+
+## Further documentation
+
+- [Technical guide](GUIDE.md): installation, audit options, storage and development
+- [Experimental replicated state](REPLICATED_STATE.md): opt-in S3-compatible storage, RustFS integration tests and safety limits
+- [Local Kubernetes deployment](deploy/README.md): run replicated Pronto and RustFS on k3d with Helm
