@@ -77,7 +77,7 @@ test("chat retrieves original findings, replies, rubric and pinned code through 
   let building = true;
   let auditTurns = 0;
   let turn = 0;
-  let selectedId: number | undefined;
+  let selectedAttemptId: string | undefined;
   const f = await fixture(t, (body, response) => {
     const latest = body.messages.at(-1)?.content ?? "";
     if (building) {
@@ -87,7 +87,9 @@ test("chat retrieves original findings, replies, rubric and pinned code through 
     }
     const page = () => {
       const value = JSON.parse(latest);
-      assert.equal(value.audit.auditId, selectedId);
+      assert.equal(value.attemptId, selectedAttemptId);
+      assert.equal(value.audit.attemptId, selectedAttemptId);
+      assert.equal("auditId" in value.audit, false);
       assert.equal(value.audit.headSha, headSha);
       assert.equal(value.audit.status, "completed");
       assert.equal(value.nextOffset, null);
@@ -100,7 +102,7 @@ test("chat retrieves original findings, replies, rubric and pinned code through 
         break;
       case 1: {
         const summary = JSON.parse(latest);
-        selectedId = summary.audit.auditId;
+        selectedAttemptId = summary.attemptId;
         assert.equal(summary.audit.status, "completed");
         assert.equal(JSON.parse(summary.content).counts.outstanding, 1);
         tool(response, "read_audit", { section: "findings", commentKey: `inline:${accessId}` });
@@ -138,7 +140,8 @@ test("chat retrieves original findings, replies, rubric and pinned code through 
         break;
       case 9: {
         const code = JSON.parse(latest);
-        assert.equal(code.auditId, selectedId);
+        assert.equal(code.attemptId, selectedAttemptId);
+        assert.equal("auditId" in code, false);
         assert.equal(code.sha, headSha);
         assert.equal(code.url, codeUrl);
         assert.match(code.provenance, /Additional.*not saved audit evidence/);

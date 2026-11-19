@@ -6,12 +6,13 @@ import { ToolResultEntry, type AgentState, type EntryRecord, type SubmissionReco
 import { AUDIT_CONTROLLER_KIND, AuditDocument, AuditIdentity, AuditRuns, AuditSkips,
   type AuditResult, type AuditRunsState, type AuditSkipAttempt, type AuditSkipsState, type AuditState } from "../audit/audit-records.ts";
 import { parseReviewTarget } from "../github/reviews.ts";
+import { auditAttemptId, decodeAttemptId, skipAttemptId } from "../audit/attempt-id.ts";
 import { repositoryDatabaseIdentity, repositoryDatabasePath, stateDirectory } from "../state.ts";
 
 export type AuditSection = "summary" | "findings" | "discussion" | "files" | "instructions" | "code" | "attempts";
 export type AuditSelection =
-  | { kind: "audit"; prUrl: string; auditId: number; snapshotId: string }
-  | { kind: "skip"; prUrl: string; skipId: string };
+  | { kind: "audit"; prUrl: string; snapshotId: string; attemptId: string }
+  | { kind: "skip"; prUrl: string; attemptId: string };
 
 type DocumentRow = { id: number };
 type RevisionRow = { seq: number; kind: string; version: number; content: string };
@@ -22,8 +23,8 @@ type Controller = TaskRecord<{ pr: string }, { phase: "assess" }, AuditResult>;
  * writable state, and a repository Harness can recover assessments and explicitly authorised publications.
  * BEGIN is a deferred read transaction so WAL readers see a consistent commit without taking Pronto's writer lock.
  */
-export function readAudit({ prUrl, auditId, skipId, section = "summary", commentKey }: {
-  prUrl: string; auditId?: number; skipId?: string; section?: AuditSection; commentKey?: string;
+export function readAudit({ prUrl, attemptId, section = "summary", commentKey }: {
+  prUrl: string; attemptId?: string; section?: AuditSection; commentKey?: string;
 }, root = stateDirectory()) {
   const target = parseReviewTarget(prUrl);
   const host = encodeURIComponent(new URL(target.url).hostname.toLowerCase());
@@ -33,7 +34,9 @@ export function readAudit({ prUrl, auditId, skipId, section = "summary", comment
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`No saved audit for ${target.url}. Chat does not run audits.`);
     throw error;
   }
-  if (auditId !== undefined && (!Number.isSafeInteger(auditId) || auditId < 1)) throw new Error("auditId must be a positive integer.");
+  const locator = attemptId === undefined ? undefined : decodeAttemptId(attemptId);
+  const selectedAuditId = locator?.kind === "audit" ? locator.auditId : undefined;
+  const selectedSkipId = locator?.kind === "skip" ? locator.skipId : undefined;
   const db = new DatabaseSync(path, { readOnly: true });
   try {
     db.exec("BEGIN");
@@ -64,14 +67,13 @@ export function readAudit({ prUrl, auditId, skipId, section = "summary", comment
       }
       return value as T;
     };
-    if (skipId !== undefined && (!skipId.trim() || skipId.length > 256)) throw new Error("skipId must be a non-empty saved skip attempt ID.");
     const runs = document<AuditRunsState>(AuditRuns.definition.kind, "session", 0, String(target.pr));
     const skips = document<AuditSkipsState>(AuditSkips.definition.kind, "session", 0, String(target.pr));
-    const id = auditId ?? runs?.active;
+    const id = selectedAuditId ?? runs?.active;
     const saved = id == null ? undefined : document<AuditState>(AuditDocument.definition.kind, "conversation", id);
-    let selectedSkip = skipId === undefined ? undefined : skips?.attempts.find((attempt) => attempt.attemptId === skipId);
-    if (skipId !== undefined && !selectedSkip) throw new Error(`No saved skipped attempt ${skipId} for ${target.url}.`);
-    if (!selectedSkip && auditId === undefined) {
+    let selectedSkip = selectedSkipId === undefined ? undefined : skips?.attempts.find((attempt) => attempt.attemptId === selectedSkipId);
+    if (selectedSkipId !== undefined && !selectedSkip) throw new Error(`No saved skipped attempt for ${target.url}.`);
+    if (!selectedSkip && selectedAuditId === undefined) {
       const latestSkip = skips?.attempts.at(-1);
       if (latestSkip && (!saved?.snapshot || Date.parse(latestSkip.recordedAt) >= Date.parse(saved.snapshot.startedAt))) selectedSkip = latestSkip;
     }
@@ -81,17 +83,19 @@ export function readAudit({ prUrl, auditId, skipId, section = "summary", comment
         && savedTarget.owner.toLowerCase() === target.owner.toLowerCase()
         && savedTarget.repo.toLowerCase() === target.repo.toLowerCase()
         && new URL(savedTarget.url).origin === new URL(target.url).origin;
-      if (!sameTarget) throw new Error(`Skipped attempt ${selectedSkip.attemptId} does not belong to ${target.url}.`);
+      if (!sameTarget) throw new Error(`Skipped attempt ${skipAttemptId(selectedSkip.attemptId)} does not belong to ${target.url}.`);
       for (const sha of [selectedSkip.headSha, selectedSkip.baseSha]) {
         if (!/^[a-f0-9]{40}$/i.test(sha)) throw new Error("Saved skipped attempt has an invalid pinned commit.");
       }
       if (commentKey) throw new Error("A skipped attempt has no saved sources.");
       const audit = {
-        prUrl: selectedSkip.prUrl, auditId: null, skipId: selectedSkip.attemptId, snapshotId: null,
+        prUrl: selectedSkip.prUrl, attemptId: skipAttemptId(selectedSkip.attemptId), auditId: null,
+        auditRef: null, skipId: selectedSkip.attemptId, snapshotId: null,
         headSha: selectedSkip.headSha, baseSha: selectedSkip.baseSha, startedAt: selectedSkip.recordedAt,
         status: "skipped", reasonCode: selectedSkip.reasonCode, reason: selectedSkip.reason,
         reportAccepted: false, submissionStatus: "not-created", failure: null, assessedAt: null, lastCheckedAt: null,
-        latestAttemptId: runs?.active ?? null, cachedSuccessId: runs?.latestSuccess?.conversationId ?? null,
+        latestAuditAttemptId: runs?.active == null ? null : auditAttemptId(runs.active),
+        cachedSuccessAttemptId: runs?.latestSuccess == null ? null : auditAttemptId(runs.latestSuccess.conversationId),
         limitations: ["This attempt was skipped before audit evidence was collected; no findings or code evidence are available."],
       };
       let data: unknown;
@@ -104,13 +108,13 @@ export function readAudit({ prUrl, auditId, skipId, section = "summary", comment
     }
     if (id == null) throw new Error(`No saved audit or skipped attempt for ${target.url}. Chat does not run audits.`);
     const snapshot = saved?.snapshot;
-    if (!saved || !snapshot) throw new Error(`Saved audit ${id} has no evidence snapshot. This does not establish that the PR has no audit. Latest saved attempt: ${runs?.active ?? "none"}; use the default lookup unless the user requested this ID.`);
+    if (!saved || !snapshot) throw new Error(`Saved assessment attempt ${attemptId ?? auditAttemptId(id)} has no evidence snapshot. This does not establish that the PR has no audit. Latest saved attempt: ${runs?.active == null ? "none" : auditAttemptId(runs.active)}; use the default lookup unless the user requested this attempt.`);
     const savedTarget = parseReviewTarget(snapshot.target.url);
     const sameTarget = snapshot.target.pr === target.pr && savedTarget.pr === target.pr
       && snapshot.target.owner.toLowerCase() === target.owner.toLowerCase() && savedTarget.owner.toLowerCase() === target.owner.toLowerCase()
       && snapshot.target.repo.toLowerCase() === target.repo.toLowerCase() && savedTarget.repo.toLowerCase() === target.repo.toLowerCase()
       && new URL(savedTarget.url).origin === new URL(target.url).origin;
-    if (!sameTarget) throw new Error(`Audit ${id} does not belong to ${target.url}.`);
+    if (!sameTarget) throw new Error(`Assessment attempt ${attemptId ?? auditAttemptId(id)} does not belong to ${target.url}.`);
     // These values will also be used by the constrained file tool, never supplied by the conversation model.
     for (const sha of [snapshot.headSha, snapshot.baseSha]) {
       if (!/^[a-f0-9]{40}$/i.test(sha)) throw new Error("Saved audit has an invalid pinned commit.");
@@ -134,14 +138,15 @@ export function readAudit({ prUrl, auditId, skipId, section = "summary", comment
     const identity = document<{ fingerprint: string | null; policy: string | null }>(AuditIdentity.definition.kind, "conversation", id);
     const cached = runs?.latestSuccess?.conversationId === id ? runs.latestSuccess : null;
     const audit = {
-      prUrl: snapshot.target.url, auditId: id, snapshotId: snapshot.id,
+      prUrl: snapshot.target.url, attemptId: auditAttemptId(id), auditId: id, snapshotId: snapshot.id,
       title: snapshot.title, headSha: snapshot.headSha, baseSha: snapshot.baseSha,
       headRepository: snapshot.headRepository, baseRepository: snapshot.baseRepository,
       startedAt: snapshot.startedAt, fetchedAt: snapshot.fetchedAt,
       status, reportAccepted: accepted, submissionStatus: submission?.status ?? "unknown",
       failure: submission?.status === "unanswered" ? submission.reason : null,
       assessedAt: cached?.assessedAt ?? null, lastCheckedAt: cached?.lastCheckedAt ?? null,
-      latestAttemptId: runs?.active ?? null, cachedSuccessId: runs?.latestSuccess?.conversationId ?? null,
+      latestAuditAttemptId: runs?.active == null ? null : auditAttemptId(runs.active),
+      cachedSuccessAttemptId: runs?.latestSuccess == null ? null : auditAttemptId(runs.latestSuccess.conversationId),
       model: saved.modelCost?.model ?? agent?.model ?? null, policyHash: identity?.policy ?? null,
       limitations: [
         "This is saved audit evidence, not current GitHub thread, approval or merge status.",

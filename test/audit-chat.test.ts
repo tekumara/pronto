@@ -18,8 +18,8 @@ test("discussion retains its selected attempt across restarts, newer successes a
   const github = githubEvidence();
   let mode: "audit" | "chat" | "fail" = "audit";
   let auditTurn = 0;
-  let firstId: number;
-  let newerId: number;
+  let firstAttemptId: string;
+  let newerAttemptId: string;
   let chatTurn = 0;
   const f = await fixture(t, (body, response) => {
     if (mode === "audit") {
@@ -31,33 +31,36 @@ test("discussion retains its selected attempt across restarts, newer successes a
     const latest = body.messages.at(-1)!;
     if (latest.role === "user") {
       switch (latest.content) {
-        case "Select the PR": tool(response, "read_audit", { prUrl, auditId: 0, latest: false, section: "summary", commentKey: "", offset: 0, limit: 8000 }); break;
-        case "Follow up on the same PR": tool(response, "read_audit", { prUrl: "https://github.com/ACME/DEMO/pull/7/", auditId: 0 }); break;
-        case "Switch to the latest": tool(response, "read_audit", { latest: true, auditId: 0, prUrl: "" }); break;
-        case "Go back to the first": tool(response, "read_audit", { auditId: firstId }); break;
-        case "Read the latest failed attempt": tool(response, "read_audit", { latest: true }); break;
+        case "Select the PR": tool(response, "read_audit", { prUrl, section: "summary", commentKey: "", offset: 0, limit: 8000 }); break;
+        case "Follow up on the same PR": tool(response, "read_audit", { prUrl: "https://github.com/ACME/DEMO/pull/7/" }); break;
+        case "Switch to the latest": tool(response, "read_audit", { latest: true, prUrl }); break;
+        case "Go back to the first": tool(response, "read_audit", { prUrl, attemptId: firstAttemptId }); break;
+        case "Read the latest failed attempt": tool(response, "read_audit", { latest: true, prUrl }); break;
         default: assert.fail(`Unexpected question: ${latest.content}`);
       }
       return;
     }
     const saved = JSON.parse(latest.content!);
     assert.equal(saved.audit.headSha, headSha);
-    if (chatTurn === 0) firstId = saved.audit.auditId;
+    assert.equal(saved.audit.attemptId, saved.attemptId);
+    assert.equal("auditId" in saved.audit, false);
+    if (chatTurn === 0) firstAttemptId = saved.audit.attemptId;
     if (chatTurn === 1) {
-      newerId = saved.audit.latestAttemptId;
-      assert.notEqual(newerId, firstId);
+      newerAttemptId = saved.audit.latestAuditAttemptId;
+      assert.notEqual(newerAttemptId, firstAttemptId);
     }
-    if (chatTurn === 0 || chatTurn === 1 || chatTurn === 3) assert.equal(saved.audit.auditId, firstId);
-    if (chatTurn === 2) assert.equal(saved.audit.auditId, newerId);
+    if (chatTurn === 0 || chatTurn === 1 || chatTurn === 3) assert.equal(saved.audit.attemptId, firstAttemptId);
+    if (chatTurn === 2) assert.equal(saved.audit.attemptId, newerAttemptId);
     if (chatTurn === 4) {
-      assert.notEqual(saved.audit.auditId, newerId);
-      assert.equal(saved.audit.cachedSuccessId, newerId, "an older success is identified, not silently selected");
+      assert.notEqual(saved.audit.attemptId, newerAttemptId);
+      assert.equal(saved.audit.latestAuditAttemptId, saved.audit.attemptId);
+      assert.equal(saved.audit.cachedSuccessAttemptId, newerAttemptId, "an older success is identified, not silently selected");
       assert.equal(saved.audit.status, "failed");
       assert.equal(saved.audit.reportAccepted, false);
     } else assert.equal(saved.audit.status, "completed");
     if (chatTurn > 0) assert.ok(body.messages.some((message) => message.role === "user" && message.content === "Select the PR"));
     chatTurn++;
-    reply(response, [{ role: "assistant", content: `Selected saved attempt ${saved.audit.auditId}.` }]);
+    reply(response, [{ role: "assistant", content: `Selected saved attempt ${saved.audit.attemptId}.` }]);
   }, { github: github.handle });
   await f.run("", [prUrl], { entrypoint: auditEntry });
   mode = "chat";
@@ -84,7 +87,7 @@ test("bounded audit reads preserve complete long author replies and their citati
   let auditTurn = 0;
   let content = "";
   let pages = 0;
-  let selectedId: number | undefined;
+  let selectedAttemptId: string | undefined;
   const f = await fixture(t, (body, response) => {
     if (building) {
       if (auditTurn++ === 0) tool(response, "read_github_file", { path: "src/access.ts", revision: "head" });
@@ -96,8 +99,9 @@ test("bounded audit reads preserve complete long author replies and their citati
       return;
     }
     const page = JSON.parse(body.messages.at(-1)!.content!);
-    selectedId ??= page.audit.auditId;
-    assert.equal(page.audit.auditId, selectedId);
+    selectedAttemptId ??= page.attemptId;
+    assert.equal(page.attemptId, selectedAttemptId);
+    assert.equal(page.audit.attemptId, selectedAttemptId);
     assert.equal(page.offset, content.length);
     assert.ok(page.content.length <= 16000);
     content += page.content;
@@ -142,11 +146,20 @@ test("read_audit retrieves persisted skips and keeps them available after an eli
 
   const page = readSavedAuditPage({ prUrl }, null, f.stateDir);
   assert.equal(page.selection?.kind, "skip");
-  assert.equal("skipId" in page.page ? page.page.skipId : undefined, latestSkip.skip.attemptId);
-  assert.ok(!("auditRef" in page.page), "a skip must not manufacture an evidence reference");
+  const skipAttemptId = latestSkip.audit.attemptId;
+  assert.equal(page.selection?.attemptId, skipAttemptId);
+  assert.equal("attemptId" in page.page ? page.page.attemptId : undefined, skipAttemptId);
+  assert.equal("skipId" in page.page ? page.page.skipId : undefined, undefined);
+  assert.equal("auditId" in page.page ? page.page.auditId : undefined, undefined);
+  assert.equal("auditRef" in page.page ? page.page.auditRef : undefined, null, "a skip must not manufacture an evidence reference");
+  const summary = JSON.parse(page.page.content);
+  assert.equal(summary.schemaVersion, 2);
+  assert.equal(summary.attemptId, skipAttemptId);
+  assert.equal("skipId" in summary, false);
   const attempts = readSavedAuditPage({ prUrl, section: "attempts" }, null, f.stateDir);
-  const savedAttempts = JSON.parse(attempts.page.content) as { skips: { attemptId: string }[] };
-  assert.deepEqual(savedAttempts.skips.map(({ attemptId }) => attemptId), [latestSkip.skip.attemptId]);
+  const savedAttempts = JSON.parse(attempts.page.content) as { schemaVersion: number; skips: { attemptId: string }[] };
+  assert.equal(savedAttempts.schemaVersion, 2);
+  assert.deepEqual(savedAttempts.skips.map(({ attemptId }) => attemptId), [skipAttemptId]);
 
   githubOptions.large = false;
   await f.run("", [prUrl], { entrypoint: auditEntry });
@@ -155,7 +168,7 @@ test("read_audit retrieves persisted skips and keeps them available after an eli
   assert.equal(latestAudit.kind, "audit");
   assert.equal(latestAudit.audit.status, "completed");
 
-  const priorSkip = readAudit({ prUrl, skipId: latestSkip.skip.attemptId }, f.stateDir);
+  const priorSkip = readAudit({ prUrl, attemptId: skipAttemptId }, f.stateDir);
   assert.equal(priorSkip.kind, "skip");
   assert.equal(priorSkip.skip.reasonCode, "over_limit");
   const history = readAudit({ prUrl, section: "attempts" }, f.stateDir);
@@ -218,7 +231,7 @@ test("chat rejects missing audits and unsafe tools and constrains additional fil
     { name: "read_github_file", args: { path: "src/access.ts", revision: "head" }, error: /select an existing audit/ },
     { name: "read_audit", args: { prUrl: "https://github.com/acme/demo/pull/8" }, error: /No saved audit/ },
     { name: "read_audit", args: { prUrl: "https://github.com/other/missing/pull/7" }, error: /No saved audit/ },
-    { name: "read_audit", args: { prUrl, auditId: 1 }, error: /Latest saved attempt/ },
+    { name: "read_audit", args: { prUrl, attemptId: "attempt.v1:audit:1" }, error: /Latest saved attempt/ },
     { name: "read_audit", args: { prUrl: "https://example.com/acme/demo/pull/7" }, error: /Expected a GitHub PR URL/ },
     { name: "bash", args: { command: "touch forbidden" }, error: /bash/ },
     { name: "write", args: { path: "forbidden", content: "changed" }, error: /write/ },
@@ -230,7 +243,7 @@ test("chat rejects missing audits and unsafe tools and constrains additional fil
     { name: "read_github_file", args: { path: "src/access.ts", revision: "branch" }, error: /revision/ },
     { name: "read_github_file", args: { path: "src/access.ts", revision: "head", repository: "evil/repo", sha: "main" }, error: /repository|sha/ },
     { name: "read_github_file", args: { path: "src/access.ts", revision: "base", offset: 1, limit: 2 }, error: null },
-    { name: "read_audit", args: { latest: true, auditId: 1 }, error: /not both/ },
+    { name: "read_audit", args: { latest: true, prUrl, attemptId: "attempt.v1:audit:1" }, error: /Use attemptId alone/ },
     { name: "read_audit", args: { limit: 20000 }, error: /limit/ },
   ];
   const f = await fixture(t, (body, response) => {

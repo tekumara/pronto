@@ -13,6 +13,7 @@ import { listRepositoryDatabases, openStateHarness, repositoryDatabaseIdentity }
 import { createAuditDiagnostics, type AuditDiagnostics } from "./audit-diagnostics.ts";
 import { createAuditExecutionGate } from "./audit-execution.ts";
 import { AuditDocument, AuditRuns, AuditSkips, type AuditResult, type AuditSkipSource } from "./audit-records.ts";
+import { skipAttemptId } from "./attempt-id.ts";
 import { auditAssessment } from "./assessment.ts";
 import { createPublisher, pendingReassessments, recoverPublications, waitForPublication } from "./publication.ts";
 import { auditRequest, type AuditLog, type AuditOptions, type AuditOutcome, type RepositoryAudit } from "./request.ts";
@@ -227,7 +228,8 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
           .find((attempt) => attempt.attemptId === skipAttempt.attemptId);
         if (savedSkip) {
           log("info", `Skipped · ${savedSkip.reason}`, `[audit] Skipping ${target.url}: ${savedSkip.reason}`);
-          return { status: "skipped", reason: savedSkip.reason, skipId: savedSkip.attemptId };
+          return { status: "skipped", reason: savedSkip.reason, attemptId: skipAttemptId(savedSkip.attemptId),
+            auditRef: null };
         }
         const retryFailed = failedRecoveries.delete(requestKey);
         const restored = restoredRequests.delete(requestKey);

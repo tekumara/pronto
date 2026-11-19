@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import { auditAttemptId, encodeAuditReference } from "../src/audit/attempt-id.ts";
 import { withTasks } from "@modelcontextprotocol/ext-tasks/client";
 import type { JsonValue } from "@modelcontextprotocol/ext-tasks/core";
 import type { Log } from "../src/logging.ts";
@@ -17,8 +18,10 @@ import { MCP_TASKS_EXTENSION, MCP_TASK_POLL_INTERVAL_MS } from "../src/discussio
 const target = "https://github.com/acme/demo/pull/42";
 type AuditRunner = ReturnType<typeof createMcpAuditRunner>;
 type AuditResult = Awaited<ReturnType<AuditRunner>>;
+const savedAuditId = 31 as unknown as ConversationId;
 const result: AuditResult = {
-  results: [{ prUrl: target, status: "completed", auditId: 31 as unknown as ConversationId, cached: false }],
+  results: [{ prUrl: target, status: "completed", attemptId: auditAttemptId(savedAuditId),
+    auditRef: encodeAuditReference(target, savedAuditId, "snapshot-31"), cached: false }],
   apply: false,
 };
 type RpcResult = {

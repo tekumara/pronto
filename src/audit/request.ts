@@ -13,6 +13,7 @@ import { auditAssessment } from "./assessment.ts";
 import { compileExclusions, excludedPaths, MAX_LISTED_FILES } from "./exclusions.ts";
 import { canonical, evidenceChanges, evidenceFingerprint } from "./fingerprints.ts";
 import { SubmittedAuditReviews, completeReassessment, enqueuePublication, pendingReassessments, publicationChoices, waitForPublication, type recoverPublications } from "./publication.ts";
+import { auditAttemptId, encodeAuditReference, skipAttemptId } from "./attempt-id.ts";
 import { planSkip, planVerdict } from "./verdict.ts";
 
 /** The optional CLI text preserves its detailed transcript; null marks serve-only summaries. */
@@ -133,9 +134,24 @@ export type AuditOptions = {
   exclude?: string[];
 };
 
+export type SavedAuditAttempt =
+  | { kind: "audit"; auditId: ConversationId; snapshotId: string }
+  | { kind: "skip"; skipId: string };
+
+/** An operation can fail after its saved attempt was admitted; preserve that identity for callers. */
+export class AuditAttemptError extends Error {
+  readonly savedAttempt: SavedAuditAttempt;
+  constructor(error: unknown, savedAttempt: SavedAuditAttempt) {
+    super(error instanceof Error ? error.message : String(error));
+    this.name = "AuditAttemptError";
+    this.cause = error;
+    this.savedAttempt = savedAttempt;
+  }
+}
+
 export type AuditOutcome =
-  | { status: "skipped"; reason: string; skipId: string }
-  | { status: "completed"; auditId: ConversationId; cached: boolean };
+  | { status: "skipped"; reason: string; attemptId: string; auditRef: null }
+  | { status: "completed"; attemptId: string; auditRef: string; cached: boolean };
 
 export type RepositoryAudit = {
   database: string;
@@ -171,6 +187,7 @@ export async function auditRequest({ target, options, repository, context, log, 
     options = { ...options, ...publicationChoices(reassessment.choices) };
   }
   let stream: Awaited<ReturnType<Conversation["watch"]>> | undefined;
+  let savedAttempt: SavedAuditAttempt | undefined;
   try {
     const startedAt = new Date().toISOString();
     log("info", "Preparing · fetching GitHub evidence", null);
@@ -189,6 +206,7 @@ export async function auditRequest({ target, options, repository, context, log, 
         ...(excludedLines !== undefined ? { excludedLines } : {}),
       };
       const persisted = await persistSkipAttempt(harness, attempt, intent?.choices.apply ? intent : undefined, reassessment, context);
+      savedAttempt = { kind: "skip", skipId: persisted.attempt.attemptId };
       if (intent) await outputSkip(harness, skipSnapshot, reason, options, intent, existing, persisted.taskId, log, context);
       else log("info", `Skipped · ${reason}`, `[audit] Skipping ${target.url}: ${reason}`);
       return persisted.attempt;
@@ -196,19 +214,19 @@ export async function auditRequest({ target, options, repository, context, log, 
     if (pr.merged) {
       const reason = "PR has already been merged.";
       const saved = await skip(reason, "merged");
-      return { status: "skipped", reason, skipId: saved.attemptId };
+      return { status: "skipped", reason, attemptId: skipAttemptId(saved.attemptId), auditRef: null };
     }
     if ((options.skipDrafts ?? true) && pr.draft) {
       const reason = "PR is a draft. Use --skip-drafts=false to audit anyway.";
       const saved = await skip(reason, "draft");
-      return { status: "skipped", reason, skipId: saved.attemptId };
+      return { status: "skipped", reason, attemptId: skipAttemptId(saved.attemptId), auditRef: null };
     }
     const skipLabels = new Set(options.skipLabels?.map((label) => label.toLowerCase()));
     const skippedLabel = pr.labels?.find((label) => skipLabels.has(label.name.toLowerCase()));
     if (skippedLabel) {
       const reason = `PR has matching skip label: ${JSON.stringify(stripControlCharacters(skippedLabel.name))}.`;
       const saved = await skip(reason, "label");
-      return { status: "skipped", reason, skipId: saved.attemptId };
+      return { status: "skipped", reason, attemptId: skipAttemptId(saved.attemptId), auditRef: null };
     }
     const isExcluded = compileExclusions(options.exclude ?? []);
     let changedLines = (pr.additions ?? 0) + (pr.deletions ?? 0);
@@ -231,7 +249,7 @@ export async function auditRequest({ target, options, repository, context, log, 
       });
       if (uncounted) log("debug", `GitHub gave no line counts for ${uncounted} excluded file${uncounted === 1 ? "" : "s"}, so ${uncounted === 1 ? "it still counts" : "they still count"} toward the limit.`);
       if (excluded.length) outputExcludedFiles(excluded.map((file) => file.path), log);
-      return { status: "skipped", reason, skipId: saved.attemptId };
+      return { status: "skipped", reason, attemptId: skipAttemptId(saved.attemptId), auditRef: null };
     }
     if (options.skipApproved ?? true) {
       const approvers = await findApprovals(target, pr.head.sha, context.abortSignal);
@@ -241,7 +259,7 @@ export async function auditRequest({ target, options, repository, context, log, 
         const approver = ownApproval ?? approvers[0]!;
         const reason = `PR is already approved by ${stripControlCharacters(approver)} at ${pr.head.sha}. Use --skip-approved=false to audit anyway.`;
         const saved = await skip(reason, "approved", { publish: !ownApproval });
-        return { status: "skipped", reason, skipId: saved.attemptId };
+        return { status: "skipped", reason, attemptId: skipAttemptId(saved.attemptId), auditRef: null };
       }
     }
     // Persist restart intent before cancellation/evidence fetching. A crash must not turn a requested restart into
@@ -280,6 +298,7 @@ export async function auditRequest({ target, options, repository, context, log, 
       }
       conversation = existing;
       snapshot = saved.snapshot;
+      savedAttempt = { kind: "audit", auditId: existing.id, snapshotId: snapshot.id };
       const fallbackModelCost = await resolveModelCost(harness, existing.id, context, saved.modelCost);
       await harness.commit(async (tx) => {
         const requests = await tx.doc(PublicationRequests, existing.id);
@@ -316,6 +335,7 @@ export async function auditRequest({ target, options, repository, context, log, 
         const identity = await harness.snapshot(AuditIdentity, cached.conversationId, context);
         if (cached.fingerprint === fingerprint && saved?.snapshot && saved.report
           && identity?.fingerprint === fingerprint && identity.policy === policy) {
+          savedAttempt = { kind: "audit", auditId: cached.conversationId, snapshotId: saved.snapshot.id };
           const modelCost = await resolveModelCost(harness, cached.conversationId, context, saved.modelCost);
           const plan = planVerdict({ snapshot: saved.snapshot, assessments: saved.report,
             databaseMigration: saved.databaseMigration, choices: options, modelCost });
@@ -335,7 +355,8 @@ export async function auditRequest({ target, options, repository, context, log, 
           outputSnapshotExclusions(snapshot, options.exclude, log);
           await outputReport({ harness, plan, log, context, started, conversationId: cached.conversationId,
             taskId: publication, existing, cached: true });
-          return { status: "completed", auditId: cached.conversationId, cached: true };
+          return { status: "completed", attemptId: auditAttemptId(cached.conversationId),
+            auditRef: encodeAuditReference(target.url, cached.conversationId, saved.snapshot.id), cached: true };
         }
         if (!identity?.fingerprint || !identity.policy) refreshReasons.push("saved assessment has no cache identity");
         else {
@@ -369,6 +390,7 @@ export async function auditRequest({ target, options, repository, context, log, 
           runs.controllerTask = controllerTask;
         },
       }, context);
+      savedAttempt = { kind: "audit", auditId: conversation.id, snapshotId: snapshot.id };
       log("info", `Started · ${snapshot.comments.length} comments`, `[audit] ${snapshot.comments.length} comments · head ${snapshot.headSha}`);
       log("debug", `Head: ${snapshot.headSha}`, null);
     }
@@ -463,7 +485,11 @@ export async function auditRequest({ target, options, repository, context, log, 
       // Keep the repository open for every handoff, not just the current output's review type.
       await Promise.allSettled(Object.values(publications).map((id) => waitForPublication(harness, id, context)));
     }
-    return { status: "completed", auditId: conversation.id, cached: false };
+    return { status: "completed", attemptId: auditAttemptId(conversation.id),
+      auditRef: encodeAuditReference(target.url, conversation.id, snapshot.id), cached: false };
+  } catch (error) {
+    if (savedAttempt) throw new AuditAttemptError(error, savedAttempt);
+    throw error;
   } finally {
     await stream?.stop();
   }

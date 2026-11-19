@@ -776,7 +776,8 @@ async function auditMcpClient(url: string, token: string) {
 async function runMcpAudit(client: Client, args: Record<string, unknown>) {
   const result = await client.callTool({ name: "run_audit", arguments: args });
   assert.ok(!result.isError, JSON.stringify(result));
-  return result.structuredContent as { apply: boolean; results: ({ prUrl: string; status: string; auditId?: number; skipId?: string; cached?: boolean; reason?: string })[] };
+  return result.structuredContent as { apply: boolean; results: ({ prUrl: string; status: string; attemptId: string | null;
+    auditRef: string | null; cached?: boolean; reason?: string })[] };
 }
 
 test("one MCP credential reads and runs audits with CLI defaults, models, skips, cache and apply", { timeout: 30_000 }, async (t) => {
@@ -821,14 +822,30 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
 
   const skipped = await runMcpAudit(client, { targets: [prUrl] });
   assert.match(skipped.results[0]!.reason!, /draft/);
-  assert.ok(skipped.results[0]!.skipId);
-  const savedSkip = await client.callTool({ name: "read_audit", arguments: { prUrl, skipId: skipped.results[0]!.skipId } });
+  assert.ok(skipped.results[0]!.attemptId);
+  assert.equal("skipId" in skipped.results[0]!, false);
+  assert.equal("auditId" in skipped.results[0]!, false);
+  assert.equal(skipped.results[0]!.auditRef, null);
+  const savedSkip = await client.callTool({ name: "read_audit", arguments: { prUrl, attemptId: skipped.results[0]!.attemptId } });
   assert.equal(savedSkip.isError, undefined);
-  const savedSkipPage = savedSkip.structuredContent as { skipId: string; audit: { status: string }; content: string; auditRef?: string };
+  const savedSkipPage = savedSkip.structuredContent as { attemptId: string; auditRef: null; audit: { status: string; attemptId: string }; content: string };
   assert.equal(savedSkipPage.audit.status, "skipped");
-  assert.equal(savedSkipPage.skipId, skipped.results[0]!.skipId);
-  assert.equal(savedSkipPage.auditRef, undefined, "skips do not create an audit evidence reference");
-  assert.equal(JSON.parse(savedSkipPage.content).evidenceCollected, false);
+  assert.equal(savedSkipPage.attemptId, skipped.results[0]!.attemptId);
+  assert.equal(savedSkipPage.audit.attemptId, skipped.results[0]!.attemptId);
+  assert.equal("skipId" in savedSkipPage, false);
+  assert.equal("auditId" in savedSkipPage.audit, false);
+  assert.equal(savedSkipPage.auditRef, null, "skips do not create an audit evidence reference");
+  const skipSummary = JSON.parse(savedSkipPage.content);
+  assert.equal(skipSummary.schemaVersion, 2);
+  assert.equal(skipSummary.attemptId, skipped.results[0]!.attemptId);
+  assert.equal("skipId" in skipSummary, false);
+  assert.equal(skipSummary.evidenceCollected, false);
+  const latestSkip = readAudit({ prUrl }, f.stateDir);
+  assert.equal(latestSkip.kind, "skip");
+  assert.equal((await client.callTool({ name: "read_audit", arguments: { prUrl, skipId: latestSkip.skip.attemptId } })).isError, true);
+  assert.equal((await client.callTool({ name: "read_audit", arguments: { prUrl, auditId: 1 } })).isError, true);
+  assert.equal((await client.callTool({ name: "read_audit", arguments: { prUrl, attemptId: latestSkip.skip.attemptId } })).isError, true,
+    "only canonical attempt IDs are accepted");
   const runAuditStart = await out.until(/INFO\s+mcp\s+pronto-audits\/run_audit started requestId=([0-9a-f-]+)/);
   const requestId = runAuditStart[1]!;
   await out.until(new RegExp(`INFO\\s+mcp\\s+pronto-audits/run_audit completed requestId=${requestId} · duration=\\d+\\.\\d+ms`));
@@ -836,11 +853,13 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   assert.equal(skipped.apply, true, "MCP uses the one-shot CLI default, independently of webhook startup flags");
   const labelled = await runMcpAudit(client, { targets: [prUrl], skipDrafts: false, skipLabels: ["unused", "BLOCKED"] });
   assert.match(labelled.results[0]!.reason!, /matching skip label/);
-  assert.ok(labelled.results[0]!.skipId);
-  assert.notEqual(labelled.results[0]!.skipId, skipped.results[0]!.skipId, "a new audit request records a distinct skip attempt");
+  assert.ok(labelled.results[0]!.attemptId);
+  assert.notEqual(labelled.results[0]!.attemptId, skipped.results[0]!.attemptId, "a new audit request records a distinct skip attempt");
   const skipHistory = await client.callTool({ name: "read_audit", arguments: { prUrl, section: "attempts" } });
-  const attempts = JSON.parse((skipHistory.structuredContent as { content: string }).content) as { skips: { attemptId: string }[] };
-  assert.deepEqual(attempts.skips.map(({ attemptId }) => attemptId), [skipped.results[0]!.skipId, labelled.results[0]!.skipId]);
+  const attempts = JSON.parse((skipHistory.structuredContent as { content: string }).content) as {
+    schemaVersion: number; skips: { attemptId: string; auditRef: null }[] };
+  assert.equal(attempts.schemaVersion, 2);
+  assert.deepEqual(attempts.skips.map(({ attemptId }) => attemptId), [skipped.results[0]!.attemptId, labelled.results[0]!.attemptId]);
   assert.equal(gh.reviews.length, 0);
   assert.deepEqual(modelNames, []);
 
@@ -851,14 +870,22 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   assert.equal(first.results[0]!.cached, false);
   assert.deepEqual(modelNames, ["variant"]);
   assert.equal(gh.reviews.length, 0);
-  const saved = await client.callTool({ name: "read_audit", arguments: { prUrl, auditId: first.results[0]!.auditId } });
-  const savedPage = saved.structuredContent as { auditRef: string; audit: { status: string } };
+  assert.ok(first.results[0]!.attemptId);
+  assert.equal("auditId" in first.results[0]!, false);
+  assert.equal("skipId" in first.results[0]!, false);
+  assert.ok(first.results[0]!.auditRef);
+  const saved = await client.callTool({ name: "read_audit", arguments: { prUrl, attemptId: first.results[0]!.attemptId } });
+  const savedPage = saved.structuredContent as { attemptId: string; auditRef: string; audit: { status: string; attemptId: string } };
   assert.equal(savedPage.audit.status, "completed");
+  assert.equal(savedPage.attemptId, first.results[0]!.attemptId);
+  assert.equal(savedPage.audit.attemptId, first.results[0]!.attemptId);
+  assert.equal("auditId" in savedPage.audit, false);
+  assert.equal(savedPage.auditRef, first.results[0]!.auditRef);
   await out.until(/INFO\s+mcp\s+pronto-audits\/read_audit completed · duration=\d+\.\d+ms/);
   const rejectedFile = await client.callTool({ name: "read_github_file", arguments: { auditRef: savedPage.auditRef, path: "../seed.txt", revision: "head" } });
   assert.equal(rejectedFile.isError, true);
   await out.until(/INFO\s+mcp\s+pronto-audits\/read_github_file failed · duration=\d+\.\d+ms/);
-  const files = await client.callTool({ name: "read_audit", arguments: { prUrl, auditId: first.results[0]!.auditId, section: "files" } });
+  const files = await client.callTool({ name: "read_audit", arguments: { prUrl, attemptId: first.results[0]!.attemptId, section: "files" } });
   const file = JSON.parse((files.structuredContent as { content: string }).content)[0];
   assert.equal(file.excluded, true);
   assert.equal(file.patch, null);
@@ -868,7 +895,7 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   assert.equal(currentBranch.results[0]!.prUrl, prUrl);
   assert.equal(currentBranch.results[0]!.cached, true);
   const forced = await runMcpAudit(client, { ...args, force: true });
-  assert.notEqual(forced.results[0]!.auditId, first.results[0]!.auditId);
+  assert.notEqual(forced.results[0]!.attemptId, first.results[0]!.attemptId);
   assert.deepEqual(modelNames, ["variant", "variant"]);
   const defaultPublication = await runMcpAudit(client, { targets: ["7"], model: "local/variant", skipDrafts: false, exclude: ["dist/**"] });
   assert.equal(defaultPublication.apply, true);
@@ -890,6 +917,78 @@ test("one MCP credential reads and runs audits with CLI defaults, models, skips,
   const manyTargets = await client.callTool({ name: "run_audit", arguments: { targets: Array(101).fill(prUrl) } });
   assert.equal(manyTargets.isError, true);
   assert.match(JSON.stringify(manyTargets), /Duplicate PR target/);
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 0);
+});
+
+test("MCP preserves the identity of an assessment that fails after admission", { timeout: 30_000 }, async (t) => {
+  const gh = github();
+  const f = await fixture(t, (_body, response) => reply(response, [{ role: "assistant", content: "No complete assessment." }]),
+    { entrypoint: resolve("src/cli/audit.ts"), github: gh.handler });
+  const token = randomBytes(32).toString("hex");
+  const run = f.start(["serve", "--port", "0", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"],
+    { env: { ...env, PRONTO_MCP_TOKEN: token } });
+  const [, port] = await watchOutput(run.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const client = await auditMcpClient(`http://127.0.0.1:${port}/mcp`, token);
+  t.after(() => client.close());
+
+  const failed = await client.callTool({ name: "run_audit", arguments: { targets: [prUrl], apply: false } });
+  assert.equal(failed.isError, true);
+  const result = (failed.structuredContent as { results: { prUrl: string; status: string; attemptId: string;
+    auditRef: string; error: string }[] }).results[0]!;
+  assert.equal(result.prUrl, prUrl);
+  assert.equal(result.status, "failed");
+  assert.ok(result.attemptId.startsWith("attempt.v1:audit:"));
+  assert.ok(result.auditRef.startsWith("audit.v1:"));
+  assert.match(result.error, /Agent finished without a complete assessment/);
+
+  const saved = await client.callTool({ name: "read_audit", arguments: { prUrl, attemptId: result.attemptId } });
+  assert.equal(saved.isError, undefined);
+  const page = saved.structuredContent as { attemptId: string; auditRef: string; audit: { status: string } };
+  assert.equal(page.attemptId, result.attemptId);
+  assert.equal("auditId" in page.audit, false);
+  assert.equal(page.auditRef, result.auditRef);
+  assert.equal(page.audit.status, "failed", "retrieval reports saved assessment state rather than a publication/result error");
+
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 0);
+});
+
+test("MCP preserves skip identity when reporting fails after the skip is saved", { timeout: 30_000 }, async (t) => {
+  const gh = github();
+  gh.state.merged = true;
+  const f = await fixture(t, () => assert.fail("A skip must not reach the model"), {
+    entrypoint: resolve("src/cli/audit.ts"), github: async (request, response) => {
+      if (request.method === "POST" && request.url === "/github/repos/acme/demo/pulls/7/reviews") {
+        response.writeHead(503).end("Unavailable");
+        return;
+      }
+      return gh.handler(request, response);
+    },
+  });
+  const token = randomBytes(32).toString("hex");
+  const run = f.start(["serve", "--port", "0", "--mcp", "--mcp-public-url", "https://audits.example.test/mcp"],
+    { env: { ...env, PRONTO_MCP_TOKEN: token } });
+  const [, port] = await watchOutput(run.child).until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  const client = await auditMcpClient(`http://127.0.0.1:${port}/mcp`, token);
+  t.after(() => client.close());
+
+  const failed = await client.callTool({ name: "run_audit", arguments: { targets: [prUrl], reportSkips: true, apply: true } });
+  assert.equal(failed.isError, true);
+  const result = (failed.structuredContent as { results: { status: string; attemptId: string;
+    auditRef: null; error: string }[] }).results[0]!;
+  assert.equal(result.status, "failed");
+  assert.ok(result.attemptId.startsWith("attempt.v1:skip:"));
+  assert.match(result.error, /GitHub request failed/);
+
+  const saved = await client.callTool({ name: "read_audit", arguments: { prUrl, attemptId: result.attemptId } });
+  assert.equal(saved.isError, undefined);
+  const page = saved.structuredContent as { attemptId: string; auditRef: null; audit: { status: string } };
+  assert.equal(page.attemptId, result.attemptId);
+  assert.equal("auditId" in page.audit, false);
+  assert.equal(page.auditRef, null);
+  assert.equal(page.audit.status, "skipped", "the saved skip remains distinct from the failed publication operation");
+
   run.child.kill("SIGTERM");
   assert.equal((await run.done).code, 0);
 });
@@ -1005,9 +1104,12 @@ test("MCP batches and webhooks share the concurrency limit and serialize the sam
   const failedUrl = "https://github.com/acme/demo/pull/9";
   const partial = await client.callTool({ name: "run_audit", arguments: { targets: [prUrl, failedUrl], skipApproved: false } });
   assert.equal(partial.isError, true);
-  const results = (partial.structuredContent as { results: { prUrl: string; status: string; error?: string }[] }).results;
+  const results = (partial.structuredContent as { results: { prUrl: string; status: string; attemptId: string | null;
+    auditRef: string | null; error?: string }[] }).results;
   assert.deepEqual(results.map(({ prUrl: url, status }) => [url, status]), [[prUrl, "completed"], [failedUrl, "failed"]]);
   assert.match(results[1]!.error!, /GitHub request failed/);
+  assert.deepEqual([results[1]!.attemptId, results[1]!.auditRef], [null, null],
+    "a failure before an attempt is saved must not claim an attempt identity");
   run.child.kill("SIGTERM");
   const stopped = await run.done;
   assert.equal(stopped.code, 0, stopped.stderr);

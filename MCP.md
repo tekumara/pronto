@@ -59,13 +59,13 @@ Authenticated clients can call `run_audit` with these arguments:
 
 Omitting `approve` and `apply` selects and publishes an approval when eligible; if approval is blocked, the verdict is published as a comment. Pass `apply: false` to preview without publishing, or `approve: false` to publish a comment instead of an approval. For example, `run_audit({targets: ["https://github.com/owner/repo/pull/42"], force: true, apply: false})` reassesses a PR without publishing. These defaults match the one-shot CLI, not the webhook flags passed to `pronto serve`, which remain preview-only unless configured with `--apply`. As with the CLI, previously authorised publications can still recover.
 
-Every request-level skip is saved as a skipped attempt and returned with its `skipId` and reason, without creating an assessment conversation or evidence. Set `reportSkips: true` to also report a skip; MCP audits post that review by default, while `apply: false` previews it. A skip caused by the server's own current approval remains quiet, even with both options, but is still saved locally. Repeated skip reviews are suppressed when a matching receipt is saved locally. This option does not affect verdict reviews for completed audits.
+Every request-level skip is saved as a skipped attempt and returned with an opaque `attemptId` and its reason, without creating an assessment conversation or evidence. Set `reportSkips: true` to also report a skip; MCP audits post that review by default, while `apply: false` previews it. A skip caused by the server's own current approval remains quiet, even with both options, but is still saved locally. Repeated skip reviews are suppressed when a matching receipt is saved locally. This option does not affect verdict reviews for completed audits.
 
 Numbers and branches use the server's `GH_REPO` or Git checkout, not the client's. An omitted target uses the server's current branch. Use explicit PR URLs when that context is not intended. The tool resolves and validates the whole batch before starting audits. The request body is limited to 64 KiB.
 
 If an audit finishes within one second, `run_audit` returns the usual tool result. If it takes longer and the client declares `io.modelcontextprotocol/tasks` in its per-request capabilities, Pronto returns a task handle instead. Clients that do not declare the extension retain the synchronous behavior.
 
-The synchronous result, or the completed task's `result`, contains `apply` and a `results` array in target order. Each result has a `prUrl` and a `status`: `completed`, `skipped` or `failed`. A completed result includes `auditId` and `cached`; a skipped result includes `skipId` and `reason`; a failed result includes `error`. If any PR fails, the tool result has `isError: true` and still includes the other results. Use a completed result's `prUrl` and `auditId` with `read_audit` for its evidence, or its `prUrl` and `skipId` to retrieve that skipped attempt. A skip does not select an older audit.
+The synchronous result, or the completed task's `result`, contains `apply` and a `results` array in target order. Each result has a `prUrl`, a `status` (`completed`, `skipped` or `failed`), and the shared identity fields `attemptId` and `auditRef`. A saved assessment has an opaque `attemptId` and `auditRef` for pinned evidence; a skip has an `attemptId` and null `auditRef`. A failure before an attempt is saved has null identity fields; if work fails after an assessment or skip is saved, its identity is still returned. Completed results also include `cached`; skipped results include `reason`; failed results include `error`. If any PR fails, the tool result has `isError: true` and still includes the other results. Use `attemptId` with `prUrl` to retrieve any saved attempt. A skip does not select an older assessment.
 
 The task handle includes a `taskId`, `ttlMs` and `pollIntervalMs`. Call `tasks/get` with that ID, sending the tasks extension capability on every request, and wait at least the advertised poll interval between polls. Pronto currently asks clients to poll every 1,000 ms. Task IDs and results are stored in the `mcp-tasks.sqlite` database under the configured state directory; completed task records are retained for 24 hours. In-progress tasks resume after a server restart using the audit runner's existing recovery behavior.
 
@@ -127,26 +127,26 @@ The external agent must retain the returned reference in its own conversation hi
 
 ```text
 read_audit({prUrl})
-  → latest saved audit or skipped attempt; an audit returns auditRef, a skip returns skipId
-read_audit({prUrl, skipId, section: "summary"})
-  → that skip's reason, source and pinned commits; no evidence was collected
+  → latest saved assessment or skipped attempt with attemptId; an assessment also returns auditRef
+read_audit({prUrl, attemptId, section: "summary"})
+  → that saved assessment or skip; skips have no evidence
 read_audit({prUrl, section: "attempts"})
-  → saved skip history, including IDs for explicit retrieval
+  → saved skip history with canonical attemptIds
 read_audit({auditRef, section: "findings", commentKey: "inline:101"})
   → the same audit's full assessment and original source for that finding
 read_github_file({auditRef, path: "src/access.ts", revision: "head"})
   → additional numbered code at that audit's pinned commit
 ```
 
-Without an `auditRef` or `skipId`, a PR lookup selects the latest saved attempt. A connection has no remembered selection. An omitted selector is an error, not permission to reuse another client's selection.
+Without a selector, a PR lookup selects the latest saved attempt. To select a particular record, pass its `attemptId` and `prUrl`; an explicit `attemptId` always requires `prUrl`. `auditRef` remains an assessment/evidence selector. A connection has no remembered selection. An omitted selector is an error, not permission to reuse another client's selection.
 
 A retained reference keeps its PR, attempt and snapshot across newer audits, independent clients and MCP restarts. Pronto checks that the saved snapshot still has the expected identity. If evidence has been removed or replaced, the call fails rather than silently selecting different evidence.
 
-To switch deliberately, use `read_audit({prUrl, latest: true})` without the old reference or skip ID. To select an older assessment, supply a positive `auditId`; to select a saved skip, supply its returned `skipId`. Never guess either ID. Metadata identifies the latest attempt and cached success separately; an accepted report is not necessarily a completed audit.
+To switch deliberately, use `read_audit({prUrl, latest: true})` without another selector. To select an older attempt, use its opaque `attemptId`; never parse or invent one. The `attempts` section remains skip history only. Its skip records use `schemaVersion: 2` and expose only canonical `attemptId` values. Metadata exposes `latestAuditAttemptId` and `cachedSuccessAttemptId`, also canonical attempt IDs. An accepted report is not necessarily a completed audit.
 
 ### Retrieve complete sources
 
-`read_audit` provides `summary`, `findings`, `discussion`, `files`, `instructions`, `code` and `attempts`. The default audit `summary` includes each finding's recorded reason, evidence links, source URL and any next step or `awaiting` value. These are the auditor's saved assessments, not independently verified conclusions. A skipped attempt's summary gives its reason and says that no evidence was collected; evidence-only sections are unavailable for it. Use `attempts` to list saved skips. A returned `commentKey` narrows findings or discussion to one saved source.
+`read_audit` provides `summary`, `findings`, `discussion`, `files`, `instructions`, `code` and `attempts`. The default audit `summary` includes each finding's recorded reason, evidence links, source URL and any next step or `awaiting` value. These are the auditor's saved assessments, not independently verified conclusions. A skipped attempt's summary gives its reason and says that no evidence was collected; evidence-only sections are unavailable for it. Use `attempts` to list saved skips only. Skip summary/history JSON uses schema version 2 and exposes the canonical `attemptId`. A returned `commentKey` narrows findings or discussion to one saved source.
 
 Its `content` is a character slice of section JSON, not always a complete JSON value. Each call returns at most 16,000 characters. Follow `nextOffset` with the same reference, section and comment key, join the content, then parse the complete JSON. Summaries with many findings can require multiple pages. Retain the final qualifications of long explanations and replies. Tool results provide the same data as structured content and text.
 

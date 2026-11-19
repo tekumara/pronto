@@ -9,6 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AuditDocument } from "../src/audit/audit-records.ts";
+import { readAudit } from "../src/discussion/audit-reader.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SkillsClient } from "@modelcontextprotocol/client/ext/skills";
 import { auditChatInstructions } from "../src/discussion/audit-skill.ts";
@@ -111,6 +112,15 @@ test("latest MCP client discovers and verifies the canonical skill and retrieves
   const summary = await data(client, "read_audit", { prUrl });
   assert.equal(summary.audit.status, "completed");
   assert.equal(summary.audit.headSha, headSha);
+  assert.equal(summary.audit.attemptId, summary.attemptId);
+  assert.equal("auditId" in summary, false);
+  assert.equal("auditId" in summary.audit, false);
+  const withoutPr = await client.callTool({ name: "read_audit", arguments: { attemptId: summary.attemptId } });
+  assert.equal(withoutPr.isError, true);
+  assert.match(JSON.stringify(withoutPr), /attemptId must be supplied with its prUrl/);
+  const unknownAttempt = await client.callTool({ name: "read_audit", arguments: { prUrl, attemptId: "attempt.v1:audit:999999" } });
+  assert.equal(unknownAttempt.isError, true);
+  assert.match(JSON.stringify(unknownAttempt), /Saved assessment attempt attempt.v1:audit:999999 has no evidence snapshot/);
   const summaryContent = JSON.parse(summary.content);
   assert.equal(summaryContent.counts.outstanding, 1);
   assert.deepEqual(summaryContent.findings.find((finding: { commentKey: string }) => finding.commentKey === "inline:102"), {
@@ -133,7 +143,7 @@ test("latest MCP client discovers and verifies the canonical skill and retrieves
   const manifest = await skills.read(entry);
   assert.equal(manifest.verified, true);
   assert.equal(manifest.body?.trim(), auditChatInstructions, "terminal and MCP must use the same canonical instructions");
-  assert.match(manifest.body!, /Retain the exact `auditRef` or `skipId`/);
+  assert.match(manifest.body!, /Retain the exact `attemptId` and `prUrl`/);
   await assert.rejects(client.readResource({ uri: "file:///etc/passwd" }), /not found|not registered/i);
 
   const finding = (await section(client, { auditRef: summary.auditRef, section: "findings", commentKey: "inline:102" }))[0];
@@ -148,6 +158,8 @@ test("latest MCP client discovers and verifies the canonical skill and retrieves
 
   const inspected = await data(client, "read_github_file", { auditRef: summary.auditRef, path: "src/access.ts", revision: "base", limit: 2 });
   assert.equal(inspected.sha, baseSha);
+  assert.equal(inspected.attemptId, summary.attemptId);
+  assert.equal("auditId" in inspected, false);
   assert.equal(inspected.url, `https://github.com/acme/demo/blob/${baseSha}/src/access.ts#L1-L2`);
   assert.match(inspected.provenance, /Additional.*not saved audit evidence/);
   for (const args of [
@@ -329,7 +341,7 @@ test("audit references survive newer audits, independent clients and restart, bu
   const b = await connect(t, firstServer.url, token);
   const newer = await data(b, "read_audit", { prUrl });
   assert.notEqual(newer.auditRef, first.auditRef);
-  assert.notEqual(newer.audit.auditId, first.audit.auditId);
+  assert.notEqual(newer.audit.attemptId, first.audit.attemptId);
   assert.equal((await section(b, { auditRef: newer.auditRef, section: "findings" }))[0].findings[0].reason, "A newer audit's distinct recorded assessment.");
   assert.deepEqual(await section(a, { auditRef: first.auditRef, section: "findings" }), originalFindings);
   assert.deepEqual(await section(b, { auditRef: first.auditRef, section: "findings" }), originalFindings, "references identify evidence, not a particular connection");
@@ -351,7 +363,9 @@ test("audit references survive newer audits, independent clients and restart, bu
   const writer = createSession(await openNodeSqliteStorage(repositoryPath(f.stateDir)));
   try {
     await writer.commit(async (tx) => {
-      const audit = await tx.doc(AuditDocument, first.audit.auditId as ConversationId);
+      const current = readAudit({ prUrl, attemptId: first.attemptId }, f.stateDir);
+      assert.equal(current.kind, "audit");
+      const audit = await tx.doc(AuditDocument, current.audit.auditId as ConversationId);
       audit.snapshot!.id = "replacement-evidence-identity";
     }, BACKGROUND_CONTEXT);
   } finally { await writer.close(BACKGROUND_CONTEXT); }
@@ -359,7 +373,7 @@ test("audit references survive newer audits, independent clients and restart, bu
   for (const name of ["read_audit", "read_github_file"]) {
     const result = await c.callTool({ name, arguments: { auditRef: first.auditRef,
       ...(name === "read_github_file" ? { path: "src/access.ts", revision: "head" } : {}) } });
-    assert.equal(result.isError, true);
+    assert.equal(result.isError, true, `${name}: ${JSON.stringify(result)}`);
     assert.match(JSON.stringify(result), /evidence identity changed/);
   }
   assert.deepEqual(await readFile(repositoryPath(f.stateDir)), replaced);

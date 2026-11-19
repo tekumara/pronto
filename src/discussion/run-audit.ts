@@ -2,6 +2,8 @@ import { arr, bool, obj, opt, str, type Static } from "@earendil-works/pi-schema
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { validateAuditTargets, type AuditTrigger, type createAuditor } from "../audit/auditor.ts";
+import { auditAttemptId, encodeAuditReference, skipAttemptId } from "../audit/attempt-id.ts";
+import { AuditAttemptError } from "../audit/request.ts";
 import { parseAuditOptions } from "../cli/audit-options.ts";
 import { resolveAuditUrl } from "../cli/pr-discovery.ts";
 import { stripControlCharacters } from "../logging.ts";
@@ -9,7 +11,7 @@ import { selectModel } from "../model.ts";
 
 export const runAuditTool = {
   name: "run_audit",
-  description: "Run the CLI audit for one or more PRs. This can spend model credits and, by default, posts the verdict with the server's GitHub credentials, approving eligible PRs. Set apply=false to preview without publishing or approve=false to publish a comment instead of an approval. Use only when explicitly requested. Defaults match pronto, not serve's webhook flags. Omitted targets select the server's current branch; numbers and branches use the server's Git/GH_REPO, never the client's checkout. Returns a normal result if the audit finishes within one second. If the client declares io.modelcontextprotocol/tasks, longer calls return a durable task; poll tasks/get at its pollIntervalMs. tasks/cancel is cooperative and cannot undo saved audit, skip or publication work. Use read_audit with auditId for completed evidence, or prUrl and skipId to inspect a skipped attempt.",
+  description: "Run the CLI audit for one or more PRs. This can spend model credits and, by default, posts the verdict with the server's GitHub credentials, approving eligible PRs. Set apply=false to preview without publishing or approve=false to publish a comment instead of an approval. Use only when explicitly requested. Defaults match pronto, not serve's webhook flags. Omitted targets select the server's current branch; numbers and branches use the server's Git/GH_REPO, never the client's checkout. Returns a normal result if the audit finishes within one second. If the client declares io.modelcontextprotocol/tasks, longer calls return a durable task; poll tasks/get at its pollIntervalMs. tasks/cancel is cooperative and cannot undo saved audit, skip or publication work. Each saved result has an opaque attemptId; retain it with prUrl for read_audit. Assessment results also include auditRef for pinned evidence. Failures before a saved attempt have null identity fields; failures after a save retain that attempt's identity.",
   parameters: obj({
     targets: opt(arr(str({ minLength: 1 }), { minItems: 1, description: "CLI PR selectors: URL, owner/repo#number, number or branch. Omit for the server's current branch." })),
     model: opt(str({ minLength: 1, description: "CLI provider/model-id; omitted uses the server's CLI default model." })),
@@ -53,10 +55,18 @@ export function createMcpAuditRunner(auditor: ReturnType<typeof createAuditor>, 
       ...options, model: { provider: model.provider, modelId: model.id },
     }, trigger, context)));
     signal.throwIfAborted();
-    const results = settled.map((result, index) => result.status === "fulfilled"
-      ? { prUrl: urls[index]!, ...result.value }
-      : { prUrl: urls[index]!, status: "failed" as const,
-        error: stripControlCharacters(result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 3500) });
+    const results = settled.map((result, index) => {
+      const prUrl = urls[index]!;
+      if (result.status === "fulfilled") return { prUrl, ...result.value };
+      const saved = result.reason instanceof AuditAttemptError ? result.reason.savedAttempt : undefined;
+      const identity = saved?.kind === "audit"
+        ? { attemptId: auditAttemptId(saved.auditId), auditRef: encodeAuditReference(prUrl, saved.auditId, saved.snapshotId) }
+        : saved?.kind === "skip"
+          ? { attemptId: skipAttemptId(saved.skipId), auditRef: null }
+          : { attemptId: null, auditRef: null };
+      return { prUrl, status: "failed" as const, ...identity,
+        error: stripControlCharacters(result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 3500) };
+    });
     return { results, apply: options.apply };
   };
 }

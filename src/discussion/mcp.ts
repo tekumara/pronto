@@ -104,7 +104,7 @@ export async function createAuditMcpEndpoint({ token, publicUrl, root = stateDir
     const mcp = new McpServer({ name: MCP_SERVER_NAME, version: "1.0.0" }, {
       supportedProtocolVersions: [MCP_PROTOCOL_VERSION],
       capabilities: { extensions: { [MCP_TASKS_EXTENSION]: {} } },
-      instructions: `Pronto audit execution and evidence. Load ${skillUri} through the skills extension or resources/read before discussing an audit. Retain the auditRef for assessment evidence or the skipId and PR URL for a skipped attempt returned by read_audit; every request is independent. Long run_audit calls can return an MCP task when the client declares the tasks extension.`,
+      instructions: `Pronto audit execution and evidence. Load ${skillUri} through the skills extension or resources/read before discussing an audit. Retain the canonical attemptId and PR URL returned by run_audit or read_audit; auditRef additionally selects pinned evidence. Every request is independent. Long run_audit calls can return an MCP task when the client declares the tasks extension.`,
     });
     skills.attach(mcp);
     mcp.server.setRequestHandler("tasks/get", { params: taskIdSchema }, async ({ taskId }, ctx) => {

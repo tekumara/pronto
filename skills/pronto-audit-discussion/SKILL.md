@@ -10,13 +10,13 @@ This skill covers discussion of existing Pronto audits. Discussion alone does no
 
 ## Select and retain the evidence
 
-Use `read_audit` before answering questions about a PR's audit. Supply the GitHub PR URL in `prUrl` initially. The result identifies the latest saved attempt. A real assessment returns an `auditRef`; a skipped attempt returns a `skipId`, its reason and an explicit note that no evidence was collected.
+Use `read_audit` before answering questions about a PR's audit. Supply the GitHub PR URL in `prUrl` initially. The result identifies the latest saved attempt with a canonical opaque `attemptId`. An assessment also returns an `auditRef` for pinned evidence; a skip gives its reason and explicitly says no evidence was collected.
 
-Retain the exact `auditRef` or `skipId` and pass it on follow-up calls. An `auditRef` is for evidence-backed assessment attempts; a `skipId` must be paired with `prUrl` and selects a skip record. Never invent or edit either identifier. Remote MCP calls are stateless: a server connection does not remember your selection. Keep the reference in your own conversation history.
+Retain the exact `attemptId` and `prUrl` for any saved attempt and pass both on follow-up calls. `attemptId` is opaque and must not be parsed or edited. `auditRef` remains specific to assessments and enables pinned-code retrieval. Remote MCP calls are stateless: a server connection does not remember your selection. Keep the identifiers in your own conversation history.
 
-Terminal chat also remembers the selected attempt when arguments are omitted. Its `auditId=0` default keeps that selection, or selects the latest initially. Use section `attempts` to list recorded skips; a skipped attempt has no pinned code to inspect.
+Terminal chat also remembers the selected attempt when selector arguments are omitted. An explicit `attemptId` must always include `prUrl`. Use section `attempts` to list saved skip history only; schema version 2 records expose canonical `attemptId` values. A skipped attempt has no pinned code to inspect.
 
-Switch only when the user asks. To select the latest, supply `prUrl` and `latest=true`, without the old `auditRef`. To select a particular attempt, use a positive `auditId` explicitly supplied by the user or returned by a tool; never guess an ID.
+Switch only when the user asks. To select the latest, supply `prUrl` and `latest=true`, without another selector. To select a particular attempt, use its exact `attemptId` with `prUrl`; never guess an ID.
 
 An error about a particular attempt does not mean the PR has no saved audit. Retry the default PR lookup if an unrequested ID was invalid. A missing audit is a limitation, not permission to start one.
 
