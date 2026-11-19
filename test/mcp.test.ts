@@ -10,6 +10,7 @@ import { createSession, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AuditDocument } from "../src/audit/audit-records.ts";
 import { readAudit } from "../src/discussion/audit-reader.ts";
+import { decodeAttemptId } from "../src/audit/attempt-id.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SkillsClient } from "@modelcontextprotocol/client/ext/skills";
 import { auditChatInstructions } from "../src/discussion/audit-skill.ts";
@@ -112,9 +113,9 @@ test("latest MCP client discovers and verifies the canonical skill and retrieves
   const summary = await data(client, "read_audit", { prUrl });
   assert.equal(summary.audit.status, "completed");
   assert.equal(summary.audit.headSha, headSha);
-  assert.equal(summary.audit.attemptId, summary.attemptId);
   assert.equal("auditId" in summary, false);
-  assert.equal("auditId" in summary.audit, false);
+  assert.equal("attemptId" in summary.audit, false);
+  assert.equal("auditRef" in summary.audit, false);
   const withoutPr = await client.callTool({ name: "read_audit", arguments: { attemptId: summary.attemptId } });
   assert.equal(withoutPr.isError, true);
   assert.match(JSON.stringify(withoutPr), /attemptId must be supplied with its prUrl/);
@@ -341,7 +342,7 @@ test("audit references survive newer audits, independent clients and restart, bu
   const b = await connect(t, firstServer.url, token);
   const newer = await data(b, "read_audit", { prUrl });
   assert.notEqual(newer.auditRef, first.auditRef);
-  assert.notEqual(newer.audit.attemptId, first.audit.attemptId);
+  assert.notEqual(newer.attemptId, first.attemptId);
   assert.equal((await section(b, { auditRef: newer.auditRef, section: "findings" }))[0].findings[0].reason, "A newer audit's distinct recorded assessment.");
   assert.deepEqual(await section(a, { auditRef: first.auditRef, section: "findings" }), originalFindings);
   assert.deepEqual(await section(b, { auditRef: first.auditRef, section: "findings" }), originalFindings, "references identify evidence, not a particular connection");
@@ -365,7 +366,9 @@ test("audit references survive newer audits, independent clients and restart, bu
     await writer.commit(async (tx) => {
       const current = readAudit({ prUrl, attemptId: first.attemptId }, f.stateDir);
       assert.equal(current.kind, "audit");
-      const audit = await tx.doc(AuditDocument, current.audit.auditId as ConversationId);
+      const locator = decodeAttemptId(current.attemptId);
+      assert.equal(locator.kind, "audit");
+      const audit = await tx.doc(AuditDocument, locator.auditId as ConversationId);
       audit.snapshot!.id = "replacement-evidence-identity";
     }, BACKGROUND_CONTEXT);
   } finally { await writer.close(BACKGROUND_CONTEXT); }

@@ -18,8 +18,7 @@ export function skipAttemptId(skipId: string): string {
 
 /** Parse the canonical, versioned saved-attempt locator. */
 export function decodeAttemptId(value: string): AttemptLocator {
-  if (value.length > 1024 || !value.trim()) throw new Error("attemptId must be a non-empty saved attempt ID.");
-  if (!value.startsWith(AUDIT_ATTEMPT_ID_PREFIX)) throw new Error("Invalid attemptId. Use the exact ID returned by run_audit or read_audit.");
+  if (value.length > 1024) throw new Error("attemptId must be a non-empty saved attempt ID.");
   const match = /^attempt\.v1:(audit|skip):(.+)$/.exec(value);
   if (!match) throw new Error("Invalid attemptId. Use the exact ID returned by run_audit or read_audit.");
   if (match[1] === "audit") {

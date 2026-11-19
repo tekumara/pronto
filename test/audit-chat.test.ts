@@ -7,6 +7,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createSession, defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readAudit } from "../src/discussion/audit-reader.ts";
+import { decodeAttemptId } from "../src/audit/attempt-id.ts";
 import { readSavedAuditPage } from "../src/discussion/audit-tools.ts";
 import { previewFixture as fixture, reply, tool } from "./fixtures.ts";
 import { prUrl, headSha, baseSha, commentUrl, githubEvidence, assessments, auditCheckpointHook } from "./audit-evidence.ts";
@@ -42,25 +43,26 @@ test("discussion retains its selected attempt across restarts, newer successes a
     }
     const saved = JSON.parse(latest.content!);
     assert.equal(saved.audit.headSha, headSha);
-    assert.equal(saved.audit.attemptId, saved.attemptId);
+    assert.equal("attemptId" in saved.audit, false);
+    assert.equal("auditRef" in saved.audit, false);
     assert.equal("auditId" in saved.audit, false);
-    if (chatTurn === 0) firstAttemptId = saved.audit.attemptId;
+    if (chatTurn === 0) firstAttemptId = saved.attemptId;
     if (chatTurn === 1) {
       newerAttemptId = saved.audit.latestAuditAttemptId;
       assert.notEqual(newerAttemptId, firstAttemptId);
     }
-    if (chatTurn === 0 || chatTurn === 1 || chatTurn === 3) assert.equal(saved.audit.attemptId, firstAttemptId);
-    if (chatTurn === 2) assert.equal(saved.audit.attemptId, newerAttemptId);
+    if (chatTurn === 0 || chatTurn === 1 || chatTurn === 3) assert.equal(saved.attemptId, firstAttemptId);
+    if (chatTurn === 2) assert.equal(saved.attemptId, newerAttemptId);
     if (chatTurn === 4) {
-      assert.notEqual(saved.audit.attemptId, newerAttemptId);
-      assert.equal(saved.audit.latestAuditAttemptId, saved.audit.attemptId);
+      assert.notEqual(saved.attemptId, newerAttemptId);
+      assert.equal(saved.audit.latestAuditAttemptId, saved.attemptId);
       assert.equal(saved.audit.cachedSuccessAttemptId, newerAttemptId, "an older success is identified, not silently selected");
       assert.equal(saved.audit.status, "failed");
       assert.equal(saved.audit.reportAccepted, false);
     } else assert.equal(saved.audit.status, "completed");
     if (chatTurn > 0) assert.ok(body.messages.some((message) => message.role === "user" && message.content === "Select the PR"));
     chatTurn++;
-    reply(response, [{ role: "assistant", content: `Selected saved attempt ${saved.audit.attemptId}.` }]);
+    reply(response, [{ role: "assistant", content: `Selected saved attempt ${saved.attemptId}.` }]);
   }, { github: github.handle });
   await f.run("", [prUrl], { entrypoint: auditEntry });
   mode = "chat";
@@ -101,7 +103,7 @@ test("bounded audit reads preserve complete long author replies and their citati
     const page = JSON.parse(body.messages.at(-1)!.content!);
     selectedAttemptId ??= page.attemptId;
     assert.equal(page.attemptId, selectedAttemptId);
-    assert.equal(page.audit.attemptId, selectedAttemptId);
+    assert.equal("attemptId" in page.audit, false);
     assert.equal(page.offset, content.length);
     assert.ok(page.content.length <= 16000);
     content += page.content;
@@ -139,26 +141,26 @@ test("read_audit retrieves persisted skips and keeps them available after an eli
   const latestSkip = readAudit({ prUrl }, f.stateDir);
   assert.equal(latestSkip.kind, "skip");
   assert.equal(latestSkip.audit.status, "skipped");
-  assert.equal(latestSkip.skip.reasonCode, "over_limit");
-  assert.equal(latestSkip.skip.changedLines, 35_000);
-  assert.equal(latestSkip.skip.lineLimit, 10_000);
-  assert.equal(latestSkip.data && (latestSkip.data as { evidenceCollected: boolean }).evidenceCollected, false);
+  const skipSummary = latestSkip.data as { reasonCode: string; changedLines?: number; lineLimit?: number; evidenceCollected: boolean };
+  assert.equal(skipSummary.reasonCode, "over_limit");
+  assert.equal(skipSummary.changedLines, 35_000);
+  assert.equal(skipSummary.lineLimit, 10_000);
+  assert.equal(skipSummary.evidenceCollected, false);
 
   const page = readSavedAuditPage({ prUrl }, null, f.stateDir);
   assert.equal(page.selection?.kind, "skip");
-  const skipAttemptId = latestSkip.audit.attemptId;
+  const skipAttemptId = latestSkip.attemptId;
   assert.equal(page.selection?.attemptId, skipAttemptId);
   assert.equal("attemptId" in page.page ? page.page.attemptId : undefined, skipAttemptId);
+  assert.equal("attemptId" in page.page.audit ? page.page.audit.attemptId : undefined, undefined);
   assert.equal("skipId" in page.page ? page.page.skipId : undefined, undefined);
   assert.equal("auditId" in page.page ? page.page.auditId : undefined, undefined);
   assert.equal("auditRef" in page.page ? page.page.auditRef : undefined, null, "a skip must not manufacture an evidence reference");
   const summary = JSON.parse(page.page.content);
-  assert.equal(summary.schemaVersion, 2);
   assert.equal(summary.attemptId, skipAttemptId);
   assert.equal("skipId" in summary, false);
   const attempts = readSavedAuditPage({ prUrl, section: "attempts" }, null, f.stateDir);
-  const savedAttempts = JSON.parse(attempts.page.content) as { schemaVersion: number; skips: { attemptId: string }[] };
-  assert.equal(savedAttempts.schemaVersion, 2);
+  const savedAttempts = JSON.parse(attempts.page.content) as { skips: { attemptId: string }[] };
   assert.deepEqual(savedAttempts.skips.map(({ attemptId }) => attemptId), [skipAttemptId]);
 
   githubOptions.large = false;
@@ -170,10 +172,10 @@ test("read_audit retrieves persisted skips and keeps them available after an eli
 
   const priorSkip = readAudit({ prUrl, attemptId: skipAttemptId }, f.stateDir);
   assert.equal(priorSkip.kind, "skip");
-  assert.equal(priorSkip.skip.reasonCode, "over_limit");
+  assert.equal((priorSkip.data as { reasonCode: string }).reasonCode, "over_limit");
   const history = readAudit({ prUrl, section: "attempts" }, f.stateDir);
   assert.equal(history.kind, "audit");
-  assert.deepEqual((history.data as { skips: { attemptId: string }[] }).skips.map(({ attemptId }) => attemptId), [latestSkip.skip.attemptId]);
+  assert.deepEqual((history.data as { skips: { attemptId: string }[] }).skips.map(({ attemptId }) => attemptId), [latestSkip.attemptId]);
 });
 
 for (const crash of ["report", "publication"] as const) {
@@ -330,7 +332,9 @@ test("older audits disclose missing instructions and code evidence rather than i
     checkpointWhen: () => false, initial: () => ({}) });
   const session = createSession(await openNodeSqliteStorage(repositoryPath(f.stateDir)));
   try {
-    await session.commit(async (tx) => { delete (await tx.doc(agent, saved.audit.auditId as ConversationId)).instructions; }, BACKGROUND_CONTEXT);
+    const locator = decodeAttemptId(saved.attemptId);
+    assert.equal(locator.kind, "audit");
+    await session.commit(async (tx) => { delete (await tx.doc(agent, locator.auditId as ConversationId)).instructions; }, BACKGROUND_CONTEXT);
   } finally { await session.close(BACKGROUND_CONTEXT); }
   building = false;
   const original = await readFile(repositoryPath(f.stateDir));

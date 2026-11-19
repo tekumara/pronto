@@ -1,8 +1,7 @@
 import { bool, compile, int, obj, oneOf, opt, str, type Static } from "@earendil-works/pi-schema";
 import { readAudit, type AuditSelection } from "./audit-reader.ts";
-import { auditAttemptId, decodeAttemptId, encodeAuditReference, skipAttemptId, AUDIT_REFERENCE_PREFIX } from "../audit/attempt-id.ts";
+import { auditAttemptId, decodeAttemptId, encodeAuditReference, AUDIT_REFERENCE_PREFIX } from "../audit/attempt-id.ts";
 import { parseReviewTarget, readGithubFile } from "../github/reviews.ts";
-import type { AuditSkipAttempt } from "../audit/audit-records.ts";
 const referenceValue = compile(obj({
   prUrl: str({ minLength: 1, maxLength: 2048 }),
   auditId: int({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
@@ -59,78 +58,47 @@ export const savedAuditTool = {
   outputLimits: { maxBytes: 150_000, maxLines: 2_000 },
 };
 export type SavedAuditArguments = Static<typeof savedAuditTool.parameters>;
-function normalizeSelection(value?: AuditSelection | null): AuditSelection | undefined {
-  if (!value) return undefined;
-  const locator = decodeAttemptId(value.attemptId);
-  if (value.kind !== locator.kind) throw new Error("The remembered selection has an invalid attemptId.");
-  if (value.kind === "audit") {
-    if (!value.snapshotId || locator.kind !== "audit") throw new Error("The remembered assessment selection is invalid.");
-    return { kind: "audit", prUrl: value.prUrl, snapshotId: value.snapshotId, attemptId: value.attemptId };
-  }
-  if (locator.kind !== "skip") throw new Error("The remembered skip selection is invalid.");
-  return { kind: "skip", prUrl: value.prUrl, attemptId: value.attemptId };
-}
-
-function publicAuditMetadata(audit: Record<string, unknown>) {
-  const { auditId: _auditId, snapshotId: _snapshotId, skipId: _skipId, ...metadata } = audit;
-  return metadata;
-}
-
-function publicSkipAttempt(attempt: AuditSkipAttempt) {
-  const { attemptId, ...record } = attempt;
-  return { ...record, attemptId: skipAttemptId(attemptId), auditRef: null };
-}
 
 /** Shared retrieval interface; only the terminal adapter supplies an implicit selection. */
 export function readSavedAuditPage(args: SavedAuditArguments, current?: AuditSelection | null, root?: string) {
   const explicit = args.auditRef?.trim() ? decodeReference(args.auditRef.trim()) : undefined;
-  const currentSelection = normalizeSelection(current);
   const requestedAttemptId = args.attemptId?.trim() || undefined;
-  const attempt = requestedAttemptId ? decodeAttemptId(requestedAttemptId) : undefined;
-  const prUrl = args.prUrl?.trim() || explicit?.prUrl || currentSelection?.prUrl;
-  if (attempt && !args.prUrl?.trim()) throw new Error("attemptId must be supplied with its prUrl.");
+  const prUrl = args.prUrl?.trim() || explicit?.prUrl || current?.prUrl;
+  if (requestedAttemptId && !args.prUrl?.trim()) throw new Error("attemptId must be supplied with its prUrl.");
   if (!prUrl) throw new Error("Provide a GitHub PR URL or a saved audit reference to select an existing attempt.");
-  if (attempt && (explicit || args.latest)) throw new Error("Use attemptId alone with prUrl to select a saved attempt.");
-  if (explicit && (args.latest || attempt || !samePr(prUrl, explicit.prUrl))) {
+  if (requestedAttemptId && (explicit || args.latest)) throw new Error("Use attemptId alone with prUrl to select a saved attempt.");
+  if (explicit && (args.latest || requestedAttemptId || !samePr(prUrl, explicit.prUrl))) {
     throw new Error("Use auditRef alone for the selected attempt; omit it when selecting a different attempt.");
   }
-  const selection = explicit ?? (!attempt && currentSelection && samePr(prUrl, currentSelection.prUrl)
-    && !args.latest ? currentSelection : undefined);
+  const selection = explicit ?? (!requestedAttemptId && current && samePr(prUrl, current.prUrl)
+    && !args.latest ? current : undefined);
   const selectedAttemptId = requestedAttemptId ?? selection?.attemptId;
   const commentKey = args.commentKey?.trim() || undefined;
   const section = args.section ?? "summary";
   const saved = readAudit({ prUrl, attemptId: selectedAttemptId, section, commentKey }, root);
-  let data = saved.data;
-  if (section === "attempts") {
-    const history = saved.data as { skips: AuditSkipAttempt[] };
-    data = { schemaVersion: 2, skips: history.skips.map(publicSkipAttempt) };
-  } else if (saved.kind === "skip" && section === "summary") {
-    data = { ...publicSkipAttempt(saved.skip), status: "skipped", evidenceCollected: false, schemaVersion: 2 };
-  }
-  const content = JSON.stringify(data);
+  const content = JSON.stringify(saved.data);
   const offset = args.offset ?? 0;
   const end = Math.min(content.length, offset + (args.limit ?? 8_000));
   if (offset >= content.length) throw new Error(`Offset exceeds section length (${content.length} characters).`);
   if (saved.kind === "skip") {
-    if (selection?.kind === "audit" || attempt?.kind === "audit") throw new Error("The selected audit reference does not identify a skipped attempt.");
-    const attemptId = skipAttemptId(saved.skip.attemptId);
+    if (selection?.kind === "audit") throw new Error("The selected audit reference does not identify a skipped attempt.");
+    const { attemptId } = saved;
     const selected: AuditSelection = { kind: "skip", prUrl: saved.audit.prUrl, attemptId };
-    const audit = { ...publicAuditMetadata(saved.audit), attemptId, auditRef: null };
-    const page = { attemptId, auditRef: null, audit, section,
+    const page = { attemptId, auditRef: null, audit: saved.audit, section,
       commentKey: null, offset, totalChars: content.length, nextOffset: end < content.length ? end : null,
       content: content.slice(offset, end) };
     if (Buffer.byteLength(JSON.stringify(page)) > savedAuditTool.outputLimits.maxBytes) throw new Error("Saved skipped-attempt metadata exceeds the retrieval byte limit.");
     return { selection: selected, page };
   }
-  if (selection?.kind === "skip" || attempt?.kind === "skip") throw new Error("The selected skip reference does not identify an audit.");
-  if (selection?.kind === "audit" && saved.audit.snapshotId !== selection.snapshotId) {
+  if (selection?.kind === "skip") throw new Error("The selected skip reference does not identify an audit.");
+  if (selection?.kind === "audit" && saved.snapshot.id !== selection.snapshotId) {
     throw new Error("The selected audit's evidence identity changed. Select an attempt explicitly.");
   }
+  const { attemptId } = saved;
   const selected: AuditSelection = { kind: "audit", prUrl: saved.audit.prUrl,
-    snapshotId: saved.audit.snapshotId, attemptId: auditAttemptId(saved.audit.auditId) };
+    snapshotId: saved.snapshot.id, attemptId };
   const auditRef = encodeReference(selected);
-  const audit = { ...publicAuditMetadata(saved.audit), attemptId: selected.attemptId, auditRef };
-  const page = { attemptId: selected.attemptId, auditRef, audit, section,
+  const page = { attemptId, auditRef, audit: saved.audit, section,
     commentKey: commentKey ?? null, offset, totalChars: content.length,
     nextOffset: end < content.length ? end : null, content: content.slice(offset, end) };
   if (Buffer.byteLength(JSON.stringify(page)) > savedAuditTool.outputLimits.maxBytes) throw new Error("Saved audit metadata exceeds the retrieval byte limit.");
@@ -150,13 +118,11 @@ export const pinnedFileTool = {
 export type PinnedFileArguments = Static<typeof pinnedFileTool.parameters>;
 
 export async function readPinnedAuditFile(args: PinnedFileArguments, current?: AuditSelection | null, root?: string, signal?: AbortSignal) {
-  const selection = args.auditRef?.trim() ? decodeReference(args.auditRef.trim()) : normalizeSelection(current);
+  const selection = args.auditRef?.trim() ? decodeReference(args.auditRef.trim()) : current ?? undefined;
   if (!selection) throw new Error("Use read_audit to select an existing audit, then pass its auditRef before reading code.");
   if (selection.kind === "skip") throw new Error("Skipped attempts have no pinned audit code to read.");
-  const locator = decodeAttemptId(selection.attemptId);
-  if (locator.kind !== "audit") throw new Error("A pinned-file reference requires an assessment attempt.");
   const saved = readAudit({ prUrl: selection.prUrl, attemptId: selection.attemptId }, root);
-  if (saved.kind !== "audit" || saved.audit.snapshotId !== selection.snapshotId) throw new Error("The selected audit's evidence identity changed. Select an attempt explicitly.");
+  if (saved.kind !== "audit" || saved.snapshot.id !== selection.snapshotId) throw new Error("The selected audit's evidence identity changed. Select an attempt explicitly.");
   const code = { attemptId: selection.attemptId, auditRef: encodeReference(selection),
     provenance: "Additional pinned-code inspection for this discussion, not saved audit evidence.",
     ...await readGithubFile(saved.snapshot, args.path, args.revision, args.offset ?? 1, args.limit ?? 200, signal) };

@@ -88,7 +88,8 @@ test("chat retrieves original findings, replies, rubric and pinned code through 
     const page = () => {
       const value = JSON.parse(latest);
       assert.equal(value.attemptId, selectedAttemptId);
-      assert.equal(value.audit.attemptId, selectedAttemptId);
+      assert.equal("attemptId" in value.audit, false);
+      assert.equal("auditRef" in value.audit, false);
       assert.equal("auditId" in value.audit, false);
       assert.equal(value.audit.headSha, headSha);
       assert.equal(value.audit.status, "completed");

@@ -14,7 +14,7 @@ Use `read_audit` before answering questions about a PR's audit. Supply the GitHu
 
 Retain the exact `attemptId` and `prUrl` for any saved attempt and pass both on follow-up calls. `attemptId` is opaque and must not be parsed or edited. `auditRef` remains specific to assessments and enables pinned-code retrieval. Remote MCP calls are stateless: a server connection does not remember your selection. Keep the identifiers in your own conversation history.
 
-Terminal chat also remembers the selected attempt when selector arguments are omitted. An explicit `attemptId` must always include `prUrl`. Use section `attempts` to list saved skip history only; schema version 2 records expose canonical `attemptId` values. A skipped attempt has no pinned code to inspect.
+Terminal chat also remembers the selected attempt when selector arguments are omitted. An explicit `attemptId` must always include `prUrl`. Use section `attempts` to list saved skip history only; each record exposes its canonical `attemptId`. A skipped attempt has no pinned code to inspect.
 
 Switch only when the user asks. To select the latest, supply `prUrl` and `latest=true`, without another selector. To select a particular attempt, use its exact `attemptId` with `prUrl`; never guess an ID.
 
