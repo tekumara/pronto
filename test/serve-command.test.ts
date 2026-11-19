@@ -277,6 +277,65 @@ test("serve durably waits for the first required review and includes its inline 
   assert.equal(result.code, 0, result.stderr);
 });
 
+test("serve retries a merged required-review gate after a transient PR lookup failure", { timeout: 40_000 }, async (t) => {
+  const gh = github();
+  const pullPath = "/repos/acme/demo/pulls/7";
+  const reviewPath = `${pullPath}/reviews`;
+  let failNextPullLookup = false;
+  let modelCalls = 0;
+  const f = await fixture(t, () => {
+    modelCalls++;
+    assert.fail("A merged PR should be skipped without calling the model");
+  }, {
+    entrypoint: resolve("src/cli/audit.ts"),
+    github: async (request, response) => {
+      const path = request.url?.split("?")[0] ?? "";
+      if (request.method === "GET" && path.endsWith(reviewPath)) {
+        response.writeHead(404).end("Review history unavailable");
+        return;
+      }
+      if (failNextPullLookup && request.method === "GET" && path.endsWith(pullPath)) {
+        failNextPullLookup = false;
+        response.writeHead(503).end("Temporary GitHub error");
+        return;
+      }
+      await gh.handler(request, response);
+    },
+  });
+  const args = ["serve", "--port", "0", "--require-review-from", "copilot-pull-request-reviewer[bot]"];
+  const first = f.start(args, { env });
+  const firstOut = watchOutput(first.child);
+  const firstErrors = watchOutput(first.child, "stderr");
+  const [, port] = await firstOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  assert.deepEqual(await (await deliver(`http://127.0.0.1:${port}`, reviewRequested("me", prUrl))).json(), { status: "queued" });
+  await firstErrors.until(/GitHub request failed \(404\)/);
+  first.child.kill("SIGKILL");
+  await first.done;
+
+  failNextPullLookup = true;
+  const second = f.start(args, { env });
+  const secondOut = watchOutput(second.child);
+  const secondErrors = watchOutput(second.child, "stderr");
+  await secondOut.until(/Listening on http:\/\/127\.0\.0\.1:(\d+)\/webhook/);
+  await secondOut.until(/INFO\s+acme\/demo#7\s+Recovering audit · required-review gate pending for copilot-pull-request-reviewer\[bot\]/);
+  await secondErrors.until(/GitHub request failed \(503\)/);
+  assert.equal(modelCalls, 0, "an unavailable merge status must not dispatch the audit");
+  assert.doesNotMatch(secondOut.output, /Skipped · PR has already been merged\./, "a failed merge lookup must not be mistaken for a merged result");
+
+  gh.state.merged = true;
+  await secondOut.until(/INFO\s+acme\/demo#7\s+Skipped · PR has already been merged\./);
+  assert.equal(modelCalls, 0);
+  second.child.kill("SIGTERM");
+  const result = await second.done;
+  assert.equal(result.code, 0, result.stderr);
+
+  const saved = readAudit({ prUrl, section: "attempts" }, f.stateDir);
+  assert.equal(saved.kind, "skip");
+  const skips = (saved.data as { skips: { reasonCode: string }[] }).skips;
+  assert.equal(skips.length, 1);
+  assert.equal(skips[0]!.reasonCode, "merged");
+});
+
 test("wakes the required-review gate when a configured reviewer submits a review", { timeout: 20_000 }, async (t) => {
   const gh = github();
   const model = hangingModel();

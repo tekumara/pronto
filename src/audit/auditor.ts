@@ -69,7 +69,7 @@ export function createAuditor(models: ModelRuntime, { labelOutput = true, log: o
     },
     onReviewWait: (url, missing) => output?.("info", auditLabel(url), `Waiting for required review from ${missing.join(", ")}`),
     onReviewSatisfied: (url) => output?.("info", auditLabel(url), "Required reviewer review received"),
-    onReviewError: (url, error) => output?.("warn", auditLabel(url), `Could not check required reviewer reviews; gate remains closed: ${error instanceof Error ? error.message : String(error)}`),
+    onReviewError: (url, error) => output?.("warn", auditLabel(url), `GitHub gate check failed; gate remains closed: ${error instanceof Error ? error.message : String(error)}`),
   }) : undefined;
 
   const repositoryKey = (target: ReviewTarget) => `${new URL(target.url).origin}/${target.owner.toLowerCase()}/${target.repo.toLowerCase()}`;

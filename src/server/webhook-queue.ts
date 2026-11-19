@@ -2,7 +2,7 @@ import type { Context, JsonValue } from "@earendil-works/chord";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { defineDoc, defineExtension, defineTask, ROOT_CONVERSATION_ID, type Harness, type TaskId } from "@earendil-works/pi-durable";
 import { missingReviewerReviews, reviewerPollDelayMs, waitForReviewerWakeOrPoll, type ReviewerWakeups } from "../audit/reviewer-gate.ts";
-import { auditTargetKey, parseReviewTarget } from "../github/reviews.ts";
+import { auditTargetKey, fetchPullRequest, parseReviewTarget } from "../github/reviews.ts";
 import { createAuditQueue, type Enqueued } from "./audit-queue.ts";
 
 type Pending = { url: string; task: TaskId<null>; running: boolean; rerun: boolean; requiredReviewers?: string[]; reason?: string };
@@ -101,24 +101,42 @@ export function createWebhookQueue({ concurrency, audit, onError, beforeDispatch
             phase: "review", attempt: task.state.checkpoint.attempt + 1,
           }, context);
         };
+        const releaseGate = async () => {
+          schedule(task.input.url, task.id);
+          await runtime.sleepUntil(runtime.now(), { phase: "dispatch", attempt: 0 }, context);
+        };
         try {
-          let missing: string[];
+          let blockedBy: { missing: string[] } | { error: unknown } | undefined;
           try {
-            missing = await missingReviewerReviews(target, reviewers, context.abortSignal);
+            const missing = await missingReviewerReviews(target, reviewers, context.abortSignal);
+            if (missing.length) blockedBy = { missing };
           } catch (error) {
             if (context.abortSignal?.aborted || runtime.signal.aborted) throw error;
-            if (task.state.checkpoint.attempt === 0 || task.state.checkpoint.attempt % 10 === 0) onReviewError?.(task.input.url, error);
-            await retryNow();
-            return;
+            blockedBy = { error };
           }
-          if (missing.length) {
-            if (task.state.checkpoint.attempt === 0) onReviewWait?.(task.input.url, missing);
+          if (blockedBy) {
+            // Reviewer history can be unavailable after merge; don't leave a durable gate waiting forever.
+            let merged: boolean;
+            try {
+              merged = (await fetchPullRequest(target, context.abortSignal)).merged;
+            } catch (error) {
+              if (context.abortSignal?.aborted || runtime.signal.aborted) throw error;
+              if (task.state.checkpoint.attempt === 0 || task.state.checkpoint.attempt % 10 === 0) onReviewError?.(task.input.url, error);
+              await retryNow();
+              return;
+            }
+            if (merged) {
+              await releaseGate();
+              return;
+            }
+            if ("error" in blockedBy) {
+              if (task.state.checkpoint.attempt === 0 || task.state.checkpoint.attempt % 10 === 0) onReviewError?.(task.input.url, blockedBy.error);
+            } else if (task.state.checkpoint.attempt === 0) onReviewWait?.(task.input.url, blockedBy.missing);
             await retryNow();
             return;
           }
           if (task.state.checkpoint.attempt > 0) onReviewSatisfied?.(task.input.url);
-          schedule(task.input.url, task.id);
-          await runtime.sleepUntil(runtime.now(), { phase: "dispatch", attempt: 0 }, context);
+          await releaseGate();
         } finally {
           waiter.close();
         }
